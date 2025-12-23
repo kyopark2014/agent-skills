@@ -27,3 +27,4 @@ Agent skills는 효과적으로 context를 관리하기 위하여 discovery, act
 
 [Notion Skills for Claude](https://www.notion.so/notiondevs/Notion-Skills-for-Claude-28da4445d27180c7af1df7d8615723d0)
 
+[Claude Code Skills](https://support.claude.com/en/articles/12512176-what-are-skills)
