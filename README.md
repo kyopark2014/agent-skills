@@ -36,3 +36,5 @@ Agent skills는 효과적으로 context를 관리하기 위하여 discovery, act
 [Claude Code Plugins: Orchestration and Automation](https://github.com/wshobson/agents/tree/main)
 
 [Deep Agents CLI](https://github.com/langchain-ai/deepagents/tree/master/libs/cli)
+
+[Using skills with Deep Agents CLI](https://www.youtube.com/watch?v=Yl_mdp2IiW4)
