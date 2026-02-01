@@ -30,3 +30,5 @@ Agent skills는 효과적으로 context를 관리하기 위하여 discovery, act
 [Claude Code Skills](https://support.claude.com/en/articles/12512176-what-are-skills)
 
 [example skills](https://github.com/anthropics/skills)
+
+[Agent Skills for Strands Agents SDK](https://github.com/aws-samples/sample-strands-agents-agentskills)
