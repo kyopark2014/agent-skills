@@ -34,3 +34,5 @@ Agent skills는 효과적으로 context를 관리하기 위하여 discovery, act
 [Agent Skills for Strands Agents SDK](https://github.com/aws-samples/sample-strands-agents-agentskills)
 
 [Claude Code Plugins: Orchestration and Automation](https://github.com/wshobson/agents/tree/main)
+
+[Deep Agents CLI](https://github.com/langchain-ai/deepagents/tree/master/libs/cli)
