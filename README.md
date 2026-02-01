@@ -21,8 +21,6 @@ Agent skills는 효과적으로 context를 관리하기 위하여 discovery, act
 
 [anthropics / skills](https://github.com/anthropics/skills)
 
-[agentskills](https://github.com/anthropics/skills)
-
 [Agent Skills](https://agentskills.io/home)
 
 [Notion Skills for Claude](https://www.notion.so/notiondevs/Notion-Skills-for-Claude-28da4445d27180c7af1df7d8615723d0)
