@@ -32,3 +32,5 @@ Agent skills는 효과적으로 context를 관리하기 위하여 discovery, act
 [example skills](https://github.com/anthropics/skills)
 
 [Agent Skills for Strands Agents SDK](https://github.com/aws-samples/sample-strands-agents-agentskills)
+
+[Claude Code Plugins: Orchestration and Automation](https://github.com/wshobson/agents/tree/main)
