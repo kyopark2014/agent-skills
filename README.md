@@ -180,7 +180,7 @@ def build_system_prompt(custom_prompt: Optional[str] = None) -> str:
 
 ### Skill의 생성
 
-OpenClaw의 [skill-creator](./application/skills/skill-creater/SKILL.md)는 아래와 같은 skill을 생성할 수 있도록 지원합니다.
+OpenClaw의 [skill-creator](./application/skills/skill-creator/SKILL.md)는 아래와 같은 skill을 생성할 수 있도록 지원합니다.
 
 ```text
 ├── SKILL.md (must required)
