@@ -194,6 +194,9 @@ OpenClaw의 [skill-creator](./application/skills/skill-creator/SKILL.md)를 활�
     └── assets/           - Files used in output (templates, icons, fonts, etc.)
 ```
 
+Skill 생성 동작은 아래 영상을 참조하세요.
+
+<video src="./contents/skill_creator.mp4" controls width="100%"></video>
 
 
 
