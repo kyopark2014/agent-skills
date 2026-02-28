@@ -2,6 +2,11 @@
 
 여기에서는 LangGraph에서 Agent skill을 활용하는 방법에 대해 설명합니다. Agent skill는 폴더로 제공되는 agent에 대한 instructions, scripts, resources입니다. 이를 통해 agent는 적절한 skill을 가져와서 활용할 수 있습니다. Agent는 feedback loop를 통해 질문에 대한 응답의 정확도를 높일 수 있으니 context의 크기가 비약적으로 증가하게 됩니다. Skill을 사용하게 되면 agent가 필요한 context 만을 불러와서 사용하게 됨으로써 agent가 수행하는 task가 더 많은 일을 할 수 있도록 도울 수 있습니다. [anthropics / skills](https://github.com/anthropics/skills)로 구현되었고, [agentskills](https://github.com/anthropics/skills)로 오픈소스화 되었습니다. 상세한 동작 방식은 [Agent Skills](https://agentskills.io/home)에서 확인할 수 있습니다.
 
+아래는 전체적인 architecture입니다. CloudFront - ALB - EC2로 streamlit을 안전하게 제공하고, LangGraph Agent에 MCP와 Skills 기능을 구현합니다. 여기서 Skill은 skill creator를 이용해 tavily-search를 생성하고, pdf skill을 이용해 tavily-search로 검색한 결과를 pdf로 제공할 수 있습니다. MCP를 이용해 aws docuement를 조회하거나 RAG를 검색할 수 있습니다.
+
+<img width="900" alt="image" src="https://github.com/user-attachments/assets/6687f969-9596-4018-9ed7-541b8a6ee9af" />
+
+
 ## Skills
 
 [What are skills?](https://agentskills.io/what-are-skills)와 같이 skills folder에는 SKILL.md, scripts, reference, assets 등을 포함합니다. SKILL.md는 name, description과 같은 metadata를 포함하고 있어서 agent가 수행할 task를 정의할 수 있습니다.
