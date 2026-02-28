@@ -180,7 +180,22 @@ def execute_code(code: str) -> str:
         old_stdout, old_stderr = sys.stdout, sys.stderr
         sys.stdout, sys.stderr = stdout_capture, stderr_capture
 
-        exec_globals = {"__builtins__": __builtins__}
+        import subprocess, json, pathlib, shutil, tempfile, glob, datetime, math, re as _re
+        exec_globals = {
+            "__builtins__": __builtins__,
+            "subprocess": subprocess,
+            "json": json,
+            "os": os,
+            "sys": sys,
+            "io": io,
+            "pathlib": pathlib,
+            "shutil": shutil,
+            "tempfile": tempfile,
+            "glob": glob,
+            "datetime": datetime,
+            "math": math,
+            "re": _re,
+        }
         exec(code, exec_globals)
 
         sys.stdout, sys.stderr = old_stdout, old_stderr

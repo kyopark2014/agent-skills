@@ -131,6 +131,8 @@ try:
     secret = json.loads(get_weather_api_secret['SecretString'])
     #print('secret: ', secret)
     weather_api_key = secret['weather_api_key']
+    if weather_api_key:
+        os.environ["OPENWEATHERMAP_API_KEY"] = weather_api_key
 
 except Exception as e:
     # raise e
