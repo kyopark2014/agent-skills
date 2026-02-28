@@ -17,6 +17,172 @@ my-skill/
 Agent skills는 효과적으로 context를 관리하기 위하여 discovery, activation, execution의 과정을 거칩니다. 정리하면 agent가 관련된 skill의 name과 description을 읽는 discovery를 수행한 후에, SKILL.md에 포함된 instruction을 읽는 activation을 수행합니다. Agent는 instruction을 수행하는데 필요하다면 관련된 파일(referenced file)을 읽거나 포함된 코드(bundled code)를 실행합니다.
 
 
+## LangGraph에서 Skill의 구현
+
+[chat.py](./application/chat.py)의 run_langgraph_agent는 사용자의 요청(query)를 Agnet를 이용해 수행합니다. 여기서는 [app.py](./application/app.py)에서 선택한 MCP 서버의 리스트에서 mcp.json을 생성하여 server_params을 추출하고, MCP tool과 built-in tool을 추출하여 agent를 생성합니다. built-in tool에는 skill을 위한 get_skill_instructions과 execute_code, write_file, read_file 들이 있습니다. 
+
+```python
+async def run_langgraph_agent(query, mcp_servers):
+    mcp_json = mcp_config.load_selected_config(mcp_servers)
+    server_params = langgraph_agent.load_multiple_mcp_server_parameters(mcp_json)
+
+    client = MultiServerMCPClient(server_params)        
+    tools = await client.get_tools()
+
+    builtin_tools = langgraph_agent.get_builtin_tools()
+    tools = tools + builtin_tools
+        
+    app = langgraph_agent.buildChatAgent(tools)
+    config = {
+        "recursion_limit": 50,
+        "configurable": {"thread_id": user_id},
+        "tools": tools,
+        "system_prompt": None
+    }            
+    inputs = {
+        "messages": [HumanMessage(content=query)]
+    }
+            
+    result = ""
+    async for stream in app.astream(inputs, config, stream_mode="messages"):
+        message = stream[0]    
+        for content_item in message.content:
+            if content_item.get('type') == 'text':
+                text_content = content_item.get('text', '')
+                result += text_content
+                                
+    return result
+```
+
+[langgraph_agent.py](./application/langgraph_agent.py)의 get_builtin_tools은 skill과 관련된 tool 들의 리스트를 리턴합니다. 이 tool중에 get_skill_instructions은 등록된 skill에 대한 정보를 리턴합니다.
+
+```python
+def get_builtin_tools():
+    """Return the list of built-in tools for the skill-aware agent."""
+    return [execute_code, write_file, read_file, upload_file_to_s3, get_skill_instructions]
+
+@tool
+def get_skill_instructions(skill_name: str) -> str:
+    """Load the full instructions for a specific skill by name.
+
+    Use this when you need detailed instructions for a task that matches
+    one of the available skills listed in the system prompt.
+
+    Args:
+        skill_name: The name of the skill to load (e.g. 'pdf').
+
+    Returns:
+        The full skill instructions, or an error message if not found.
+    """
+    instructions = skill_manager.get_skill_instructions(skill_name)
+    if instructions:
+        return instructions
+    available = ", ".join(skill_manager.registry.keys())
+    return f"Skill '{skill_name}'을 찾을 수 없습니다. 사용 가능한 skill: {available}"
+```
+
+[langgraph_agent.py](./application/langgraph_agent.py)에서는 Skill을 관리하기 위한 SkillManager를 정의합니다. SkillManager가 initiate될 때에 _discover()는 skill directory에 있는 skill 정보를 가져와서 registry에 등록합니다. 등록된 skill 정보는  available_skills_xml를 통해 prompt에서 활용합니다. 
+
+```python
+@dataclass
+class Skill:
+    name: str
+    description: str
+    instructions: str
+    path: str
+
+class SkillManager:
+    """Discovers, loads and selects Agent Skills following the Anthropic spec."""
+
+    def __init__(self, skills_dir: str = SKILLS_DIR):
+        self.registry: dict[str, Skill] = {}
+        self._discover()
+
+    def _discover(self):
+        """Scan skills directory and load metadata (frontmatter only)."""
+        for entry in os.listdir(self.skills_dir):
+            skill_md = os.path.join(self.skills_dir, entry, "SKILL.md")
+            if os.path.isfile(skill_md):
+                meta, instructions = self._parse_skill_md(skill_md)
+                skill = Skill(
+                    name=meta.get("name", entry),
+                    description=meta.get("description", ""),
+                    instructions=instructions,
+                    path=os.path.join(self.skills_dir, entry),
+                )
+                self.registry[skill.name] = skill
+
+    # ---- prompt generation (progressive disclosure) ----
+    def available_skills_xml(self) -> str:
+        """Generate <available_skills> XML for the system prompt (metadata only)."""
+        if not self.registry:
+            return ""
+        lines = ["<available_skills>"]
+        for s in self.registry.values():
+            lines.append("  <skill>")
+            lines.append(f"    <name>{s.name}</name>")
+            lines.append(f"    <description>{s.description}</description>")
+            lines.append("  </skill>")
+        lines.append("</available_skills>")
+        return "\n".join(lines)
+
+    def get_skill_instructions(self, name: str) -> Optional[str]:
+        """Return full instructions for a skill (loaded on demand)."""
+        skill = self.registry.get(name)
+        return skill.instructions if skill else None
+
+skill_manager = SkillManager()
+```
+
+LangGraph의 agent는 아래와 같이 구현합니다. 여기서 build_system_prompt은 SKILL에 대한 정보인 skills_xml과 SKILL_USAGE_GUIDE를 아래와 같이 포함합니다.
+
+```python
+async def call_model(state: State, config):
+    last_message = state['messages'][-1]
+
+    tools = config.get("configurable", {}).get("tools", None)
+    custom_prompt = config.get("configurable", {}).get("system_prompt", None)
+
+    system = build_system_prompt(custom_prompt)
+
+    chatModel = chat.get_chat()
+    model = chatModel.bind_tools(tools)
+
+    prompt = ChatPromptTemplate.from_messages([
+        ("system", system),
+        MessagesPlaceholder(variable_name="messages"),
+    ])
+    chain = prompt | model
+    response = await chain.ainvoke(messages)
+    return {"messages": [response], "image_url": image_url}
+
+SKILL_USAGE_GUIDE = (
+    "\n## Skill 사용 가이드\n"
+    "위의 <available_skills>에 나열된 skill이 사용자의 요청과 관련될 때:\n"
+    "1. 먼저 get_skill_instructions 도구로 해당 skill의 상세 지침을 로드하세요.\n"
+    "2. 지침에 포함된 코드 패턴을 execute_code 도구로 실행하세요.\n"
+    "3. 생성된 파일은 upload_file_to_s3로 업로드하고 URL을 사용자에게 전달하세요.\n"
+    "4. skill 지침이 없는 일반 질문은 직접 답변하세요.\n"
+)
+def build_system_prompt(custom_prompt: Optional[str] = None) -> str:
+    """Assemble the full system prompt with available skills metadata."""
+    if custom_prompt:
+        base = custom_prompt
+    else:
+        base = BASE_SYSTEM_PROMPT
+
+    skills_xml = skill_manager.available_skills_xml()
+    if skills_xml:
+        return f"{base}\n\n{skills_xml}\n{SKILL_USAGE_GUIDE}"
+    return base
+```
+
+
+
+
+
+
+
 ## Reference
 
 [anthropics / skills](https://github.com/anthropics/skills)
