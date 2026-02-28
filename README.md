@@ -1,6 +1,6 @@
 # Agent Skills
 
-Agent skill는 폴더로 제공되는 agent에 대한 instructions, scripts, resources입니다. 이를 통해 agent는 적절한 skill을 가져와서 활용할 수 있습니다. Agent는 feedback loop를 통해 질문에 대한 응답의 정확도를 높일 수 있으니 context의 크기가 비약적으로 증가하게 됩니다. Skill을 사용하게 되면 agnet가 필요한 context 만을 불러와서 사용하게 됨으로써 agent가 수행하는 task가 더 많은 일을 할 수 있도록 도울 수 있습니다. [anthropics / skills](https://github.com/anthropics/skills)로 구현되었고, [agentskills](https://github.com/anthropics/skills)로 오픈소스화 되었습니다. 상세한 동작 방식은 [Agent Skills](https://agentskills.io/home)에서 확인할 수 있습니다.
+Agent skill는 폴더로 제공되는 agent에 대한 instructions, scripts, resources입니다. 이를 통해 agent는 적절한 skill을 가져와서 활용할 수 있습니다. Agent는 feedback loop를 통해 질문에 대한 응답의 정확도를 높일 수 있으니 context의 크기가 비약적으로 증가하게 됩니다. Skill을 사용하게 되면 agent가 필요한 context 만을 불러와서 사용하게 됨으로써 agent가 수행하는 task가 더 많은 일을 할 수 있도록 도울 수 있습니다. [anthropics / skills](https://github.com/anthropics/skills)로 구현되었고, [agentskills](https://github.com/anthropics/skills)로 오픈소스화 되었습니다. 상세한 동작 방식은 [Agent Skills](https://agentskills.io/home)에서 확인할 수 있습니다.
 
 ## Skills
 
@@ -19,7 +19,7 @@ Agent skills는 효과적으로 context를 관리하기 위하여 discovery, act
 
 ## LangGraph에서 Skill의 구현
 
-[chat.py](./application/chat.py)의 run_langgraph_agent는 사용자의 요청(query)를 Agnet를 이용해 수행합니다. 여기서는 [app.py](./application/app.py)에서 선택한 MCP 서버의 리스트에서 mcp.json을 생성하여 server_params을 추출하고, MCP tool과 built-in tool을 추출하여 agent를 생성합니다. built-in tool에는 skill을 위한 get_skill_instructions과 execute_code, write_file, read_file 들이 있습니다. 
+[chat.py](./application/chat.py)의 run_langgraph_agent는 사용자의 요청(query)를 Agent를 이용해 수행합니다. 여기서는 [app.py](./application/app.py)에서 선택한 MCP 서버의 리스트에서 mcp.json을 생성하여 server_params을 추출하고, MCP tool과 built-in tool을 추출하여 agent를 생성합니다. built-in tool에는 skill을 위한 get_skill_instructions과 execute_code, write_file, read_file 들이 있습니다. 
 
 ```python
 async def run_langgraph_agent(query, mcp_servers):
