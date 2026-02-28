@@ -324,6 +324,23 @@ pip install -r requirements.txt
 streamlit run application/app.py
 ```
 
+## 실행 결과
+
+아래와 같이 SKILL 생성을 요청합니다.
+
+<img width="700" alt="image" src="https://github.com/user-attachments/assets/f12b214c-b7c2-407a-84b9-db9dae7fee77" />
+
+skill-creater가 아래와 같이 tavily-search라는 skill을 생성합니다.
+
+<img width="700" alt="image" src="https://github.com/user-attachments/assets/68c680a4-833a-4ab3-85b8-204cc1976106" />
+
+아래와 같이 skill이 생성되었습니다.
+
+<img width="700" alt="image" src="https://github.com/user-attachments/assets/bb0f3034-dea2-4716-a53a-c2916c17308d" />
+
+이제 아래와 같이 tavily-search를 이용해 실행할 수 있습니다.
+
+<img width="700" alt="image" src="https://github.com/user-attachments/assets/bf6e12b0-658a-4360-b30b-82e19a8a034a" />
 
 
 
