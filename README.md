@@ -196,7 +196,7 @@ OpenClaw의 [skill-creator](./application/skills/skill-creator/SKILL.md)를 활�
 
 Skill 생성 동작은 아래 영상을 참조하세요.
 
-<video src="./contents/skill_creator.mp4" controls width="100%"></video>
+https://raw.githubusercontent.com/kyopark2014/agent-skills/main/contents/skill_creator.mp4
 
 
 
