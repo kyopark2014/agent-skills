@@ -152,7 +152,7 @@ try:
 
         if tavily_key:
             tavily_api_wrapper = TavilySearchAPIWrapper(tavily_api_key=tavily_key)
-            #     os.environ["TAVILY_API_KEY"] = tavily_key
+            os.environ["TAVILY_API_KEY"] = tavily_key
 
         else:
             logger.info(f"tavily_key is required.")
