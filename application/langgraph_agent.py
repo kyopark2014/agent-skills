@@ -3,8 +3,6 @@ import sys
 import os
 import io
 import traceback
-import uuid
-import re
 import yaml
 import chat
 import utils
