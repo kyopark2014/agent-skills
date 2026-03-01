@@ -153,6 +153,10 @@ with st.sidebar:
         ), index=4
     )
 
+    # skill checkbox
+    select_skillMode = st.checkbox('Skill Mode', value=True)
+    skillMode = 'Enable' if select_skillMode else 'Disable'    
+
     # debug checkbox
     select_debugMode = st.checkbox('Debug Mode', value=True)
     debugMode = 'Enable' if select_debugMode else 'Disable'
@@ -179,7 +183,7 @@ with st.sidebar:
         st.subheader("📋 문서 업로드")
         uploaded_file = st.file_uploader("RAG를 위한 파일을 선택합니다.", type=["pdf", "txt", "py", "md", "csv", "json"], key=chat.fileId)
 
-    chat.update(modelName, debugMode, reasoningMode)    
+    chat.update(modelName, debugMode, reasoningMode, skillMode)    
 
     st.success(f"Connected to {modelName}", icon="💚")
     clear_button = st.button("대화 초기화", key="clear")

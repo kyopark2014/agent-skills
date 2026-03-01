@@ -90,6 +90,7 @@ models = info.get_model_info(model_name)
 number_of_models = len(models)
 model_id = models[0]["model_id"]
 debug_mode = "Enable"
+skill_mode = "Disable"
 
 aws_access_key = config.get('aws', {}).get('access_key_id')
 aws_secret_key = config.get('aws', {}).get('secret_access_key')
@@ -98,9 +99,9 @@ aws_session_token = config.get('aws', {}).get('session_token')
 reasoning_mode = 'Disable'
 user_id = "mcp"
 
-def update(modelName, debugMode, reasoningMode):    
+def update(modelName, debugMode, reasoningMode, skillMode):    
     global model_name, model_id, model_type, debug_mode, reasoning_mode
-    global models, user_id
+    global models, user_id, skill_mode
 
     if model_name != modelName:
         model_name = modelName
@@ -117,6 +118,10 @@ def update(modelName, debugMode, reasoningMode):
     if reasoning_mode != reasoningMode:
         reasoning_mode = reasoningMode
         logger.info(f"reasoning_mode: {reasoning_mode}")    
+
+    if skill_mode != skillMode:
+        skill_mode = skillMode
+        logger.info(f"skill_mode: {skill_mode}")
 
     # logger.info(f"mcp.env updated: {mcp_env}")
 
@@ -1584,8 +1589,15 @@ async def run_langgraph_agent(query, mcp_servers, history_mode, containers):
 
         builtin_tools = langgraph_agent.get_builtin_tools()
         logger.info(f"builtin_tools: {builtin_tools}")
-        tools = tools + builtin_tools
-        
+
+        if skill_mode == "Enable":        
+            tool_names = {tool.name for tool in tools}
+            for bt in builtin_tools:
+                if bt.name not in tool_names:
+                    tools.append(bt)
+                else:
+                    logger.info(f"builtin_tool {bt.name} already in tools")
+            
         if tools is None:
             logger.error("tools is None - MCP client failed to get tools")
             tools = []
