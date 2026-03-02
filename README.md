@@ -327,6 +327,38 @@ pip install -r requirements.txt
 streamlit run application/app.py
 ```
 
+
+## Gmail 연동
+
+먼저 json 형태의 credential을 다운받아야 합니다. 아래와 같은 작업을 수행합니다.
+
+1. [Google Cloud Console](https://console.cloud.google.com)에서 OAuth 클라이언트를 만들기 위해 새 프로젝트 생성 (또는 기존 프로젝트 선택)을 수행합니다.
+
+2. API 활성화를 위해 Gmail API, Google Calendar API, Google Drive API 을 설정합니다.
+
+
+3. OAuth 동의 화면 구성은 "User Type: External"로 하고, 테스트 사용자에 본인 이메일 추가합니다.
+   
+4. OAuth 클라이언트 ID를 생성합니다.
+
+- Application type: Desktop app
+
+- 이름: "OpenClaw"
+
+5. client_secret_xxx.json를 다운로드합니다.
+
+브라우저가 있으면 아래와 같이 수행합니다.
+
+```text
+gog auth credentials ~/Downloads/client_secret_xxx.json
+gog auth add 이메일@gmail.com
+```
+
+EC2와 같이 브라우저가 없는 경우에 dashboard에 접속해서 chat에서 "gmail을 등록해주세요"라고 입력후 주어진 가이드에 따라 수행합니다. "gog auth add"를 수행시 localhost로 수행되는 url을 받아서 client에서 수행하여야 하므로 dashboard의 chat에서 수행하여야 합니다.
+
+
+
+
 ## 실행 결과
 
 아래와 같이 SKILL 생성을 요청합니다.
