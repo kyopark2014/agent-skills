@@ -409,10 +409,7 @@ npx playwright install --with-deps chromium
 
 Web Fetch로 아래와 같이 html을 markdown으로 변환하여 활용합니다.
 
-<img width="800" alt="image" src="https://github.com/user-attachments/assets/3424a32f-7d8d-481d-ab18-03fa425b46a1" />
-
-
-
+<img width="700" alt="image" src="https://github.com/user-attachments/assets/56dc77ea-4cb8-4317-af00-6a21ce5be9d0" />
 
 
 ## 실행 결과
