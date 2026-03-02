@@ -80,6 +80,7 @@ with st.sidebar:
             "terminal (MAC)", 
             "terminal (linux)", 
             "filesystem", 
+            "web_fetch",
             "사용자 설정"
         ]
         mcp_selections = {}

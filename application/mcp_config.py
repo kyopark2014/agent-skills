@@ -161,6 +161,16 @@ def load_config(mcp_type):
                 }
             }
         }    
+
+    elif mcp_type == "web_fetch":
+        return {
+            "mcpServers": {
+                "web_fetch": {
+                    "command": "npx",
+                    "args": ["-y", "mcp-server-fetch-typescript"]
+                }
+            }
+        }
     
     elif mcp_type == "사용자 설정":
         return mcp_user_config

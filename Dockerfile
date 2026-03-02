@@ -11,6 +11,10 @@ RUN apt-get update && apt-get install -y curl && \
 # Install MCP packages globally
 RUN npm install -g @modelcontextprotocol/server-filesystem
 
+# Install mcp-server-fetch-typescript and Playwright browsers
+RUN npx -y mcp-server-fetch-typescript --version 2>/dev/null || true && \
+    npx playwright install --with-deps chromium
+
 # Install terminal-control-mcp (Python-based terminal MCP server)
 RUN apt-get update && apt-get install -y tmux && apt-get clean && rm -rf /var/lib/apt/lists/*
 RUN pip install terminal-control-mcp
