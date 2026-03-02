@@ -688,6 +688,14 @@ def create_secrets() -> Dict[str, str]:
                 "project_name": project_name,
                 "tavily_api_key": ""
             }
+        },
+        "notion": {
+            "name": f"notionapikey-{project_name}",
+            "description": "secret for notion api key",
+            "secret_value": {
+                "project_name": project_name,
+                "notion_api_key": ""
+            }
         }
     }
     

@@ -149,6 +149,27 @@ skill_manager = SkillManager()
 #  2. Built-in Tools – code execution, file I/O, S3 upload
 # ═══════════════════════════════════════════════════════════════════
 
+import subprocess as _subprocess, pathlib as _pathlib, shutil as _shutil
+import tempfile as _tempfile, glob as _glob, datetime as _datetime
+import math as _math, re as _re, requests as _requests
+
+_exec_globals = {
+    "__builtins__": __builtins__,
+    "subprocess": _subprocess,
+    "json": json,
+    "os": os,
+    "sys": sys,
+    "io": io,
+    "pathlib": _pathlib,
+    "shutil": _shutil,
+    "tempfile": _tempfile,
+    "glob": _glob,
+    "datetime": _datetime,
+    "math": _math,
+    "re": _re,
+    "requests": _requests,
+}
+
 @tool
 def execute_code(code: str) -> str:
     """Execute Python code and return stdout/stderr output.
@@ -156,8 +177,9 @@ def execute_code(code: str) -> str:
     Use this tool to run Python code for tasks such as generating PDFs,
     processing data, or performing computations. The execution environment
     has access to common libraries: reportlab, pypdf, pdfplumber, pandas,
-    json, csv, os, etc.
+    json, csv, os, requests, etc.
 
+    Variables and imports from previous calls persist across invocations.
     Generated files should be saved to the 'artifacts/' directory.
 
     Args:
@@ -178,23 +200,7 @@ def execute_code(code: str) -> str:
         old_stdout, old_stderr = sys.stdout, sys.stderr
         sys.stdout, sys.stderr = stdout_capture, stderr_capture
 
-        import subprocess, json, pathlib, shutil, tempfile, glob, datetime, math, re as _re
-        exec_globals = {
-            "__builtins__": __builtins__,
-            "subprocess": subprocess,
-            "json": json,
-            "os": os,
-            "sys": sys,
-            "io": io,
-            "pathlib": pathlib,
-            "shutil": shutil,
-            "tempfile": tempfile,
-            "glob": glob,
-            "datetime": datetime,
-            "math": math,
-            "re": _re,
-        }
-        exec(code, exec_globals)
+        exec(code, _exec_globals)
 
         sys.stdout, sys.stderr = old_stdout, old_stderr
         os.chdir(old_cwd)

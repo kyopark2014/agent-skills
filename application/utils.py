@@ -163,6 +163,25 @@ except Exception as e:
     # raise e
     pass
 
+# api key to use Notion
+notion_api_key = ""
+try:
+    get_notion_api_secret = secretsmanager.get_secret_value(
+        SecretId=f"notionapikey-{projectName}"
+    )
+    secret = json.loads(get_notion_api_secret['SecretString'])
+
+    if "notion_api_key" in secret:
+        notion_api_key = secret['notion_api_key']
+
+        if notion_api_key:
+            os.environ["NOTION_API_KEY"] = notion_api_key
+        else:
+            logger.info(f"notion_api_key is required.")
+except Exception as e:
+    logger.info(f"Notion credential is required: {e}")
+    pass
+
 def sanitize_data_source_name(name):
     """
     Sanitize a name to comply with AWS Bedrock data source name pattern:

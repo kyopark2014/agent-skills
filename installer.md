@@ -69,6 +69,7 @@ custom_header_value = f"{project_name}_12dab15e4s31"
 ### 3. Secrets Manager
 - `openweathermap-{project_name}`: Weather API 키
 - `tavilyapikey-{project_name}`: Tavily API 키
+- `notionapikey-{project_name}`: Notion API 키
 
 ### 4. OpenSearch Serverless
 - **컬렉션**: Vector 검색용 서버리스 컬렉션
