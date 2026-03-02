@@ -437,7 +437,8 @@ python telegram_bot.py
 ```
 
 이때의 결과는 아래와 같습니다. 
-<img width="400" alt="image" src="https://github.com/user-attachments/assets/8d579ef4-f7d5-4938-a864-f5a3ae4ab41f" />
+
+<img width="500" alt="image" src="https://github.com/user-attachments/assets/8d579ef4-f7d5-4938-a864-f5a3ae4ab41f" />
 
 
 
