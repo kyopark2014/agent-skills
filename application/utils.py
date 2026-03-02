@@ -182,6 +182,25 @@ except Exception as e:
     logger.info(f"Notion credential is required: {e}")
     pass
 
+# api key to use Telegram
+telegram_api_key = ""
+try:
+    get_telegram_api_secret = secretsmanager.get_secret_value(
+        SecretId=f"telegramapikey-{projectName}"
+    )
+    secret = json.loads(get_telegram_api_secret['SecretString'])
+
+    if "telegram_api_key" in secret:
+        telegram_api_key = secret['telegram_api_key']
+
+        if telegram_api_key:
+            os.environ["TELEGRAM_API_KEY"] = telegram_api_key
+        else:
+            logger.info(f"telegram_api_key is required.")
+except Exception as e:
+    logger.info(f"Telegram credential is required: {e}")
+    pass
+
 def sanitize_data_source_name(name):
     """
     Sanitize a name to comply with AWS Bedrock data source name pattern:

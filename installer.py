@@ -696,6 +696,14 @@ def create_secrets() -> Dict[str, str]:
                 "project_name": project_name,
                 "notion_api_key": ""
             }
+        },
+        "telegram": {
+            "name": f"telegramapikey-{project_name}",
+            "description": "secret for telegram api key",
+            "secret_value": {
+                "project_name": project_name,
+                "telegram_api_key": ""
+            }
         }
     }
     
@@ -738,6 +746,10 @@ def create_secrets() -> Dict[str, str]:
                     logger.info(f"Enter credential of {secret_config['name']} (Notion API Key):")
                     api_key = input(f"Creating {secret_config['name']} - Notion API Key: ").strip()
                     secret_config["secret_value"]["notion_api_key"] = api_key
+                elif key == "telegram":
+                    logger.info(f"Enter credential of {secret_config['name']} (Telegram Bot API Key):")
+                    api_key = input(f"Creating {secret_config['name']} - Telegram Bot API Key: ").strip()
+                    secret_config["secret_value"]["telegram_api_key"] = api_key
                 
                 # Create the secret
                 try:

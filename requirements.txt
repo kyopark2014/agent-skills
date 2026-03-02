@@ -9,6 +9,7 @@ langchain_experimental
 mcp
 langchain-mcp-adapters
 requests
+python-telegram-bot
 uv
 graphviz
 rich
