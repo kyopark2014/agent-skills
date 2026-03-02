@@ -1472,6 +1472,9 @@ def get_tool_info(tool_name, tool_content):
         logger.info(f"content: {content}")
         logger.info(f"tool_references: {tool_references}")
 
+    elif tool_name in ("memory_search", "memory_get"):
+        pass
+
     else:        
         try:
             if isinstance(tool_content, dict):
@@ -1664,7 +1667,7 @@ async def run_langgraph_agent(query, mcp_servers, history_mode, containers):
                             update_streaming_result(containers, result, "markdown")
 
                         elif content_item.get('type') == 'tool_use':
-                            logger.info(f"content_item: {content_item}")      
+                            # logger.info(f"content_item: {content_item}")      
                             if 'id' in content_item and 'name' in content_item:
                                 toolUseId = content_item.get('id', '')
                                 tool_name = content_item.get('name', '')
@@ -1674,15 +1677,15 @@ async def run_langgraph_agent(query, mcp_servers, history_mode, containers):
                                                                     
                             if 'partial_json' in content_item:
                                 partial_json = content_item.get('partial_json', '')
-                                logger.info(f"partial_json: {partial_json}")
+                                #logger.info(f"partial_json: {partial_json}")
                                 
                                 if toolUseId not in tool_input_list:
                                     tool_input_list[toolUseId] = ""                                
                                 tool_input_list[toolUseId] += partial_json
                                 input = tool_input_list[toolUseId]
-                                logger.info(f"input: {input}")
+                                # logger.info(f"input: {input}")
 
-                                logger.info(f"tool_name: {tool_name}, input: {input}, toolUseId: {toolUseId}")
+                                # logger.info(f"tool_name: {tool_name}, input: {input}, toolUseId: {toolUseId}")
                                 update_streaming_result(containers, f"Tool: {tool_name}, Input: {input}", "info")
                         
         elif isinstance(stream[0], ToolMessage):

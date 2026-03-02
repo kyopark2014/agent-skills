@@ -2,3 +2,5 @@ __pycache__
 
 # configuration
 config.json
+MEMORY.md
+memory/

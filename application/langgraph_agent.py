@@ -2,10 +2,13 @@ import logging
 import sys
 import os
 import io
+import json
 import traceback
 import yaml
 import chat
 import utils
+
+from pathlib import Path
 
 from dataclasses import dataclass, field
 from typing import Literal, Optional
@@ -236,20 +239,6 @@ def write_file(filepath: str, content: str) -> str:
             f.write(content)
 
         result_msg = f"파일이 저장되었습니다: {filepath}"
-
-        s3_bucket = config.get("s3_bucket")
-        if s3_bucket and sharing_url:
-            try:
-                import boto3
-                from urllib import parse as url_parse
-                s3 = boto3.client("s3", region_name=config.get("region", "us-west-2"))
-                content_type = utils.get_contents_type(filepath)
-                s3.put_object(Bucket=s3_bucket, Key=filepath, Body=content, ContentType=content_type)
-                url = f"{sharing_url}/{url_parse.quote(filepath)}"
-                result_msg += f"\nURL: {url}"
-            except Exception as ue:
-                logger.warning(f"S3 upload failed: {ue}")
-
         return result_msg
     except Exception as e:
         return f"파일 저장 실패: {str(e)}"
@@ -313,6 +302,120 @@ def upload_file_to_s3(filepath: str) -> str:
 
 
 @tool
+def memory_search(query: str, max_results: int = 5, min_score: float = 0.0) -> str:
+    """Search across memory files (MEMORY.md and memory/*.md) for relevant information.
+
+    Performs keyword-based search over all memory files and returns matching snippets
+    ranked by relevance score.
+
+    Args:
+        query: Search query string.
+        max_results: Maximum number of results to return (default: 5).
+        min_score: Minimum relevance score threshold 0.0-1.0 (default: 0.0).
+
+    Returns:
+        JSON array of matching snippets with text, path, from (line), lines, and score.
+    """
+    import re as _re
+    logger.info(f"###### memory_search: {query} ######")
+
+    memory_root = Path(WORKING_DIR)
+    memory_dir = memory_root / "memory"
+
+    target_files = []
+    memory_md = memory_root / "MEMORY.md"
+    if memory_md.exists():
+        target_files.append(memory_md)
+    if memory_dir.exists():
+        target_files.extend(sorted(memory_dir.glob("*.md"), reverse=True))
+
+    if not target_files:
+        return json.dumps([], ensure_ascii=False)
+
+    query_lower = query.lower()
+    query_tokens = [t for t in _re.split(r'\s+', query_lower) if len(t) >= 2]
+
+    results = []
+    for fpath in target_files:
+        try:
+            content = fpath.read_text(encoding="utf-8")
+        except Exception:
+            continue
+
+        lines = content.split("\n")
+        content_lower = content.lower()
+
+        if not any(tok in content_lower for tok in query_tokens):
+            continue
+
+        window_size = 5
+        for i in range(0, len(lines), window_size):
+            chunk_lines = lines[i:i + window_size]
+            chunk_text = "\n".join(chunk_lines)
+            chunk_lower = chunk_text.lower()
+
+            matched_tokens = sum(1 for tok in query_tokens if tok in chunk_lower)
+            if matched_tokens == 0:
+                continue
+
+            score = matched_tokens / len(query_tokens) if query_tokens else 0.0
+
+            if score >= min_score:
+                rel_path = str(fpath.relative_to(memory_root))
+                results.append({
+                    "text": chunk_text.strip(),
+                    "path": rel_path,
+                    "from": i + 1,
+                    "lines": len(chunk_lines),
+                    "score": round(score, 3),
+                })
+
+    results.sort(key=lambda x: x["score"], reverse=True)
+    results = results[:max_results]
+
+    return json.dumps(results, indent=2, ensure_ascii=False)
+
+
+@tool
+def memory_get(path: str, from_line: int = 0, lines: int = 0) -> str:
+    """Read a specific memory file (MEMORY.md or memory/*.md).
+
+    Use after memory_search to get full context, or when you know the exact file path.
+
+    Args:
+        path: Workspace-relative path (e.g. "MEMORY.md", "memory/2026-03-02.md").
+        from_line: Starting line number, 1-indexed (0 = read from beginning).
+        lines: Number of lines to read (0 = read entire file).
+
+    Returns:
+        JSON with 'text' (file content) and 'path'. Returns empty text if file doesn't exist.
+    """
+    logger.info(f"###### memory_get: {path} ######")
+
+    full_path = Path(WORKING_DIR) / path
+
+    if not full_path.exists():
+        return json.dumps({"text": "", "path": path}, ensure_ascii=False)
+
+    try:
+        content = full_path.read_text(encoding="utf-8")
+
+        if from_line > 0 or lines > 0:
+            all_lines = content.split("\n")
+            start = max(0, from_line - 1)
+            if lines > 0:
+                end = start + lines
+                content = "\n".join(all_lines[start:end])
+            else:
+                content = "\n".join(all_lines[start:])
+
+        return json.dumps({"text": content, "path": path}, ensure_ascii=False)
+
+    except Exception as e:
+        return json.dumps({"text": f"Error reading file: {e}", "path": path}, ensure_ascii=False)
+
+
+@tool
 def get_skill_instructions(skill_name: str) -> str:
     """Load the full instructions for a specific skill by name.
 
@@ -335,7 +438,7 @@ def get_skill_instructions(skill_name: str) -> str:
 
 def get_builtin_tools():
     """Return the list of built-in tools for the skill-aware agent."""
-    return [execute_code, write_file, read_file, upload_file_to_s3, get_skill_instructions]
+    return [execute_code, write_file, read_file, upload_file_to_s3, memory_search, memory_get, get_skill_instructions]
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -357,7 +460,19 @@ BASE_SYSTEM_PROMPT = (
     "2. 요청에 맞는 skill이 있으면 get_skill_instructions 도구로 상세 지침을 로드한다\n"
     "3. skill 지침에 따라 execute_code, write_file 등의 도구를 사용하여 작업을 수행한다\n"
     "4. 결과 파일이 있으면 upload_file_to_s3로 업로드하여 URL을 제공한다\n"
-    "5. 최종 결과를 사용자에게 전달한다\n"
+    "5. 최종 결과를 사용자에게 전달한다\n\n"
+    "## 메모리 관리\n"
+    "사용자에 대한 정보를 기억하거나, 과거 대화/결정/선호를 찾을 때는 반드시 메모리 도구를 사용하세요:\n"
+    "- memory_search: 메모리 파일(MEMORY.md, memory/*.md)에서 키워드 검색\n"
+    "- memory_get: 특정 메모리 파일 읽기 (예: memory_get(path='MEMORY.md'))\n"
+    "- write_file: 메모리 파일에 정보 저장 (execute_code 대신 write_file 사용)\n\n"
+    "정보를 기억해달라는 요청 시:\n"
+    "1. memory_get으로 MEMORY.md와 오늘의 일일 로그를 읽는다\n"
+    "2. write_file로 MEMORY.md(장기 메모리)와 memory/YYYY-MM-DD.md(일일 로그) 모두에 저장한다\n"
+    "3. execute_code로 파일을 직접 쓰지 말고, 반드시 write_file 도구를 사용한다\n\n"
+    "과거 정보를 질문받을 때:\n"
+    "1. 먼저 memory_search로 관련 정보를 검색한다\n"
+    "2. memory_get으로 상세 내용을 확인한 뒤 답변한다\n"
 )
 
 SKILL_USAGE_GUIDE = (
