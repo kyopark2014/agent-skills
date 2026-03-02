@@ -35,20 +35,11 @@ def load_config():
 
 def create_bedrock_client(config):
     region = config.get('region', 'us-west-2')
-    aws_access_key = config.get('aws', {}).get('access_key_id')
-    aws_secret_key = config.get('aws', {}).get('secret_access_key')
-    aws_session_token = config.get('aws', {}).get('session_token')
 
-    if aws_access_key and aws_secret_key:
-        return boto3.client(
-            "bedrock-agent-runtime",
-            region_name=region,
-            aws_access_key_id=aws_access_key,
-            aws_secret_access_key=aws_secret_key,
-            aws_session_token=aws_session_token,
-        )
-    return boto3.client("bedrock-agent-runtime", region_name=region)
-
+    return boto3.client(
+        "bedrock-agent-runtime",
+        region_name=region
+    )
 
 def update_knowledge_base_id(config):
     """Look up knowledge base ID by project name when the current ID is stale."""
