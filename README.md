@@ -1,6 +1,6 @@
 # Agent Skills
 
-Agent는 MCP뿐 아니라 [skill](https://github.com/anthropics/skills)을 활용하여 다양한 기능을 편리하게 구현할 수 있습니다. 여기에서는 [LangGraph](https://www.langchain.com/langgraph)에서 Agent skill을 활용하는 방법에 대해 설명합니다. 아래는 전체적인 architecture는 아래와 같습니다. CloudFront - ALB - EC2로 streamlit을 안전하게 제공하고, LangGraph Agent에 MCP와 Skills 기능을 구현합니다. 여기서 Skill은 skill creator를 이용해 tavily-search를 생성하고, pdf skill을 이용해 tavily-search로 검색한 결과를 pdf로 제공할 수 있습니다. MCP를 이용해 aws docuement를 조회하거나 RAG를 검색할 수 있습니다.
+Agent는 MCP뿐 아니라 [skill](https://github.com/anthropics/skills)을 활용하여 다양한 기능을 편리하게 구현할 수 있습니다. 여기에서는 [LangGraph](https://www.langchain.com/langgraph)에서 Agent skill을 활용하는 방법에 대해 설명합니다. 전체적인 architecture는 아래와 같습니다. CloudFront - ALB - EC2로 streamlit을 안전하게 제공하고, LangGraph Agent에 MCP와 Skills 기능을 구현합니다. 여기서 Skill은 skill creator를 이용해 tavily-search를 생성하고, pdf skill을 이용해 tavily-search로 검색한 결과를 pdf로 제공할 수 있습니다. MCP를 이용해 aws docuement를 조회하거나 RAG를 검색할 수 있습니다.
 
 <img width="900" alt="image" src="https://github.com/user-attachments/assets/6687f969-9596-4018-9ed7-541b8a6ee9af" />
 
