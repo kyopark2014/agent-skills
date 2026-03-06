@@ -160,7 +160,17 @@ def load_config(mcp_type):
                     ]
                 }
             }
-        }    
+        }
+        
+    elif mcp_type == "drawio":
+        return {
+            "mcpServers": {
+                "drawio": {
+                "command": "npx",
+                "args": ["@drawio/mcp"]
+                }
+            }
+        }
 
     elif mcp_type == "web_fetch":
         return {
