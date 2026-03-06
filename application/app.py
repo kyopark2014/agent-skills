@@ -7,6 +7,7 @@ import sys
 import os
 import asyncio
 import qa_agent
+
 logging.basicConfig(
     level=logging.INFO,  # Default to INFO level
     format='%(filename)s:%(lineno)d | %(message)s',
@@ -80,6 +81,7 @@ with st.sidebar:
             "terminal (linux)", 
             "filesystem", 
             "web_fetch",
+            "drawio",
             "사용자 설정"
         ]
         mcp_selections = {}
@@ -134,7 +136,7 @@ with st.sidebar:
     modelName = st.selectbox(
         '🖊️ 사용 모델을 선택하세요',
         (
-            "Claude 4.6 Claude",
+            "Claude 4.6 Sonnet",
             "Claude 4.6 Opus",
             "Claude 4.5 Haiku",
             "Claude 4.5 Sonnet",
@@ -152,7 +154,7 @@ with st.sidebar:
             "Nova Pro", 
             "Nova Lite", 
             "Nova Micro",       
-        ), index=2
+        ), index=0
     )
 
     # skill checkbox
@@ -348,7 +350,7 @@ if prompt := st.chat_input("메시지를 입력하세요."):
                 logger.info(f"url: {url}")
                 file_name = url[url.rfind('/')+1:]
                 st.image(url, caption=file_name, use_container_width=True)
-
+        
         elif mode == "QA Agent":
             with st.status("thinking...", expanded=True, state="running") as status:
                 containers = {
