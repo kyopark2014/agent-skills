@@ -200,7 +200,7 @@ def get_chat(extended_thinking):
     if model_type == 'claude':
         maxOutputTokens = get_max_output_tokens(modelId)
     else:
-        maxOutputTokens = 5120 # 5k
+        maxOutputTokens = 5120  # 5k
     number_of_models = len(models)
 
     logger.info(f"LLM: {selected_chat}, bedrock_region: {bedrock_region}, modelId: {modelId}, model_type: {model_type}")
