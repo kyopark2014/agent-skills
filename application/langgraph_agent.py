@@ -168,6 +168,9 @@ _exec_globals = {
     "math": _math,
     "re": _re,
     "requests": _requests,
+    "WORKING_DIR": WORKING_DIR,
+    "SKILLS_DIR": SKILLS_DIR,
+    "ARTIFACTS_DIR": ARTIFACTS_DIR,
 }
 
 @tool
@@ -181,6 +184,12 @@ def execute_code(code: str) -> str:
 
     Variables and imports from previous calls persist across invocations.
     Generated files should be saved to the 'artifacts/' directory.
+
+    Path variables (pre-defined, do NOT redefine):
+    - WORKING_DIR: absolute path to application directory
+    - SKILLS_DIR: absolute path to skills directory (WORKING_DIR/skills)
+    Use directly: script = os.path.join(SKILLS_DIR, 'drawio/scripts/find_aws_icon.py')
+    Never use os.environ.get('SKILLS_DIR', ...) — it overwrites the correct path.
 
     Args:
         code: Python code to execute.
@@ -227,20 +236,30 @@ def execute_code(code: str) -> str:
 
 
 @tool
-def write_file(filepath: str, content: str) -> str:
+def write_file(filepath: str, content: str = "") -> str:
     """Write text content to a file.
 
+    CRITICAL: content는 반드시 전달해야 합니다. content 없이 호출하면 실패합니다.
+    Never call without content. Both filepath and content are required in a single call.
+
     Args:
-        filepath: Path relative to the working directory (e.g. 'artifacts/report.md').
-        content: The text content to write.
+        filepath: Absolute path or path relative to WORKING_DIR.
+        content: The text content to write. REQUIRED - 절대 생략 불가. Must include full file content.
 
     Returns:
         A success or failure message.
     """
+    if not content:
+        return (
+            "오류: content 파라미터가 필요합니다. "
+            "write_file(filepath='경로', content='저장할_내용') 형태로 content에 저장할 전체 내용을 반드시 전달하세요."
+        )
     logger.info(f"###### write_file: {filepath} ######")
     try:
-        full_path = os.path.join(WORKING_DIR, filepath)
-        os.makedirs(os.path.dirname(full_path), exist_ok=True)
+        full_path = filepath if os.path.isabs(filepath) else os.path.join(WORKING_DIR, filepath)
+        parent = os.path.dirname(full_path)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
         with open(full_path, "w", encoding="utf-8") as f:
             f.write(content)
 
@@ -255,14 +274,14 @@ def read_file(filepath: str) -> str:
     """Read the contents of a local file.
 
     Args:
-        filepath: Path relative to the working directory.
+        filepath: Absolute path or path relative to WORKING_DIR.
 
     Returns:
         The file contents as text, or an error message.
     """
     logger.info(f"###### read_file: {filepath} ######")
     try:
-        full_path = os.path.join(WORKING_DIR, filepath)
+        full_path = filepath if os.path.isabs(filepath) else os.path.join(WORKING_DIR, filepath)
         with open(full_path, "r", encoding="utf-8") as f:
             return f.read()
     except Exception as e:
@@ -471,7 +490,7 @@ BASE_SYSTEM_PROMPT = (
     "사용자에 대한 정보를 기억하거나, 과거 대화/결정/선호를 찾을 때는 반드시 메모리 도구를 사용하세요:\n"
     "- memory_search: 메모리 파일(MEMORY.md, memory/*.md)에서 키워드 검색\n"
     "- memory_get: 특정 메모리 파일 읽기 (예: memory_get(path='MEMORY.md'))\n"
-    "- write_file: 메모리 파일에 정보 저장 (execute_code 대신 write_file 사용)\n\n"
+    "- write_file: filepath와 content를 반드시 함께 전달. content 생략 시 실패. 절대 content 없이 호출하지 말 것\n\n"
     "정보를 기억해달라는 요청 시:\n"
     "1. memory_get으로 MEMORY.md와 오늘의 일일 로그를 읽는다\n"
     "2. write_file로 MEMORY.md(장기 메모리)와 memory/YYYY-MM-DD.md(일일 로그) 모두에 저장한다\n"
@@ -497,10 +516,19 @@ def build_system_prompt(custom_prompt: Optional[str] = None) -> str:
     else:
         base = BASE_SYSTEM_PROMPT
 
+    path_info = (
+        f"\n## 경로 (write_file, read_file 시 절대 경로 사용 권장)\n"
+        f"- WORKING_DIR: {WORKING_DIR}\n"
+        f"- ARTIFACTS_DIR: {ARTIFACTS_DIR}\n"
+        f"예: write_file(filepath='{os.path.join(ARTIFACTS_DIR, 'report.drawio')}', content='...')\n\n"
+        f"## write_file 규칙 (필수)\n"
+        f"write_file 호출 시 filepath와 content를 반드시 함께 전달하세요. content 없이 호출하면 오류가 발생합니다.\n"
+        f"다이어그램(.drawio) 등 대용량 파일도 content에 전체 내용을 담아 한 번에 전달해야 합니다.\n"
+    )
     skills_xml = skill_manager.available_skills_xml()
     if skills_xml:
-        return f"{base}\n\n{skills_xml}\n{SKILL_USAGE_GUIDE}"
-    return base
+        return f"{base}\n{path_info}\n\n{skills_xml}\n{SKILL_USAGE_GUIDE}"
+    return f"{base}\n{path_info}"
 
 
 # ═══════════════════════════════════════════════════════════════════
