@@ -101,16 +101,17 @@ class SkillManager:
         return frontmatter, body
 
     # ---- prompt generation (progressive disclosure) ----
-    def available_skills_xml(self) -> str:
+    def available_skills_xml(self, skills: list[Skill]) -> str:
         """Generate <available_skills> XML for the system prompt (metadata only)."""
         if not self.registry:
             return ""
         lines = ["<available_skills>"]
         for s in self.registry.values():
-            lines.append("  <skill>")
-            lines.append(f"    <name>{s.name}</name>")
-            lines.append(f"    <description>{s.description}</description>")
-            lines.append("  </skill>")
+            if s.name in skills:
+                lines.append("  <skill>")
+                lines.append(f"    <name>{s.name}</name>")
+                lines.append(f"    <description>{s.description}</description>")
+                lines.append("  </skill>")
         lines.append("</available_skills>")
         return "\n".join(lines)
 
@@ -144,6 +145,17 @@ class SkillManager:
 # global singleton
 skill_manager = SkillManager()
 
+def available_skills_list():
+    registry = skill_manager.registry
+    
+    if not registry:
+        return []
+    
+    skill_list = []
+    for s in registry.values():
+        skill_list.append({"name": s.name, "description": s.description})
+        
+    return skill_list
 
 # ═══════════════════════════════════════════════════════════════════
 #  2. Built-in Tools – code execution, file I/O, S3 upload
@@ -509,7 +521,7 @@ SKILL_USAGE_GUIDE = (
 )
 
 
-def build_system_prompt(custom_prompt: Optional[str] = None) -> str:
+def build_system_prompt(custom_prompt: Optional[str] = None, skills: Optional[list] = None) -> str:
     """Assemble the full system prompt with available skills metadata."""
     if custom_prompt:
         base = custom_prompt
@@ -525,7 +537,7 @@ def build_system_prompt(custom_prompt: Optional[str] = None) -> str:
         f"write_file 호출 시 filepath와 content를 반드시 함께 전달하세요. content 없이 호출하면 오류가 발생합니다.\n"
         f"다이어그램(.drawio) 등 대용량 파일도 content에 전체 내용을 담아 한 번에 전달해야 합니다.\n"
     )
-    skills_xml = skill_manager.available_skills_xml()
+    skills_xml = skill_manager.available_skills_xml(skills)
     if skills_xml:
         return f"{base}\n{path_info}\n\n{skills_xml}\n{SKILL_USAGE_GUIDE}"
     return f"{base}\n{path_info}"
@@ -544,9 +556,10 @@ async def call_model(state: State, config):
     image_url = state.get('image_url', [])
 
     tools = config.get("configurable", {}).get("tools", None)
+    skills = config.get("configurable", {}).get("skills", None)
     custom_prompt = config.get("configurable", {}).get("system_prompt", None)
 
-    system = build_system_prompt(custom_prompt)
+    system = build_system_prompt(custom_prompt, skills)
 
     reasoning_mode = getattr(chat, 'reasoning_mode', 'Disable')
     chatModel = chat.get_chat(extended_thinking=reasoning_mode)

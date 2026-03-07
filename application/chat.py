@@ -92,12 +92,9 @@ model_id = models[0]["model_id"]
 debug_mode = "Enable"
 skill_mode = "Disable"
 
-aws_access_key = config.get('aws', {}).get('access_key_id')
-aws_secret_key = config.get('aws', {}).get('secret_access_key')
-aws_session_token = config.get('aws', {}).get('session_token')
-
 reasoning_mode = 'Disable'
 user_id = "mcp"
+multi_region = 'Disable'
 
 def update(modelName, debugMode, reasoningMode, skillMode):    
     global model_name, model_id, model_type, debug_mode, reasoning_mode
@@ -213,29 +210,15 @@ def get_chat(extended_thinking):
         STOP_SEQUENCE = "" 
                           
     # bedrock   
-    if aws_access_key and aws_secret_key:
-        boto3_bedrock = boto3.client(
-            service_name='bedrock-runtime',
-            region_name=bedrock_region,
-            aws_access_key_id=aws_access_key,
-            aws_secret_access_key=aws_secret_key,
-            aws_session_token=aws_session_token,
-            config=Config(
-                retries = {
-                    'max_attempts': 30
-                }
-            )
+    boto3_bedrock = boto3.client(
+        service_name='bedrock-runtime',
+        region_name=bedrock_region,
+        config=Config(
+            retries = {
+                'max_attempts': 30
+            }
         )
-    else:
-        boto3_bedrock = boto3.client(
-            service_name='bedrock-runtime',
-            region_name=bedrock_region,
-            config=Config(
-                retries = {
-                    'max_attempts': 30
-                }
-            )
-        )
+    )
 
     if profile['model_type'] != 'openai' and extended_thinking=='Enable':
         maxReasoningOutputTokens=64000
@@ -261,8 +244,7 @@ def get_chat(extended_thinking):
     elif profile['model_type'] == 'openai':
         parameters = {
             "max_tokens":maxOutputTokens,     
-            "temperature":0.1,
-            "top_k":250,
+            "temperature":0.1
         }
 
     chat = ChatBedrock(   # new chat model
@@ -272,7 +254,16 @@ def get_chat(extended_thinking):
         region_name=bedrock_region
     )
     
-    selected_chat = 0
+    # Disable streaming for OpenAI models
+    if profile['model_type'] == 'openai':
+        chat.streaming = False
+    
+    if multi_region=='Enable':
+        selected_chat = selected_chat + 1
+        if selected_chat == number_of_models:
+            selected_chat = 0
+    else:
+        selected_chat = 0
 
     return chat
 
@@ -695,29 +686,15 @@ def get_parallel_processing_chat(models, selected):
         STOP_SEQUENCE = "" 
                           
     # bedrock   
-    if aws_access_key and aws_secret_key:
-        boto3_bedrock = boto3.client(
-            service_name='bedrock-runtime',
-            region_name=bedrock_region,
-            aws_access_key_id=aws_access_key,
-            aws_secret_access_key=aws_secret_key,
-            aws_session_token=aws_session_token,
-            config=Config(
-                retries = {
-                    'max_attempts': 30
-                }
-            )
+    boto3_bedrock = boto3.client(
+        service_name='bedrock-runtime',
+        region_name=bedrock_region,
+        config=Config(
+            retries = {
+                'max_attempts': 30
+            }
         )
-    else:
-        boto3_bedrock = boto3.client(
-            service_name='bedrock-runtime',
-            region_name=bedrock_region,
-            config=Config(
-                retries = {
-                    'max_attempts': 30
-                }
-            )
-        )
+    )
 
     if profile['model_type'] != 'openai':
         parameters = {
@@ -729,8 +706,7 @@ def get_parallel_processing_chat(models, selected):
     else:
         parameters = {
             "max_tokens":maxOutputTokens,     
-            "temperature":0.1,
-            "top_k":250
+            "temperature":0.1
         }
 
     chat = ChatBedrock(   # new chat model
@@ -738,6 +714,10 @@ def get_parallel_processing_chat(models, selected):
         client=boto3_bedrock, 
         model_kwargs=parameters,
     )        
+    
+    # Disable streaming for OpenAI models
+    if profile['model_type'] == 'openai':
+        chat.streaming = False
     
     return chat
 
@@ -1071,19 +1051,10 @@ def get_rag_prompt(text):
 
     return rag_chain
 
-if aws_access_key and aws_secret_key:
-    bedrock_agent_runtime_client = boto3.client(
-        "bedrock-agent-runtime",
-        region_name=bedrock_region,
-        aws_access_key_id=aws_access_key,
-        aws_secret_access_key=aws_secret_key,
-        aws_session_token=aws_session_token,
-    )
-else:
-    bedrock_agent_runtime_client = boto3.client(
-        "bedrock-agent-runtime",
-        region_name=bedrock_region
-    )
+bedrock_agent_runtime_client = boto3.client(
+    "bedrock-agent-runtime",
+    region_name=bedrock_region
+)
 knowledge_base_id = config.get('knowledge_base_id')
 number_of_results = 4
 
@@ -1106,25 +1077,12 @@ def retrieve(query):
             logger.warning(f"ResourceNotFoundException occurred: {e}")
             logger.info("Attempting to update knowledge_base_id...")
             
-            bedrock_region_local = config.get('region', 'us-west-2')
-            projectName_local = config.get('projectName')
-
-            # Create bedrock-agent client with same credentials as bedrock-agent-runtime client
-            if aws_access_key and aws_secret_key:
-                bedrock_agent_client = boto3.client(
-                    "bedrock-agent",
-                    region_name=bedrock_region_local,
-                    aws_access_key_id=aws_access_key,
-                    aws_secret_access_key=aws_secret_key,
-                    aws_session_token=aws_session_token,
-                )
-            else:
-                bedrock_agent_client = boto3.client("bedrock-agent", region_name=bedrock_region_local)
+            bedrock_agent_client = boto3.client("bedrock-agent", region_name=bedrock_region)
             knowledge_base_list = bedrock_agent_client.list_knowledge_bases()
             
             updated = False
             for knowledge_base in knowledge_base_list.get("knowledgeBaseSummaries", []):
-                if knowledge_base["name"] == projectName_local:
+                if knowledge_base["name"] == projectName:
                     new_knowledge_base_id = knowledge_base["knowledgeBaseId"]
                     knowledge_base_id = new_knowledge_base_id
 
@@ -1151,7 +1109,7 @@ def retrieve(query):
                     logger.error(f"Retry failed after updating knowledge_base_id: {retry_error}")
                     raise
             else:
-                logger.error(f"Could not find knowledge base with name: {projectName_local}")
+                logger.error(f"Could not find knowledge base with name: {projectName}")
                 raise
         else:
             # Re-raise other errors that are not ResourceNotFoundException
@@ -1576,13 +1534,14 @@ def get_tool_info(tool_name, tool_content):
 
     return content, urls, tool_references
 
-async def run_langgraph_agent(query, mcp_servers, history_mode, containers):
+async def run_langgraph_agent(query, mcp_servers, selected_skills, history_mode, containers):
     global index, streaming_index
     index = 0
 
     image_url = []
     references = []
 
+    # mcp
     mcp_json = mcp_config.load_selected_config(mcp_servers)
     logger.info(f"mcp_json: {mcp_json}")
 
@@ -1596,6 +1555,7 @@ async def run_langgraph_agent(query, mcp_servers, history_mode, containers):
         tools = await client.get_tools()
         logger.info(f"get_tools() returned: {tools}")
 
+        # skill
         builtin_tools = langgraph_agent.get_builtin_tools()
         logger.info(f"builtin_tools: {builtin_tools}")
 
@@ -1633,6 +1593,7 @@ async def run_langgraph_agent(query, mcp_servers, history_mode, containers):
             "recursion_limit": 50,
             "configurable": {"thread_id": user_id},
             "tools": tools,
+            "skills": selected_skills,
             "system_prompt": None
         }
     else:
@@ -1641,6 +1602,7 @@ async def run_langgraph_agent(query, mcp_servers, history_mode, containers):
             "recursion_limit": 50,
             "configurable": {"thread_id": user_id},
             "tools": tools,
+            "skills": selected_skills,
             "system_prompt": None
         }        
     

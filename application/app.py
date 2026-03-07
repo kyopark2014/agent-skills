@@ -7,6 +7,7 @@ import sys
 import os
 import asyncio
 import qa_agent
+import langgraph_agent
 
 logging.basicConfig(
     level=logging.INFO,  # Default to INFO level
@@ -30,10 +31,10 @@ mode_descriptions = {
         "Bedrock Knowledge Base를 이용해 구현한 RAG로 필요한 정보를 검색합니다."
     ],
     "Agent": [
-        "MCP와 LangGraph를 활용한 Agent를 이용합니다. 왼쪽 메뉴에서 필요한 MCP를 선택하세요."
+        "SKILL과 MCP를 활용한 Agent를 이용합니다. 왼쪽 메뉴에서 필요한 MCP를 선택하세요."
     ],
     "Agent (Chat)": [
-        "MCP를 활용한 Agent를 이용합니다. 채팅 히스토리를 이용해 interative한 대화를 즐길 수 있습니다."
+        "SKILL과 MCP를 활용한 Agent를 이용합니다. 채팅 히스토리를 이용해 interative한 대화를 즐길 수 있습니다."
     ],
     "QA Agent": [
         "RAG를 이용해 얻은 정보로 Test Case를 생성합니다."
@@ -49,9 +50,8 @@ with st.sidebar:
     
     st.markdown(
         "Amazon Bedrock을 이용해 다양한 형태의 대화를 구현합니다." 
-        "여기에서는 MCP를 이용해 RAG를 구현하고, Multi agent를 이용해 다양한 기능을 구현할 수 있습니다." 
-        "또한 번역이나 문법 확인과 같은 용도로 사용할 수 있습니다."
-        "주요 코드는 LangChain과 LangGraph를 이용해 구현되었습니다.\n"
+        "여기에서는 SKILL과 MCP를 이용해 agent의 기능을 확장합니다." 
+        "주요 코드는 LangGraph를 이용해 구현되었습니다.\n"
         "상세한 코드는 [Github](https://github.com/kyopark2014/agent-skills)을 참조하세요."
     )
 
@@ -65,6 +65,22 @@ with st.sidebar:
     
     # mcp selection    
     if mode=='Agent' or mode=='Agent (Chat)':
+        # Skill Config JSON input
+        st.subheader("⚙️ Skill Config")
+
+        skill_selections = {}
+        default_skill_selections = ["pdf", "search-weather", "notion", "memory-manager"]
+        with st.expander("Skill 옵션 선택", expanded=True):
+            if langgraph_agent.skill_manager.registry:
+                skill_list = langgraph_agent.available_skills_list()
+                logger.info(f"skill_list: {skill_list}")
+                for skill in skill_list:
+                    default_value = skill["name"] in default_skill_selections
+                    skill_selections[skill["name"]] = st.checkbox(skill["name"], key=f"skill_{skill['name']}", value=default_value, help=skill["description"], disabled=False)
+        
+        selected_skills = [skill for skill, is_selected in skill_selections.items() if is_selected]
+        logger.info(f"selected_skills: {selected_skills}")
+
         # MCP Config JSON input
         st.subheader("⚙️ MCP Config")
 
@@ -85,13 +101,13 @@ with st.sidebar:
             "사용자 설정"
         ]
         mcp_selections = {}
-        default_selections = ["basic", "knowledge base", "code interpreter", "aws_documentation"]
+        default_selections = ["code interpreter", "aws_documentation"]
         
         with st.expander("MCP 옵션 선택", expanded=True):
             for option in mcp_options:
                 default_value = option in default_selections
                 mcp_selections[option] = st.checkbox(option, key=f"mcp_{option}", value=default_value)
-            
+                
         if mcp_selections["사용자 설정"]:
             mcp = {}
             try:
@@ -129,8 +145,10 @@ with st.sidebar:
             logger.info("save to user_defined_mcp.json")
         
         mcp_servers = [server for server, is_selected in mcp_selections.items() if is_selected]
+
     else:
         mcp_servers = []
+        selected_skills = []
 
     # model selection box
     modelName = st.selectbox(
@@ -337,6 +355,7 @@ if prompt := st.chat_input("메시지를 입력하세요."):
                 response, image_url = asyncio.run(chat.run_langgraph_agent(
                     query=prompt, 
                     mcp_servers=mcp_servers, 
+                    selected_skills=selected_skills,
                     history_mode=history_mode, 
                     containers=containers))
 
