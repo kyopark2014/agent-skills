@@ -1590,7 +1590,7 @@ async def run_langgraph_agent(query, mcp_servers, selected_skills, history_mode,
     if history_mode == "Enable":
         app = langgraph_agent.buildChatAgentWithHistory(tools)
         config = {
-            "recursion_limit": 50,
+            "recursion_limit": 100,
             "configurable": {"thread_id": user_id},
             "tools": tools,
             "skills": selected_skills,
@@ -1599,7 +1599,7 @@ async def run_langgraph_agent(query, mcp_servers, selected_skills, history_mode,
     else:
         app = langgraph_agent.buildChatAgent(tools)
         config = {
-            "recursion_limit": 50,
+            "recursion_limit": 100,
             "configurable": {"thread_id": user_id},
             "tools": tools,
             "skills": selected_skills,
