@@ -98,6 +98,7 @@ with st.sidebar:
             "filesystem", 
             "web_fetch",
             "drawio",
+            "aws-drawio",
             "사용자 설정"
         ]
         mcp_selections = {}
