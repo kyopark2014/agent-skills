@@ -3272,8 +3272,8 @@ systemctl enable amazon-ssm-agent
 sleep 10
 systemctl status amazon-ssm-agent >> /var/log/user-data.log
 
-# python3 
-sudo ln -s /usr/bin/python3 /usr/bin/python
+# python3 alias
+ln -s /usr/bin/python3 /usr/bin/python
 
 echo "Setup completed successfully" >> /var/log/user-data.log
 """
