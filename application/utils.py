@@ -201,6 +201,24 @@ except Exception as e:
     logger.info(f"Telegram credential is required: {e}")
     pass
 
+# api key for slack
+slack_bot_token = ""
+slack_team_id = ""
+try:
+    get_slack_secret = secretsmanager.get_secret_value(
+        SecretId=f"slackapikey-{projectName}"
+    )
+    secret = json.loads(get_slack_secret['SecretString'])
+    slack_bot_token = secret.get('slack_bot_token', '')
+    slack_team_id = secret.get('slack_team_id', '')
+    if slack_bot_token:
+        os.environ["SLACK_BOT_TOKEN"] = slack_bot_token
+    if slack_team_id:
+        os.environ["SLACK_TEAM_ID"] = slack_team_id
+except Exception as e:
+    logger.info(f"Slack credential is required: {e}")
+    pass
+
 def sanitize_data_source_name(name):
     """
     Sanitize a name to comply with AWS Bedrock data source name pattern:
