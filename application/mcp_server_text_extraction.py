@@ -54,10 +54,16 @@ def _get_chat():
     stop_sequence = "\n\nHuman:" if model_type == "claude" else ""
     max_tokens = 16384 if "claude-4" in model_id else 8192
 
+    # bedrock   
     boto3_bedrock = boto3.client(
-        service_name="bedrock-runtime",
+        service_name='bedrock-runtime',
         region_name=bedrock_region,
-        config=Config(retries={"max_attempts": 30}),
+        config=Config(
+            retries = {
+                'max_attempts': 30
+            },
+            read_timeout=300
+        )
     )
 
     parameters = {
