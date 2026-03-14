@@ -207,7 +207,7 @@ def load_config(mcp_type):
             }
         }
     
-    elif mcp_type == "slack_mcp":
+    elif mcp_type == "slack":
         return {
             "mcpServers": {
                 "slack": {
@@ -223,6 +223,19 @@ def load_config(mcp_type):
                 }
             }
         }
+    
+    elif mcp_type == "notion":
+        return {
+            "mcpServers": {
+                "notionApi": {
+                    "command": "npx",
+                    "args": ["-y", "@notionhq/notion-mcp-server"],
+                    "env": {
+                        "NOTION_TOKEN": utils.notion_api_key
+                    }
+                }
+            }
+        }    
 
     elif mcp_type == "사용자 설정":
         return mcp_user_config
