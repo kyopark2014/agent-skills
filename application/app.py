@@ -1,4 +1,5 @@
 import streamlit as st 
+import utils
 import chat
 import json
 import mcp_config 
@@ -8,6 +9,7 @@ import os
 import asyncio
 import qa_agent
 import langgraph_agent
+import skill
 
 logging.basicConfig(
     level=logging.INFO,  # Default to INFO level
@@ -17,6 +19,13 @@ logging.basicConfig(
     ]
 )
 logger = logging.getLogger("streamlit")
+
+WORKING_DIR = os.path.dirname(os.path.abspath(__file__))
+SKILLS_DIR = os.path.join(WORKING_DIR, "skills")
+ARTIFACTS_DIR = os.path.join(WORKING_DIR, "artifacts")
+
+config = utils.load_config()
+sharing_url = config.get("sharing_url")
 
 os.environ["DEV"] = "true"  # Skip user confirmation of get_user_input
 
@@ -64,45 +73,45 @@ with st.sidebar:
     st.info(mode_descriptions[mode][0])
     
     # mcp selection    
+    mcp_options = [
+        "basic", 
+        "use-aws", 
+        "tavily-search", 
+        "knowledge base", 
+        "aws_documentation", 
+        "trade_info", 
+        "code interpreter", 
+        "web_fetch",
+        "drawio",
+        "text_extraction",
+        "slack",
+        "사용자 설정"
+    ]    
     if mode=='Agent' or mode=='Agent (Chat)':
         # Skill Config JSON input
         st.subheader("⚙️ Skill Config")
 
         skill_selections = {}
-        default_skill_selections = ["pdf", "search-weather", "notion", "memory-manager"]
+        default_skill_selections = config.get("default_skills") or ["pdf", "notion", "memory-manager"]
+        logger.info(f"default_skill_selections: {default_skill_selections}")
         with st.expander("Skill 옵션 선택", expanded=True):
-            if langgraph_agent.skill_manager.registry:
-                skill_list = langgraph_agent.available_skills_list()
-                logger.info(f"skill_list: {skill_list}")
-                for skill in skill_list:
-                    default_value = skill["name"] in default_skill_selections
-                    skill_selections[skill["name"]] = st.checkbox(skill["name"], key=f"skill_{skill['name']}", value=default_value, help=skill["description"], disabled=False)
-        
-        selected_skills = [skill for skill, is_selected in skill_selections.items() if is_selected]
+            available_skill_meta = skill.available_skill_meta("base")
+            for s in available_skill_meta:
+                default_value = s["name"] in default_skill_selections
+                skill_selections[s["name"]] = st.checkbox(s["name"], key=f"skill_{s['name']}", value=default_value, help=s["description"], disabled=False)
+    
+        selected_skills = [name for name, is_selected in skill_selections.items() if is_selected]
         logger.info(f"selected_skills: {selected_skills}")
+
+        if selected_skills != config.get("default_skills"):
+            config["default_skills"] = selected_skills
+            with open(utils.config_path, "w", encoding="utf-8") as f:
+                json.dump(config, f, ensure_ascii=False, indent=4)
 
         # MCP Config JSON input
         st.subheader("⚙️ MCP Config")
 
-        # Change radio to checkbox
-        mcp_options = [
-            "basic", 
-            "use-aws", 
-            "tavily-search", 
-            "knowledge base", 
-            "aws_documentation", 
-            "trade_info", 
-            "code interpreter", 
-            "terminal (MAC)", 
-            "terminal (linux)", 
-            "filesystem", 
-            "web_fetch",
-            "drawio",
-            "aws-drawio",
-            "text_extraction",
-            "slack_mcp",
-            "사용자 설정"
-        ]
+        # Change radio to checkbox        
         mcp_selections = {}
         default_selections = ["code interpreter", "aws_documentation"]
         
@@ -310,7 +319,6 @@ if clear_button or "messages" not in st.session_state:
     chat.clear_chat_history()
     st.rerun()    
 
-    
 # Always show the chat input
 if prompt := st.chat_input("메시지를 입력하세요."):
     with st.chat_message("user"):  # display user message in chat message container
@@ -355,11 +363,11 @@ if prompt := st.chat_input("메시지를 입력하세요."):
                     "notification": [st.empty() for _ in range(500)]
                 }
 
-                response, image_url = asyncio.run(chat.run_langgraph_agent(
+                response, image_url = asyncio.run(langgraph_agent.run_langgraph_agent(
                     query=prompt, 
                     mcp_servers=mcp_servers, 
-                    selected_skills=selected_skills,
                     history_mode=history_mode, 
+                    plugin_name="base",
                     containers=containers))
 
             st.session_state.messages.append({

@@ -5,4 +5,10 @@ config.json
 *.pdf
 *.md
 *.pptx
+*.xlsx
 *.drawio
+*.png
+*.jpg
+*.html
+*.css
+*.js
