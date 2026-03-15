@@ -87,6 +87,7 @@ with st.sidebar:
         "slack",
         "notion",
         "outlook",
+        "gog",
         "사용자 설정"
     ]    
     if mode=='Agent' or mode=='Agent (Chat)':

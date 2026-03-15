@@ -140,7 +140,7 @@ async def call_model(state: State, config):
         ])
         chain = prompt | model
 
-        response = await chain.ainvoke(messages)
+        response = await chain.ainvoke({"messages": messages})
         logger.info(f"response of call_model: {response}")
 
     except Exception:
@@ -192,7 +192,7 @@ async def plan_node(state: State, config):
         ])
         chain = prompt | chatModel
 
-        result = await chain.ainvoke(state["messages"])
+        result = await chain.ainvoke({"messages": state["messages"]})
 
         plan = result.content[result.content.find('<plan>')+6:result.content.find('</plan>')]
         logger.info(f"plan: {plan}")
