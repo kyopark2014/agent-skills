@@ -327,90 +327,25 @@ pip install -r requirements.txt
 streamlit run application/app.py
 ```
 
+### MCP
 
-### Gmail 등록 
+Plugin의 Connector는 MCP를 이용해 구현합니다. 이때 필요한 MCP 설정은 아래를 참조합니다. 
 
-GOG CLI를 설치합니다. 
+- [Slack](https://github.com/kyopark2014/mcp/blob/main/mcp-slack.md): Slack 내용을 조회하고 메시지를 보낼 수 있습니다. SLACK_TEAM_ID, SLACK_BOT_TOKEN으로 설정합니다.
 
-```text
-brew install steipete/tap/gogcli
-```
+- [Tavily](https://github.com/kyopark2014/mcp/blob/main/mcp-tavily.md): Tavily를 이용해 인터넷을 검색합니다. [installer.py](./installer.py)에서 secret으로 설정후에 [utils.py](./application/utils.py)에서 TAVILY_API_KEY로 등록하여 활용합니다.
 
-먼저 json 형태의 credential을 다운받아야 합니다. 아래와 같은 작업을 수행합니다.
+- [RAG](https://github.com/kyopark2014/mcp/blob/main/mcp-rag.md): Knowledge Base를 이용해 RAG를 활용합니다. IAM 인증을 이용하므로 별도로 credential 설정하지 않습니다.
 
-1. [Google Cloud Console](https://console.cloud.google.com)에서 OAuth 클라이언트를 만들기 위해 새 프로젝트 생성 (또는 기존 프로젝트 선택)을 수행합니다.
+- [web_fetch](https://github.com/kyopark2014/mcp/blob/main/mcp-web-fetch.md): playwright기반으로 url의 문서를 markdown으로 불러올 수 있습니다. 별도 인증이 필요하지 않습니다.
 
-2. API 활성화를 위해 Gmail API, Google Calendar API, Google Drive API 을 설정합니다.
+- [Google 메일/캘린더](https://github.com/kyopark2014/mcp/blob/main/mcp-gog.md): 구글 메일을 조회하거나 보낼 수 있습니다. Gog CLI를 설치하여 google 인증을 통해 활용합니다.
 
+- [Notion](https://github.com/kyopark2014/mcp/blob/main/mcp-notion.md): Notion을 읽거나 쓸 수 있습니다. [installer.py](./installer.py)에서 secret으로 설정후에 [utils.py](./application/utils.py)에서 NOTION_TOKEN을 등록하여 활용합니다.
 
-3. OAuth 동의 화면 구성은 "User Type: External"로 하고, 테스트 사용자에 본인 이메일 추가합니다.
-   
-4. OAuth 클라이언트 ID를 생성합니다. 이때 사용할 gmail을 테스트 사용자로 등록하여야 합니다.
+- [text_extraction](https://github.com/kyopark2014/mcp/blob/main/mcp-text-extraction.md): 이미지의 텍스트를 추출합니다. 별도 인증이 필요하지 않습니다.
 
-- Application type: Desktop app
-
-- 이름: "OpenClaw"
-
-5. client_secret_xxx.json를 다운로드합니다.
-
-브라우저가 있으면 아래와 같이 수행합니다.
-
-```text
-gog auth credentials /path/to/client_secret_xxx.json
-```
-
-이후 아래와 같이 메 일주소를 등록합니다. service를 지정하지 않으면 appscript, calendar, chat, classroom, contacts, docs, drive, forms, gmail, people, sheets, slides, tasks가 등록됩니다.
-
-```text
-gog auth add your-email@gmail.com
-```
-
-지정을 하면 아래와 같이 일부만 허용할 수 있습니다.
-
-```text
-gog auth add your-email@gmail.com --services gmail,calendar,drive,contacts
-```
-
-인증된 정보는 아래 명령어로 확인할 수 있습니다.
-
-```text
-gog auth list 
-```
-
-EC2와 같이 브라우저가 없는 경우에 dashboard에 접속해서 chat에서 "gmail을 등록해주세요"라고 입력후 주어진 가이드에 따라 수행합니다. "gog auth add"를 수행시 localhost로 수행되는 url을 받아서 client에서 수행하여야 하므로 dashboard의 chat에서 수행하여야 합니다.
-
-### Web Fetch
-
-"mcp-server-fetch-typescript"는 playwright 기반의 URL 내용 추출에 용이합니다. HTML을 Markdown/Text 변환하므로 빠르고 편리하나, 단순 HTTP GET만 수행하고 JS로 동적 생성되는 콘텐츠는 못 가져옵니다. 이를 위해 [mcp_config.py](./application/mcp_config.py)에 아래의 MCP 조건을 추가합니다.
-
-```java
-{
-   "mcpServers": {
-       "web_fetch": {
-           "command": "npx",
-           "args": ["-y", "mcp-server-fetch-typescript"]
-       }
-   }
-}
-```
-
-또한, [Dockerfile](./Dockerfile)에도 아래 내용을 추가합니다.
-
-```text
-RUN npx -y mcp-server-fetch-typescript --version 2>/dev/null || true && \
-    npx playwright install --with-deps chromium
-```
-
-MAC같은 local 환경에서 실행시 아래와 같이 수동으로 설치합니다.
-
-```text
-npx playwright install --with-deps chromium
-```
-
-Web Fetch로 아래와 같이 html을 markdown으로 변환하여 활용합니다.
-
-<img width="700" alt="image" src="https://github.com/user-attachments/assets/56dc77ea-4cb8-4317-af00-6a21ce5be9d0" />
-
+  
 
 ### Telegram과 연동
 
