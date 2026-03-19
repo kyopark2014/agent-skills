@@ -106,7 +106,7 @@ def save_mcp_env(mcp_env):
     with open(mcp_env_path, "w", encoding="utf-8") as f:
         json.dump(mcp_env, f)
 
-# api key to get weather information in agent
+# api key to get information in agent
 if aws_access_key and aws_secret_key:
     secretsmanager = boto3.client(
         service_name='secretsmanager',
@@ -120,23 +120,6 @@ else:
         service_name='secretsmanager',
         region_name=bedrock_region
     )
-
-# api key for weather
-weather_api_key = ""
-try:
-    get_weather_api_secret = secretsmanager.get_secret_value(
-        SecretId=f"openweathermap-{projectName}"
-    )
-    #print('get_weather_api_secret: ', get_weather_api_secret)
-    secret = json.loads(get_weather_api_secret['SecretString'])
-    #print('secret: ', secret)
-    weather_api_key = secret['weather_api_key']
-    if weather_api_key:
-        os.environ["OPENWEATHERMAP_API_KEY"] = weather_api_key
-
-except Exception as e:
-    # raise e
-    pass
 
 # api key to use Tavily Search
 tavily_key = tavily_api_wrapper = ""

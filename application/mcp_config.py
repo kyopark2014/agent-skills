@@ -68,21 +68,13 @@ def load_config(mcp_type):
     if mcp_type == "code interpreter":
         mcp_type = "repl_coder"
     elif mcp_type == "knowledge base":
-        mcp_type = "kb-retriever"
+        mcp_type = "kb-retriever"    
+    elif mcp_type == "AWS Sentral (Employee)":
+        mcp_type = "aws_sentral"
+    elif mcp_type == "AWS Outlook (Employee)":
+        mcp_type = "aws_outlook"
 
-    if mcp_type == "basic":
-        return {
-            "mcpServers": {
-                "search": {
-                    "command": "python",
-                    "args": [
-                        f"{workingDir}/mcp_server_basic.py"
-                    ]
-                }
-            }
-        }
-    
-    elif mcp_type == "tavily":
+    if mcp_type == "tavily":
         return {
             "mcpServers": {
                 "tavily-search": {
@@ -302,6 +294,36 @@ def load_config(mcp_type):
                 }
             }
         }
+    
+    elif mcp_type == "korea_weather":
+        return {
+            "mcpServers": {
+                "korea-weather": {
+                    "command": "python",
+                    "args": [f"{workingDir}/mcp_server_korea_weather.py"]
+                }
+            }
+        }
+    
+    elif mcp_type == "aws_sentral":
+        return {
+            "mcpServers": {
+                "aws_sentral": {
+                "command": os.path.expanduser("~/.toolbox/bin/aws-sentral-mcp"),
+                "args": []
+                }
+            }
+        }
+
+    elif mcp_type == "aws_outlook":
+        return {
+            "mcpServers": {
+                "aws_outlook": {
+                    "command": os.path.expanduser("~/.toolbox/bin/aws-outlook-mcp"),
+                    "args": []
+                }
+            }
+        }   
         
     elif mcp_type == "사용자 설정":
         return mcp_user_config

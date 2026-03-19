@@ -74,7 +74,6 @@ with st.sidebar:
     
     # mcp selection    
     mcp_options = [
-        "basic", 
         "use-aws", 
         "tavily", 
         "knowledge base", 
@@ -88,6 +87,9 @@ with st.sidebar:
         "notion",
         "outlook",
         "gog",
+        "korea_weather",
+        "AWS Sentral (Employee)",
+        "AWS Outlook (Employee)",
         "사용자 설정"
     ]    
     if mode=='Agent' or mode=='Agent (Chat)':
@@ -95,11 +97,11 @@ with st.sidebar:
         st.subheader("⚙️ Skill Config")
 
         skill_selections = {}
-        default_skill_selections = config.get("default_skills") or ["pdf", "notion", "memory-manager"]
+        default_skill_selections = config.get("default_skills") or ["pdf", "notion", "korea_weather", "memory-manager"]
         logger.info(f"default_skill_selections: {default_skill_selections}")
         with st.expander("Skill 옵션 선택", expanded=True):
-            available_skill_meta = skill.available_skill_meta("base")
-            for s in available_skill_meta:
+            available_skill_info = skill.available_skill_info("base")
+            for s in available_skill_info:
                 default_value = s["name"] in default_skill_selections
                 skill_selections[s["name"]] = st.checkbox(s["name"], key=f"skill_{s['name']}", value=default_value, help=s["description"], disabled=False)
     
