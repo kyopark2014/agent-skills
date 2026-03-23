@@ -87,6 +87,7 @@ with st.sidebar:
         "outlook",
         "gog",
         "korea_weather",
+        "obsidian",
         "AWS Sentral (Employee)",
         "AWS Outlook (Employee)",
         "사용자 설정"
