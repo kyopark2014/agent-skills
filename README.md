@@ -468,3 +468,5 @@ skill-creater가 아래와 같이 tavily-search라는 skill을 생성합니다.
 [Deep Agents CLI](https://github.com/langchain-ai/deepagents/tree/master/libs/cli)
 
 [Using skills with Deep Agents CLI](https://www.youtube.com/watch?v=Yl_mdp2IiW4)
+
+[Open Agent Skills](https://skills.sh/)
