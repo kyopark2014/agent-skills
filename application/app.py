@@ -7,7 +7,6 @@ import logging
 import sys
 import os
 import asyncio
-import qa_agent
 import langgraph_agent
 import skill
 
@@ -68,7 +67,7 @@ with st.sidebar:
     
     # radio selection
     mode = st.radio(
-        label="원하는 대화 형태를 선택하세요. ",options=["일상적인 대화", "RAG", "Agent", "Agent (Chat)", "QA Agent", "이미지 분석"], index=3
+        label="원하는 대화 형태를 선택하세요. ",options=["일상적인 대화", "RAG", "Agent", "Agent (Chat)", "이미지 분석"], index=3
     )   
     st.info(mode_descriptions[mode][0])
     
@@ -97,7 +96,7 @@ with st.sidebar:
         st.subheader("⚙️ Skill Config")
 
         skill_selections = {}
-        default_skill_selections = config.get("default_skills") or ["pdf", "notion", "korea_weather", "memory-manager"]
+        default_skill_selections = config.get("default_skills") or ["pdf", "notion", "memory-manager"]
         logger.info(f"default_skill_selections: {default_skill_selections}")
         with st.expander("Skill 옵션 선택", expanded=True):
             available_skill_info = skill.available_skill_info("base")
@@ -118,7 +117,7 @@ with st.sidebar:
 
         # Change radio to checkbox        
         mcp_selections = {}
-        default_selections = ["code interpreter", "aws_documentation"]
+        default_selections = ["web_fetch", "korea_weather", "slack", "notion"]
         
         with st.expander("MCP 옵션 선택", expanded=True):
             for option in mcp_options:
@@ -385,18 +384,7 @@ if prompt := st.chat_input("메시지를 입력하세요."):
                 logger.info(f"url: {url}")
                 file_name = url[url.rfind('/')+1:]
                 st.image(url, caption=file_name, use_container_width=True)
-        
-        elif mode == "QA Agent":
-            with st.status("thinking...", expanded=True, state="running") as status:
-                containers = {
-                    "tools": st.empty(),
-                    "status": st.empty(),
-                    "notification": [st.empty() for _ in range(500)]
-                }
-                response = asyncio.run(qa_agent.run_qa_agent(prompt, containers))
-                logger.info(f"response: {response}")
-                st.session_state.messages.append({"role": "assistant", "content": response})
-        
+                
         elif mode == "이미지 분석":
             if uploaded_file is None or uploaded_file == "":
                 st.error("파일을 먼저 업로드하세요.")
