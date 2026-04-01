@@ -17,8 +17,13 @@ RUN apt-get update && apt-get install -y curl && \
 # Install MCP packages globally
 RUN npm install -g @modelcontextprotocol/server-filesystem
 
-# Install npm packages for skills (docx, pptx/myslide creation)
-RUN npm install -g docx pptxgenjs
+# PPT npm packages (global + local so require() works from any directory, including /tmp)
+RUN npm install -g pptxgenjs sharp react react-dom react-icons && \
+    mkdir -p /app/node_modules && \
+    npm install --prefix /app pptxgenjs sharp react react-dom react-icons
+
+# Allow require('pptxgenjs') to resolve from any working directory
+ENV NODE_PATH=/usr/local/lib/node_modules:/app/node_modules
 
 # Install mcp-server-fetch-typescript and Playwright browsers
 RUN npx -y mcp-server-fetch-typescript --version 2>/dev/null || true && \
@@ -37,7 +42,7 @@ RUN pip install python-pptx
 # Skills: docx / xlsx / pptx / myslide
 RUN pip install defusedxml lxml openpyxl Pillow "markitdown[pptx]"
 # Skills: pdf
-RUN pip install reportlab pypdf pdfplumber
+RUN pip install reportlab pypdf pdfplumber PyYAML
 
 RUN mkdir -p /root/.streamlit
 COPY config.toml /root/.streamlit/

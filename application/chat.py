@@ -514,7 +514,7 @@ def get_summary_of_uploaded_file(file_name, st):
         if isResized:
             img = img.resize((width, height))
         
-        # Base64 크기 확인 및 추가 리사이징
+        # Base64 size verification and additional resizing
         max_attempts = 5
         for attempt in range(max_attempts):
             buffer = BytesIO()
@@ -522,14 +522,14 @@ def get_summary_of_uploaded_file(file_name, st):
             img_bytes = buffer.getvalue()
             img_base64 = base64.b64encode(img_bytes).decode("utf-8")
             
-            # Base64 크기 확인 (실제 전송될 크기)
+            # Base64 size check (actual payload size)
             base64_size = len(img_base64.encode('utf-8'))
             logger.info(f"attempt {attempt + 1}: base64_size = {base64_size} bytes")
             
             if base64_size <= max_size:
                 break
             else:
-                # 크기가 여전히 크면 더 작게 리사이징
+                # Resize smaller if still too large
                 width = int(width * 0.8)
                 height = int(height * 0.8)
                 img = img.resize((width, height))
@@ -908,7 +908,7 @@ def summarize_image(image_content, prompt, st):
     width, height = img.size 
     logger.info(f"width: {width}, height: {height}, size: {width*height}")
     
-    # 이미지 리사이징 및 크기 확인
+    # Image resizing and size verification
     isResized = False
     max_size = 5 * 1024 * 1024  # 5MB in bytes
     
@@ -979,9 +979,9 @@ def summarize_image(image_content, prompt, st):
     logger.info(f"image summary: {image_summary}")
             
     # if len(extracted_text) > 10:
-    #     contents = f"## 이미지 분석\n\n{image_summary}\n\n## 추출된 텍스트\n\n{extracted_text}"
+    #     contents = f"## Image analysis\n\n{image_summary}\n\n## Extracted text\n\n{extracted_text}"
     # else:
-    #     contents = f"## 이미지 분석\n\n{image_summary}"
+    #     contents = f"## Image analysis\n\n{image_summary}"
     contents = f"## 이미지 분석\n\n{image_summary}"
     logger.info(f"image contents: {contents}")
 
@@ -1306,16 +1306,16 @@ def get_tool_info(tool_name, tool_content):
     # aws document
     elif tool_name == "search_documentation":
         try:
-            # tool_content가 리스트인 경우 처리 (예: [{'type': 'text', 'text': '...'}])
+            # Handle tool_content when it is a list (e.g. [{'type': 'text', 'text': '...'}])
             if isinstance(tool_content, list):
-                # 리스트의 첫 번째 항목에서 text 필드 추출
+                # Extract text field from the first list item
                 if len(tool_content) > 0 and isinstance(tool_content[0], dict) and 'text' in tool_content[0]:
                     tool_content = tool_content[0]['text']
                 else:
                     logger.info(f"Unexpected list format: {tool_content}")
                     return content, urls, tool_references
             
-            # tool_content가 문자열인 경우 JSON 파싱
+            # Parse JSON when tool_content is a string
             if isinstance(tool_content, str):
                 json_data = json.loads(tool_content)
             elif isinstance(tool_content, dict):
@@ -1324,10 +1324,10 @@ def get_tool_info(tool_name, tool_content):
                 logger.info(f"Unexpected tool_content type: {type(tool_content)}")
                 return content, urls, tool_references
             
-            # search_results 배열에서 결과 추출
+            # Extract results from search_results array
             search_results = json_data.get('search_results', [])
             if not search_results:
-                # search_results가 없으면 json_data 자체가 배열일 수 있음
+                # If no search_results, json_data may be the array itself
                 if isinstance(json_data, list):
                     search_results = json_data
                 else:
@@ -1491,10 +1491,10 @@ def get_tool_info(tool_name, tool_content):
                 for item in json_data:
                     if isinstance(item, dict) and "text" in item:
                         try:
-                            # text 필드 안의 JSON 문자열 파싱
+                            # Parse JSON string inside text field
                             text_json = json.loads(item["text"])
                             if isinstance(text_json, list):
-                                # 파싱된 JSON이 리스트인 경우
+                                # Parsed JSON is a list
                                 for ref_item in text_json:
                                     if isinstance(ref_item, dict) and "reference" in ref_item and "contents" in ref_item:
                                         url = ref_item["reference"]["url"]
@@ -1506,7 +1506,7 @@ def get_tool_info(tool_name, tool_content):
                                             "content": content_text
                                         })
                             elif isinstance(text_json, dict) and "reference" in text_json and "contents" in text_json:
-                                # 파싱된 JSON이 딕셔너리인 경우
+                                # Parsed JSON is a dict
                                 url = text_json["reference"]["url"]
                                 title = text_json["reference"]["title"]
                                 content_text = text_json["contents"][:100] + "..." if len(text_json["contents"]) > 100 else text_json["contents"]
@@ -1519,7 +1519,7 @@ def get_tool_info(tool_name, tool_content):
                             logger.warning(f"Failed to parse text JSON: {e}")
                             pass
                     elif isinstance(item, dict) and "reference" in item and "contents" in item:
-                        # 리스트 항목이 직접 reference를 가지고 있는 경우
+                        # List item has reference directly
                         url = item["reference"]["url"]
                         title = item["reference"]["title"]
                         content_text = item["contents"][:100] + "..." if len(item["contents"]) > 100 else item["contents"]

@@ -165,7 +165,6 @@ with st.sidebar:
 
     else:
         mcp_servers = []
-        selected_skills = []
 
     # model selection box
     modelName = st.selectbox(
