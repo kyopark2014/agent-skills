@@ -33,7 +33,6 @@ colorama
 finance-datareader
 PyPDF2
 python-pptx
-# Skills: docx / xlsx / pptx / myslide
 defusedxml
 lxml
 openpyxl
