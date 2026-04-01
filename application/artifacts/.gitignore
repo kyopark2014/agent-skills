@@ -12,3 +12,16 @@ config.json
 *.html
 *.css
 *.js
+*.cjs
+*.docx
+*.doc
+*.xls
+*.xlsx
+*.ppt
+*.pptx
+*.pdf
+*.txt
+*.csv
+*.json
+*.yaml
+*.yml
