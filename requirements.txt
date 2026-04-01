@@ -43,3 +43,4 @@ markitdown[pptx]
 reportlab
 pypdf
 pdfplumber
+browser-use[cli]
