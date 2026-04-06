@@ -256,6 +256,15 @@ def load_config(mcp_type):
             }
     
     elif mcp_type == "slack":
+        slack_token = os.environ.get("SLACK_BOT_TOKEN", "")
+        slack_team = os.environ.get("SLACK_TEAM_ID", "")
+        if not slack_token:
+            logger.info(
+                "Slack MCP skipped: SLACK_BOT_TOKEN not set. "
+                "Configure AWS Secrets Manager secret slackapikey-<projectName> "
+                "or set SLACK_BOT_TOKEN in the environment."
+            )
+            return {}
         return {
             "mcpServers": {
                 "slack": {
@@ -265,8 +274,8 @@ def load_config(mcp_type):
                         "@modelcontextprotocol/server-slack"
                     ],
                     "env": {
-                        "SLACK_BOT_TOKEN": os.environ["SLACK_BOT_TOKEN"],
-                        "SLACK_TEAM_ID": os.environ["SLACK_TEAM_ID"]
+                        "SLACK_BOT_TOKEN": slack_token,
+                        "SLACK_TEAM_ID": slack_team
                     }
                 }
             }
