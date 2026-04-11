@@ -2,6 +2,9 @@ __pycache__
 
 # configuration
 config.json
+*.py
+*.gif
+*.mp4
 *.pdf
 *.md
 *.pptx

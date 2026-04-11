@@ -88,6 +88,7 @@ with st.sidebar:
         "gog",
         "korea_weather",
         "obsidian",
+        "image_generation",
         "AWS Sentral (Employee)",
         "AWS Outlook (Employee)",
         "사용자 설정"
@@ -97,7 +98,7 @@ with st.sidebar:
         st.subheader("⚙️ Skill Config")
 
         skill_selections = {}
-        default_skill_selections = config.get("default_skills") or ["pdf", "notion", "memory-manager"]
+        default_skill_selections = config.get("default_skills") or ["graphify", "browser-use"]
         logger.info(f"default_skill_selections: {default_skill_selections}")
         with st.expander("Skill 옵션 선택", expanded=True):
             available_skill_info = skill.available_skill_info("base")
@@ -118,7 +119,7 @@ with st.sidebar:
 
         # Change radio to checkbox        
         mcp_selections = {}
-        default_selections = ["web_fetch", "korea_weather", "slack", "notion"]
+        default_selections = ["web_fetch", "slack", "notion", "obsidian"]
         
         with st.expander("MCP 옵션 선택", expanded=True):
             for option in mcp_options:

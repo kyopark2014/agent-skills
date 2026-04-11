@@ -97,6 +97,18 @@ def load_config(mcp_type):
                 }
             }
         }
+
+    elif mcp_type == "image_generation":
+        return {
+            "mcpServers": {
+                "imageGeneration": {
+                    "command": "python",
+                    "args": [
+                        f"{workingDir}/mcp_server_image_generation.py"
+                    ]
+                }
+            }
+        }  
     
     elif mcp_type == "kb-retriever":
         return {
