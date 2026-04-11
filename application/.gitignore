@@ -5,4 +5,5 @@ config.json
 MEMORY.md
 memory/
 node_modules/
+graphify-out/
 package-lock.json
