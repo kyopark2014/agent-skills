@@ -8,7 +8,8 @@ import utils
 import skill
 import mcp_config
 import datetime
-
+import boto3
+        
 from typing import Literal, Optional
 from langgraph.prebuilt import ToolNode
 from langgraph.graph import START, END, StateGraph
@@ -20,6 +21,7 @@ from langchain_mcp_adapters.client import MultiServerMCPClient
 from pytz import timezone
 from langchain_core.tools import tool
 from urllib import parse
+from urllib import parse as url_parse
 
 logging.basicConfig(
     level=logging.INFO,
@@ -34,6 +36,8 @@ s3_prefix = "docs"
 capture_prefix = "captures"
 user_id = "langgraph"
 
+s3_bucket = config.get("s3_bucket")
+        
 def s3_uri_to_console_url(uri: str, region: str) -> str:
     """Open the object in the AWS S3 console (when sharing_url is not configured)."""
     if not uri or not uri.startswith("s3://"):
@@ -56,7 +60,7 @@ from pathlib import Path
 WORKING_DIR = os.path.dirname(os.path.abspath(__file__))
 ARTIFACTS_DIR = os.path.join(WORKING_DIR, "artifacts")
 
-_ARTIFACT_EXT = frozenset({".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".bmp", "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx"})
+ARTIFACT_EXT = frozenset({".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".bmp", "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx"})
 
 _mpl_runtime_ready = False
 
@@ -230,6 +234,15 @@ def execute_code(code: str) -> str:
 
         _ensure_cli_scripts_on_path()
         _ensure_matplotlib_runtime()
+
+        node_modules = os.path.join(WORKING_DIR, "node_modules")
+        if os.path.isdir(node_modules):
+            existing = os.environ.get("NODE_PATH", "")
+            if node_modules not in existing.split(os.pathsep):
+                os.environ["NODE_PATH"] = (
+                    f"{node_modules}{os.pathsep}{existing}" if existing else node_modules
+                )
+
         exec(code, _exec_globals)
 
         sys.stdout, sys.stderr = old_stdout, old_stderr
@@ -251,7 +264,7 @@ def execute_code(code: str) -> str:
         artifact_rels = [
             r
             for r in touched
-            if os.path.splitext(r)[1].lower() in _ARTIFACT_EXT
+            if os.path.splitext(r)[1].lower() in ARTIFACT_EXT
         ]
         other_rels = [r for r in touched if r not in artifact_rels]
         if other_rels:
@@ -338,11 +351,7 @@ def upload_file_to_s3(filepath: str) -> str:
         The download URL, or an error message.
     """
     logger.info(f"###### upload_file_to_s3: {filepath} ######")
-    try:
-        import boto3
-        from urllib import parse as url_parse
-
-        s3_bucket = config.get("s3_bucket")
+    try:        
         if not s3_bucket:
             return "S3 bucket is not configured."
 
@@ -554,25 +563,13 @@ def build_system_prompt(custom_prompt: Optional[str] = None, plugin_name: Option
 async def call_model(state: State, config):
     logger.info(f"###### call_model ######")
 
-    last_message = state['messages'][-1]
-    # logger.info(f"last message: {last_message}")
-
     image_url = state.get('image_url', [])
 
-    tools = config.get("configurable", {}).get("tools", None)
-    custom_prompt = config.get("configurable", {}).get("system_prompt", None)
-    plugin_name = config.get("configurable", {}).get("plugin_name", None)
-    logger.info(f"plugin_name: {plugin_name}")
-    
-    system = build_system_prompt(custom_prompt, plugin_name)
-    logger.info(f"system prompt: {system}")
+    tools = config.get("configurable", {}).get("tools")
+    system = config.get("configurable", {}).get("system_prompt")
 
     reasoning_mode = getattr(chat, 'reasoning_mode', 'Disable')
     chatModel = chat.get_chat(extended_thinking=reasoning_mode)
-
-    if tools is None:
-        logger.warning("tools is None, using empty list")
-        tools = []
 
     model = chatModel.bind_tools(tools)
 
@@ -796,21 +793,16 @@ async def create_agent(mcp_servers: list, history_mode: str="Disable") -> tuple[
         logger.error(f"Error creating MCP client or getting tools: {e}")
         logger.info(f"Falling back to builtin tools only (count: {len(tools)})")
         
+    system_prompt = None
     if chat.skill_mode == "Enable":        
-        try:
-            skill_tools = skill.get_skill_tools()
-            logger.info(f"skill_tools count: {len(skill_tools)}")
+        tools.extend(skill.get_skill_tools())
 
-            tool_names = {tool.name for tool in tools}
-            for st in skill_tools:
-                if st.name not in tool_names:
-                    tools.append(st)
-                else:
-                    logger.info(f"skill_tool of {st.name} already in tools")
+        skill_info = skill.selected_skill_info("base")
+        system_prompt = skill.build_skill_prompt(skill_info)
 
-        except Exception as e:
-            logger.error(f"Error loading skill tools: {e}")
-
+    else:
+        system_prompt = BASE_SYSTEM_PROMPT
+        
     tool_list = [tool.name for tool in tools] if tools else []
     logger.info(f"tool_list: {tool_list}")
 
@@ -824,8 +816,7 @@ async def create_agent(mcp_servers: list, history_mode: str="Disable") -> tuple[
             "recursion_limit": 100,
             "configurable": {"thread_id": user_id},
             "tools": tools,
-            "plugin_name": "base",
-            "system_prompt": None
+            "system_prompt": system_prompt
         }
     else:
         app = buildChatAgent(tools)
@@ -833,17 +824,17 @@ async def create_agent(mcp_servers: list, history_mode: str="Disable") -> tuple[
             "recursion_limit": 100,
             "configurable": {"thread_id": user_id},
             "tools": tools,
-            "plugin_name": "base",
-            "system_prompt": None
+            "system_prompt": system_prompt
         }        
     
     return app, config
 
 app = config = None
 active_mcp_servers = []
+active_skills = []
 
 async def run_langgraph_agent(query: str, mcp_servers: list, history_mode: str="Disable", containers: Optional[dict]=None) -> tuple[str, list]:
-    global app, config, active_mcp_servers
+    global app, config, active_mcp_servers, active_skills
     
     chat.index = 0
     chat.streaming_index = 0
@@ -851,8 +842,12 @@ async def run_langgraph_agent(query: str, mcp_servers: list, history_mode: str="
     image_url = []
     references = []
 
-    if app is None or mcp_servers != active_mcp_servers:
+    selected_skill_info = skill.selected_skill_info("base")
+
+    if app is None or mcp_servers != active_mcp_servers or active_skills != selected_skill_info:
         active_mcp_servers = mcp_servers
+        active_skills = selected_skill_info
+
         app, config = await create_agent(mcp_servers, history_mode)
     
     if app is None:

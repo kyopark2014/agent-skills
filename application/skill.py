@@ -199,17 +199,9 @@ SKILL_USAGE_GUIDE = (
     "4. skill 지침이 없는 일반 질문은 직접 답변하세요.\n"
 )
 
-def build_skill_prompt(plugin_name: str) -> str:
+def build_skill_prompt(skill_info: list) -> str:
     """Build skill-related prompt: path info, available skills XML, and usage guide."""
-    skill_info = selected_skill_info(plugin_name)
-    logger.info(f"plugin_name: {plugin_name}, skill_info: {skill_info}")
-
-    if plugin_name != "base":
-        default_skill_info = selected_skill_info("base")
-        if default_skill_info:
-            skill_info.extend(default_skill_info)
-            logger.info(f"default_skill_info: {default_skill_info}")
-
+        
     path_info = (
         f"## Paths (use absolute paths for write_file, read_file)\n"
         f"- WORKING_DIR: {WORKING_DIR}\n"
