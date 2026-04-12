@@ -1,6 +1,7 @@
 import logging
 import sys
 import os
+import subprocess
 import traceback
 import chat
 import utils
@@ -9,7 +10,6 @@ import mcp_config
 import datetime
 
 from typing import Literal, Optional
-
 from langgraph.prebuilt import ToolNode
 from langgraph.graph import START, END, StateGraph
 from typing_extensions import Annotated, TypedDict
@@ -19,6 +19,7 @@ from langchain_core.messages import HumanMessage, AIMessage, ToolMessage, AIMess
 from langchain_mcp_adapters.client import MultiServerMCPClient
 from pytz import timezone
 from langchain_core.tools import tool
+from urllib import parse
 
 logging.basicConfig(
     level=logging.INFO,
@@ -58,7 +59,6 @@ ARTIFACTS_DIR = os.path.join(WORKING_DIR, "artifacts")
 _ARTIFACT_EXT = frozenset({".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".bmp", "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx"})
 
 _mpl_runtime_ready = False
-
 
 def _ensure_cli_scripts_on_path() -> None:
     """Prepend pip user script dir so CLIs (e.g. browser-use) resolve in subprocess."""
@@ -180,9 +180,6 @@ _exec_globals = {
     "WORKING_DIR": WORKING_DIR,
     "ARTIFACTS_DIR": ARTIFACTS_DIR,
 }
-
-import datetime
-from pytz import timezone
 
 @tool
 def get_current_time(format: str=f"%Y-%m-%d %H:%M:%S")->str:
@@ -480,10 +477,28 @@ def memory_get(path: str, from_line: int = 0, lines: int = 0) -> str:
     except Exception as e:
         return json.dumps({"text": f"Error reading file: {e}", "path": path}, ensure_ascii=False)
 
+@tool
+def bash(command: str) -> str:
+    """Execute a bash command and return the result"""
+    logger.info(f"###### bash: {command} ######")
+    _ensure_cli_scripts_on_path()
+    result = subprocess.run(
+        command, shell=True, capture_output=True, text=True,
+        cwd=WORKING_DIR, timeout=300,
+        env=os.environ,
+    )
+    parts = []
+    if result.stdout:
+        parts.append(f"STDOUT:\n{result.stdout}")
+    if result.stderr:
+        parts.append(f"STDERR:\n{result.stderr}")
+    if result.returncode != 0:
+        parts.append(f"Return code: {result.returncode}")
+    return "\n".join(parts) if parts else "(no output)"
 
 def get_builtin_tools() -> list:
     """Return the list of built-in tools for the skill-aware agent."""
-    return [execute_code, write_file, read_file, upload_file_to_s3, get_current_time]
+    return [execute_code, write_file, bash, read_file, upload_file_to_s3, get_current_time]
 
 # ═══════════════════════════════════════════════════════════════════
 #  Agent State & System Prompt
