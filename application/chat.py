@@ -93,7 +93,7 @@ debug_mode = "Enable"
 skill_mode = "Disable"
 
 reasoning_mode = 'Disable'
-user_id = "mcp"
+user_id = "agent"
 multi_region = 'Disable'
 
 def update(modelName, debugMode, reasoningMode, skillMode):    
@@ -131,6 +131,11 @@ checkpointer = MemorySaver()
 memorystore = InMemoryStore()
 
 def initiate():
+    global user_id
+    
+    user_id = uuid.uuid4().hex
+    logger.info(f"user_id: {user_id}")
+
     global memory_chain, checkpointer, memorystore, checkpointers, memorystores
 
     if user_id in map_chain:  
@@ -152,6 +157,7 @@ def initiate():
 
 def clear_chat_history():
     global memory_chain
+
     # Initialize memory_chain if it doesn't exist
     if memory_chain is None:
         initiate()
@@ -735,7 +741,11 @@ def show_extended_thinking(st, result):
 #########################################################
 def general_conversation(query):
     global memory_chain
-    initiate()  # Initialize memory_chain
+
+    # Initialize memory_chain if it doesn't exist
+    if memory_chain is None:
+        initiate()  # Initialize memory_chain
+
     llm = get_chat(extended_thinking=reasoning_mode)
 
     system = (

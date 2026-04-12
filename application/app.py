@@ -52,7 +52,6 @@ mode_descriptions = {
     ]
 }
 
-agentType = 'langgraph'
 with st.sidebar:
     st.title("🔮 Menu")
     
@@ -99,7 +98,7 @@ with st.sidebar:
         st.subheader("⚙️ Skill Config")
 
         skill_selections = {}
-        default_skill_selections = config.get("default_skills") or ["graphify", "browser-use"]
+        default_skill_selections = config.get("default_skills") or ["skill-creator", "graphify"]
         logger.info(f"default_skill_selections: {default_skill_selections}")
         with st.expander("Skill 옵션 선택", expanded=True):
             available_skill_info = skill.available_skill_info("base")
@@ -208,12 +207,6 @@ with st.sidebar:
         select_reasoning = st.checkbox('Reasoning', value=False)
         reasoningMode = 'Enable' if select_reasoning else 'Disable'
         # logger.info(f"reasoningMode: {reasoningMode}")
-
-    # RAG grading
-    # select_grading = st.checkbox('Grading', value=False)
-    # gradingMode = 'Enable' if select_grading else 'Disable'
-    gradingMode = 'Disable'
-    # logger.info(f"gradingMode: {gradingMode}")
 
     uploaded_file = None
     if mode=='이미지 분석':
@@ -373,7 +366,6 @@ if prompt := st.chat_input("메시지를 입력하세요."):
                     query=prompt, 
                     mcp_servers=mcp_servers, 
                     history_mode=history_mode, 
-                    plugin_name="base",
                     containers=containers))
 
             st.session_state.messages.append({
