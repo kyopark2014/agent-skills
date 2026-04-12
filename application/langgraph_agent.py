@@ -844,7 +844,7 @@ async def run_langgraph_agent(query: str, mcp_servers: list, history_mode: str="
 
     selected_skill_info = skill.selected_skill_info("base")
 
-    if app is None or mcp_servers != active_mcp_servers or active_skills != selected_skill_info:
+    if app is None or active_mcp_servers != mcp_servers or active_skills != selected_skill_info:
         active_mcp_servers = mcp_servers
         active_skills = selected_skill_info
 
