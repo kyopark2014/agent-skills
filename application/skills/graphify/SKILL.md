@@ -1,6 +1,6 @@
 ---
 name: graphify
-description: any input (code, docs, papers, images) → knowledge graph → clustered communities → HTML + JSON + audit report
+description: "Knowledge graph tool: '/graphify <path>' builds a graph, '/graphify query' searches existing graph, '/graphify path/explain' traces or explains nodes. Check the subcommand FIRST before responding."
 trigger: /graphify
 ---
 
@@ -54,6 +54,21 @@ Use it for:
 - Your personal /raw folder (drop everything in, let it grow, query it)
 
 ## What You Must Do When Invoked
+
+**CRITICAL - SUBCOMMAND DISPATCH: Before doing anything else, parse the user's command to identify the subcommand. Follow this table:**
+
+| User's command | Action |
+|---|---|
+| `/graphify query "..."` | Jump to **"For /graphify query"** section below. Do NOT run the full pipeline. |
+| `/graphify path "A" "B"` | Jump to **"For /graphify path"** section below. Do NOT run the full pipeline. |
+| `/graphify explain "..."` | Jump to **"For /graphify explain"** section below. Do NOT run the full pipeline. |
+| `/graphify add <url>` | Jump to **"For /graphify add"** section below. Do NOT run the full pipeline. |
+| `/graphify <path> --update` | Jump to **"For --update"** section below. |
+| `/graphify <path> --cluster-only` | Jump to **"For --cluster-only"** section below. |
+| `/graphify <path> --watch` | Jump to **"For --watch"** section below. |
+| `/graphify` or `/graphify <path>` (with optional flags) | Run the **full pipeline** (Steps 0–9) below. |
+
+**If the subcommand is `query`, `path`, `explain`, or `add`, you MUST skip the full pipeline entirely and go directly to the corresponding section. These subcommands operate on an EXISTING graph — they do NOT build a new one.**
 
 If no path was given, use `.` (current directory). Do not ask the user for a path.
 
