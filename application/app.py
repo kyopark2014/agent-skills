@@ -19,14 +19,8 @@ logging.basicConfig(
 )
 logger = logging.getLogger("streamlit")
 
-WORKING_DIR = os.path.dirname(os.path.abspath(__file__))
-SKILLS_DIR = os.path.join(WORKING_DIR, "skills")
-ARTIFACTS_DIR = os.path.join(WORKING_DIR, "artifacts")
-
 config = utils.load_config()
 sharing_url = config.get("sharing_url")
-
-os.environ["DEV"] = "true"  # Skip user confirmation of get_user_input
 
 # title
 st.set_page_config(page_title='agent-skills', page_icon=None, layout="centered", initial_sidebar_state="auto", menu_items=None)
