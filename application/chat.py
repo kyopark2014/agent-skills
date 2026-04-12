@@ -138,6 +138,7 @@ def initiate():
 
     global memory_chain, checkpointer, memorystore, checkpointers, memorystores
 
+    # general conversation memory
     if user_id in map_chain:  
         logger.info(f"memory exist. reuse it!")
         memory_chain = map_chain[user_id]

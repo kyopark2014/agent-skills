@@ -34,7 +34,6 @@ config = utils.load_config()
 sharing_url = config.get("sharing_url")
 s3_prefix = "docs"
 capture_prefix = "captures"
-user_id = "langgraph"
 
 s3_bucket = config.get("s3_bucket")
         
@@ -520,15 +519,7 @@ BASE_SYSTEM_PROMPT = (
     "당신의 이름은 서연이고, 질문에 친근한 방식으로 대답하도록 설계된 대화형 AI입니다.\n"
     "상황에 맞는 구체적인 세부 정보를 충분히 제공합니다.\n"
     "모르는 질문을 받으면 솔직히 모른다고 말합니다.\n"
-    "한국어로 답변하세요.\n"
-
-    "An agent orchestrates the following workflow:\n"
-    "1. Receives user input\n"
-    "2. Processes the input using a language model\n"
-    "3. Decides whether to use tools to gather information or perform actions\n"
-    "4. Executes those tools and receives results\n"
-    "5. Continues reasoning with the new information\n"
-    "6. Produces a final response\n"
+    "한국어로 답변하세요."
 )
 
 MEMORY_SYSTEM_PROMPT = (
@@ -814,7 +805,7 @@ async def create_agent(mcp_servers: list, history_mode: str="Disable") -> tuple[
         app = buildChatAgentWithHistory(tools)
         config = {
             "recursion_limit": 100,
-            "configurable": {"thread_id": user_id},
+            "configurable": {"thread_id": chat.user_id},
             "tools": tools,
             "system_prompt": system_prompt
         }
@@ -822,7 +813,7 @@ async def create_agent(mcp_servers: list, history_mode: str="Disable") -> tuple[
         app = buildChatAgent(tools)
         config = {
             "recursion_limit": 100,
-            "configurable": {"thread_id": user_id},
+            "configurable": {"thread_id": chat.user_id},
             "tools": tools,
             "system_prompt": system_prompt
         }        
@@ -832,9 +823,10 @@ async def create_agent(mcp_servers: list, history_mode: str="Disable") -> tuple[
 app = config = None
 active_mcp_servers = []
 active_skills = []
+current_id = None
 
 async def run_langgraph_agent(query: str, mcp_servers: list, history_mode: str="Disable", containers: Optional[dict]=None) -> tuple[str, list]:
-    global app, config, active_mcp_servers, active_skills
+    global app, config, active_mcp_servers, active_skills, current_id
     
     chat.index = 0
     chat.streaming_index = 0
@@ -844,9 +836,10 @@ async def run_langgraph_agent(query: str, mcp_servers: list, history_mode: str="
 
     selected_skill_info = skill.selected_skill_info("base")
 
-    if app is None or active_mcp_servers != mcp_servers or active_skills != selected_skill_info:
+    if app is None or active_mcp_servers != mcp_servers or active_skills != selected_skill_info or current_id != chat.user_id:
         active_mcp_servers = mcp_servers
         active_skills = selected_skill_info
+        current_id = chat.user_id
 
         app, config = await create_agent(mcp_servers, history_mode)
     
