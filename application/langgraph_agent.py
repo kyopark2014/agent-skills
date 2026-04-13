@@ -52,6 +52,7 @@ import io, os, sys, json, traceback
 import subprocess as _subprocess, pathlib as _pathlib, shutil as _shutil
 import tempfile as _tempfile, glob as _glob, datetime as _datetime
 import math as _math, re as _re, requests as _requests
+import concurrent.futures
 from urllib.parse import quote
 from langchain_core.tools import tool
 from pathlib import Path
@@ -504,16 +505,188 @@ def bash(command: str) -> str:
         parts.append(f"Return code: {result.returncode}")
     return "\n".join(parts) if parts else "(no output)"
 
+_wiki_graph_executor = concurrent.futures.ThreadPoolExecutor(
+    max_workers=1, thread_name_prefix="wiki-graph",
+)
+
+_TEXT_EXTS = frozenset({
+    ".md", ".txt", ".py", ".js", ".ts", ".jsx", ".tsx", ".html", ".css",
+    ".json", ".yaml", ".yml", ".csv", ".xml", ".toml", ".ini", ".cfg",
+    ".go", ".rs", ".java", ".rb", ".sh", ".sql", ".r", ".c", ".cpp", ".h",
+})
+
+
+def _update_wiki_graph(
+    filepath: Path,
+    filename: str,
+    node_id: str,
+    label: str,
+    captured_at: str,
+    text_content: str,
+    graphify_out: Path,
+    graph_json: Path,
+    source_path: str = "",
+) -> None:
+    """Background worker: build/merge node into graphify knowledge graph."""
+    try:
+        from graphify.build import build_from_json
+        from graphify.cluster import cluster
+        from graphify.export import to_json
+    except ImportError:
+        logger.warning("[wiki-graph] graphify not installed — skipping graph update")
+        return
+
+    try:
+        is_code = filepath.suffix.lower() in (_TEXT_EXTS - {".md", ".txt", ".csv", ".xml"})
+        file_type = "code" if is_code else "document"
+
+        extraction = {
+            "nodes": [{
+                "id": node_id,
+                "label": label,
+                "file_type": file_type,
+                "source_file": f"raw/{filename}",
+                "source_location": source_path or None,
+                "source_url": None,
+                "captured_at": captured_at,
+                "author": None,
+                "contributor": "add_wiki",
+            }],
+            "edges": [],
+            "hyperedges": [],
+            "input_tokens": 0,
+            "output_tokens": 0,
+        }
+
+        if graph_json.exists():
+            from networkx.readwrite import json_graph
+
+            existing_data = json.loads(graph_json.read_text())
+            G = json_graph.node_link_graph(existing_data, edges="links")
+
+            G_new = build_from_json(extraction)
+            G.update(G_new)
+
+            matched_edges = 0
+            if text_content:
+                content_lower = text_content.lower()
+                for nid, ndata in G.nodes(data=True):
+                    if nid == node_id:
+                        continue
+                    node_label = ndata.get("label", "")
+                    if not node_label:
+                        continue
+                    node_label_lower = node_label.lower()
+                    if len(node_label_lower) >= 4 and node_label_lower in content_lower:
+                        score = min(0.6 + 0.05 * len(node_label_lower.split()), 0.85)
+                        G.add_edge(node_id, nid,
+                            relation="conceptually_related_to",
+                            confidence="INFERRED",
+                            confidence_score=round(score, 2),
+                            source_file=f"raw/{filename}",
+                            source_location=None,
+                            weight=1.0,
+                        )
+                        matched_edges += 1
+
+            communities = cluster(G)
+            to_json(G, communities, str(graph_json))
+            logger.info(
+                f"[wiki-graph] Updated: node='{label}', "
+                f"edges={matched_edges}, total={G.number_of_nodes()} nodes / {G.number_of_edges()} edges"
+            )
+        else:
+            G = build_from_json(extraction)
+            communities = cluster(G)
+            to_json(G, communities, str(graph_json))
+            logger.info(f"[wiki-graph] Created new graph: node='{label}'")
+
+        (graphify_out / ".needs_update").write_text(str(filepath))
+
+    except Exception:
+        logger.error(f"[wiki-graph] Background update failed:\n{traceback.format_exc()}")
+
+
+def add_to_wiki(source: str) -> str:
+    """Core logic: add content or a file to the wiki knowledge graph.
+
+    Auto-detects whether *source* is a file path (copied to wiki/raw/) or
+    raw text content (saved as a new .md file).  Graph update is submitted
+    to the background thread pool and returns immediately.
+    """
+    wiki_dir = Path.home() / "Documents" / "wiki"
+    raw_dir = wiki_dir / "raw"
+    graphify_out = wiki_dir / "graphify-out"
+    graph_json = graphify_out / "graph.json"
+
+    raw_dir.mkdir(parents=True, exist_ok=True)
+    graphify_out.mkdir(parents=True, exist_ok=True)
+
+    now = datetime.datetime.now()
+    ts = now.strftime("%Y%m%d_%H%M%S_") + f"{now.microsecond // 1000:03d}"
+    captured_at = now.strftime("%Y-%m-%d")
+    source_path_str = ""
+
+    src = Path(source)
+    if src.is_file():
+        ext = src.suffix or ".bin"
+        filename = f"knowledge_{ts}{ext}"
+        filepath = raw_dir / filename
+        _shutil.copy2(str(src), str(filepath))
+        source_path_str = str(src)
+
+        label = src.stem
+        text_content = ""
+        if ext.lower() in _TEXT_EXTS:
+            try:
+                text_content = filepath.read_text(encoding="utf-8")
+            except Exception:
+                pass
+    else:
+        filename = f"knowledge_{ts}.md"
+        filepath = raw_dir / filename
+        filepath.write_text(source, encoding="utf-8")
+        text_content = source
+
+        label = filename
+        for line in source.strip().split("\n"):
+            stripped = line.strip()
+            if stripped.startswith("#"):
+                label = stripped.lstrip("#").strip()
+                break
+            elif stripped:
+                label = stripped[:80]
+                break
+
+    node_id = f"raw_{filename.replace('.', '_').replace('-', '_')}"
+
+    _wiki_graph_executor.submit(
+        _update_wiki_graph,
+        filepath, filename, node_id, label, captured_at,
+        text_content, graphify_out, graph_json, source_path_str,
+    )
+
+    logger.info(f"[add_to_wiki] queued: {filepath} (source={source_path_str or 'content'})")
+    return (
+        f"Knowledge saved — graph update in progress.\n"
+        f"- File: {filepath}\n"
+        f"- Node: '{label}'"
+    )
+
+
 def get_builtin_tools() -> list:
     """Return the list of built-in tools for the skill-aware agent."""
-    return [execute_code, write_file, bash, read_file, upload_file_to_s3, get_current_time]
+    if sharing_url:
+        return [execute_code, write_file, read_file, bash, upload_file_to_s3, get_current_time]
+    else:
+        return [execute_code, write_file, read_file, bash, get_current_time]
 
 # ═══════════════════════════════════════════════════════════════════
 #  Agent State & System Prompt
 # ═══════════════════════════════════════════════════════════════════
 class State(TypedDict):
     messages: Annotated[list, add_messages]
-    image_url: list
+    artifacts: list
 
 BASE_SYSTEM_PROMPT = (
     "당신의 이름은 서연이고, 질문에 친근한 방식으로 대답하도록 설계된 대화형 AI입니다.\n"
@@ -554,7 +727,7 @@ def build_system_prompt(custom_prompt: Optional[str] = None, plugin_name: Option
 async def call_model(state: State, config):
     logger.info(f"###### call_model ######")
 
-    image_url = state.get('image_url', [])
+    artifacts = state.get('artifacts', [])
 
     tools = config.get("configurable", {}).get("tools")
     system = config.get("configurable", {}).get("system_prompt")
@@ -606,7 +779,7 @@ async def call_model(state: State, config):
         err_msg = traceback.format_exc()
         logger.info(f"error message: {err_msg}")
 
-    return {"messages": [response], "image_url": image_url}
+    return {"messages": [response], "artifacts": artifacts}
 
 
 async def should_continue(state: State, config) -> Literal["continue", "end"]:
@@ -831,14 +1004,15 @@ async def run_langgraph_agent(query: str, mcp_servers: list, history_mode: str="
     chat.index = 0
     chat.streaming_index = 0
 
-    image_url = []
+    artifacts = []
+    artifact_paths = []
     references = []
 
-    selected_skill_info = skill.selected_skill_info("base")
+    skill_info = skill.selected_skill_info("base") # built-in skills 
 
-    if app is None or active_mcp_servers != mcp_servers or active_skills != selected_skill_info or current_id != chat.user_id:
+    if app is None or active_mcp_servers != mcp_servers or active_skills != skill_info or current_id != chat.user_id:
         active_mcp_servers = mcp_servers
-        active_skills = selected_skill_info
+        active_skills = skill_info
         current_id = chat.user_id
 
         app, config = await create_agent(mcp_servers, history_mode)
@@ -907,18 +1081,25 @@ async def run_langgraph_agent(query: str, mcp_servers: list, history_mode: str="
             chat.add_notification(containers, f"Tool Result: {toolResult}")
             tool_used = True
             
-            content, urls, refs = chat.get_tool_info(tool_name, toolResult)
+            tool_content, tool_urls, refs = chat.get_tool_info(tool_name, toolResult)
             if refs:
                 for r in refs:
                     references.append(r)
                 logger.info(f"refs: {refs}")
-            if urls:
-                for url in urls:
-                    image_url.append(url)
-                logger.info(f"urls: {urls}")
+            if tool_urls:
+                for url in tool_urls:
+                    artifacts.append(url)
+                logger.info(f"tool_urls: {tool_urls}")
 
-            if content:
-                logger.info(f"content: {content}")        
+            if isinstance(toolResult, str) and "[artifacts]" in toolResult:
+                for line in toolResult.split("[artifacts]")[-1].strip().split("\n"):
+                    line = line.strip()
+                    if line and os.path.isfile(line):
+                        artifact_paths.append(line)
+                logger.info(f"artifact_paths from text: {artifact_paths}")
+
+            if tool_content:
+                logger.info(f"content: {tool_content}")        
     
     if not result:
         result = "답변을 찾지 못하였습니다."        
@@ -933,5 +1114,13 @@ async def run_langgraph_agent(query: str, mcp_servers: list, history_mode: str="
     
     if containers is not None:
         containers['notification'][chat.index].markdown(result)
-    
-    return result, image_url
+
+    wiki_targets = list(dict.fromkeys(artifacts + artifact_paths))
+    for fpath in wiki_targets:
+        if os.path.isfile(fpath):
+            try:
+                add_to_wiki(fpath)
+            except Exception as e:
+                logger.warning(f"[wiki-push] Failed for {fpath}: {e}")
+
+    return result, artifacts
