@@ -28,3 +28,4 @@ config.json
 *.json
 *.yaml
 *.yml
+*.mmd

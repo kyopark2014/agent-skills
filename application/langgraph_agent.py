@@ -1091,12 +1091,21 @@ async def run_langgraph_agent(query: str, mcp_servers: list, history_mode: str="
                     artifacts.append(url)
                 logger.info(f"tool_urls: {tool_urls}")
 
-            if isinstance(toolResult, str) and "[artifacts]" in toolResult:
-                for line in toolResult.split("[artifacts]")[-1].strip().split("\n"):
-                    line = line.strip()
-                    if line and os.path.isfile(line):
-                        artifact_paths.append(line)
-                logger.info(f"artifact_paths from text: {artifact_paths}")
+            if isinstance(toolResult, str):
+                if "[artifacts]" in toolResult:
+                    for line in toolResult.split("[artifacts]")[-1].strip().split("\n"):
+                        line = line.strip()
+                        if line and os.path.isfile(line):
+                            artifact_paths.append(line)
+                    logger.info(f"artifact_paths from text: {artifact_paths}")
+
+                if tool_name == "write_file" and toolResult.startswith("File saved:"):
+                    saved = toolResult.split("File saved:", 1)[1].strip()
+                    if not os.path.isabs(saved):
+                        saved = os.path.join(WORKING_DIR, saved)
+                    if os.path.isfile(saved) and os.path.abspath(saved).startswith(os.path.abspath(ARTIFACTS_DIR)):
+                        artifact_paths.append(saved)
+                        logger.info(f"artifact_paths from write_file: {saved}")
 
             if tool_content:
                 logger.info(f"content: {tool_content}")        

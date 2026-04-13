@@ -183,7 +183,7 @@ with st.sidebar:
             "Nova Pro", 
             "Nova Lite", 
             "Nova Micro",       
-        ), index=2
+        ), index=0
     )
 
     # skill checkbox
