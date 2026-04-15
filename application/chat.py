@@ -7,8 +7,6 @@ import uuid
 import base64
 import info 
 import utils
-import langgraph_agent
-import mcp_config
 import csv
 import PyPDF2
 from langchain_core.documents import Document
@@ -235,12 +233,12 @@ def get_chat(extended_thinking):
     )
 
     if profile['model_type'] != 'openai' and extended_thinking=='Enable':
-        maxReasoningOutputTokens=64000
         logger.info(f"extended_thinking: {extended_thinking}")
-        thinking_budget = min(maxOutputTokens, maxReasoningOutputTokens-1000)
+        response_budget = max(maxOutputTokens // 8, 4000)
+        thinking_budget = maxOutputTokens - response_budget
 
         parameters = {
-            "max_tokens":maxReasoningOutputTokens,
+            "max_tokens":maxOutputTokens,
             "temperature":1,            
             "thinking": {
                 "type": "enabled",
