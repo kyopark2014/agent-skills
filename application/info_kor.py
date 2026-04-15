@@ -1,54 +1,56 @@
-claude_4_sonnet_models = [   # Sonnet 4
+claude_4_6_opus_models = [   # Opus 4.6
     {
         "bedrock_region": "ap-northeast-2", 
         "model_type": "claude",
-        "model_id": "apac.anthropic.claude-sonnet-4-20250514-v1:0"
+        "model_id": "global.anthropic.claude-opus-4-6-v1"
     }
 ]
 
-claude_3_7_sonnet_models = [   # Sonnet 3.7
+claude_4_5_opus_models = [   # Opus 4.5
     {
         "bedrock_region": "ap-northeast-2", 
         "model_type": "claude",
-        "model_id": "apac.anthropic.claude-3-7-sonnet-20250219-v1:0"
+        "model_id": "global.anthropic.claude-opus-4-5-20251101-v1:0"
     }
 ]
 
-claude_3_5_sonnet_v2_models = [   # Sonnet 3.5 V1
+claude_4_5_haiku_models = [   # Haiku 4.5
     {
         "bedrock_region": "ap-northeast-2", 
         "model_type": "claude",
-        "model_id": "anthropic.claude-3-5-sonnet-20241022-v2:0"
+        "model_id": "global.anthropic.claude-haiku-4-5-20251001-v1:0"
     }
 ]
 
-claude_3_5_sonnet_v1_models = [   # Sonnet 3.5 V2
+claude_4_6_sonnet_models = [   # Sonnet 4.6
     {
         "bedrock_region": "ap-northeast-2", 
         "model_type": "claude",
-        "model_id": "anthropic.claude-3-5-sonnet-20240620-v1:0"
+        "model_id": "global.anthropic.claude-sonnet-4-6"
     }
 ]
 
-claude_3_0_sonnet_models = [   # Sonnet 3.0
+claude_4_5_sonnet_models = [   # Sonnet 4.6
     {
         "bedrock_region": "ap-northeast-2", 
         "model_type": "claude",
-        "model_id": "apac.anthropic.claude-3-sonnet-20240229-v1:0"
+        "model_id": "global.anthropic.claude-sonnet-4-5-20250929-v1:0"
     }
 ]
 
 def get_model_info(model_name):
     models = []
 
-    if model_name == "Claude 3.7 Sonnet":
-        models = claude_3_7_sonnet_models
-    elif model_name == "Claude 3.0 Sonnet":
-        models = claude_3_0_sonnet_models
-    elif model_name == "Claude 3.5 Sonnet":
-        models = claude_3_5_sonnet_v2_models
-    elif model_name == "Claude 4 Sonnet":
-        models = claude_4_sonnet_models
+    if model_name == "Claude 4.6 Sonnet":
+        models = claude_4_6_sonnet_models
+    elif model_name == "Claude 4.6 Opus":
+        models = claude_4_6_opus_models
+    elif model_name == "Claude 4.5 Haiku":
+        models = claude_4_5_haiku_models
+    elif model_name == "Claude 4.5 Sonnet":
+        models = claude_4_5_sonnet_models
+    elif model_name == "Claude 4.5 Opus":
+        models = claude_4_5_opus_models
 
     return models
 
