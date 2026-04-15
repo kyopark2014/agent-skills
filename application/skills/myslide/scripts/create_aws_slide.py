@@ -280,7 +280,7 @@ SERVICE_COLORS = {
     "ElastiCache": ("5600C2", "Cache"),
     "WAF": ("FF28EF", "Firewall"),
     "Shield": ("FF28EF", "DDoS Protection"),
-    "Client": ("5A6B86", "User"),
+    "Client": ("8899AA", "User"),
 }
 
 # Map display names to icon file names (kebab-case)
@@ -367,7 +367,7 @@ def generate_architecture_svg(elements, width=1200, height=400):
         '<defs>',
         '  <marker id="arrowhead" markerWidth="12" markerHeight="8" '
         'refX="11" refY="4" orient="auto" fill="none" '
-        'stroke="#5A6B86" stroke-width="1.5">',
+        'stroke="#8899AA" stroke-width="1.5">',
         '    <polyline points="1 1, 11 4, 1 7"/>',
         '  </marker>',
         '  <filter id="shadow" x="-5%" y="-5%" width="110%" height="110%">',
@@ -395,7 +395,7 @@ def generate_architecture_svg(elements, width=1200, height=400):
     for i, elem in enumerate(elements):
         x = spacing + i * (box_w + spacing)
         y = y_center - box_h // 2
-        color, label = SERVICE_COLORS.get(elem, ("5A6B86", elem))
+        color, label = SERVICE_COLORS.get(elem, ("8899AA", elem))
 
         svg_parts.append(
             f'<rect x="{x}" y="{y}" width="{box_w}" height="{box_h}" '
@@ -443,7 +443,7 @@ def generate_architecture_svg(elements, width=1200, height=400):
             ay = y_center
             svg_parts.append(
                 f'<line x1="{ax1}" y1="{ay}" x2="{ax2}" y2="{ay}" '
-                f'stroke="#5A6B86" stroke-width="2" marker-end="url(#arrowhead)"/>'
+                f'stroke="#8899AA" stroke-width="2" marker-end="url(#arrowhead)"/>'
             )
 
     svg_parts.append('</svg>')

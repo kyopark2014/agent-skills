@@ -605,7 +605,7 @@ cards.forEach((card, i) => {
   slide.addShape(pres.shapes.ROUNDED_RECTANGLE, {
     x: x, y: y, w: cardW, h: cardH,
     fill: { color: "161E2D", transparency: 25 },
-    line: { color: "5A6B86", width: 0.5, transparency: 50 },
+    line: { color: "8899AA", width: 0.5, transparency: 50 },
     rectRadius: 0.12
   });
 
@@ -690,7 +690,7 @@ const cards = [
   {
     title: "Integrations",
     bullets: ["AWS services", "AgentCore Memory", "LiteLLM"],
-    borderColor: "5A6B86",  // Slate Gray (secondary)
+    borderColor: "8899AA",  // Slate Gray (secondary)
   },
 ];
 
@@ -1296,29 +1296,28 @@ addAwsFooter(slide);
 
 ---
 
-## Image Hero (Nova Canvas)
+## Image Hero (sd35l)
 
 Full-width generated image on the right with text content on the left.
-Uses nova-canvas skill to generate a conceptual hero image matching the topic.
+Uses sd35l skill to generate a conceptual hero image matching the topic.
 Best for title slides, topic introductions, and visually impactful openers.
 
 **Image generation:**
 ```bash
-# Generate hero image (1280x720, 16:9)
-python3 "$NOVA_CANVAS_SCRIPT" \
-  --task text_to_image \
+# Generate hero image (16:9)
+SD35L_SCRIPT=$(find ~/.claude/plugins -path "*/sd35l/scripts/generate_image.py" 2>/dev/null | head -1)
+python3 "$SD35L_SCRIPT" \
   --prompt "Futuristic AI neural network visualization, interconnected glowing nodes and pathways, deep navy and purple gradient background, luminous orange and magenta accents, cinematic wide angle, professional technology illustration, ultra detailed" \
-  --negative-text "text, watermarks, logos, people, bright white background, cartoon, cluttered" \
-  --width 1280 --height 720 \
-  --quality standard --cfg-scale 6.5 \
-  --output-dir /tmp/myslide-assets/ --region us-east-1
+  --negative-prompt "text, watermarks, logos, people, bright white background, cartoon, cluttered" \
+  --aspect-ratio 16:9 --seed 42001 \
+  --output-dir /tmp/myslide-assets/
 ```
 
 ```javascript
 let slide = pres.addSlide();
 
 // Read generated image
-const heroImg = fs.readFileSync('/tmp/myslide-assets/text_to_image_1.png');
+const heroImg = fs.readFileSync('/tmp/myslide-assets/sd35l_1.png');
 const heroBase64 = 'image/png;base64,' + heroImg.toString('base64');
 
 // Full slide background (dark gradient as base)
@@ -1381,22 +1380,21 @@ addAwsFooter(slide);
 
 ---
 
-## Image + Text Split (Nova Canvas)
+## Image + Text Split (sd35l)
 
 Half-and-half layout: generated image on one side, structured text content on the other.
-Uses nova-canvas to create a square or portrait illustration that fills one column.
+Uses sd35l to create a portrait illustration that fills one column.
 Best for concept explanations, feature highlights, and storytelling slides.
 
 **Image generation:**
 ```bash
-# Generate half-slide image (640x720, portrait-ish)
-python3 "$NOVA_CANVAS_SCRIPT" \
-  --task text_to_image \
+# Generate half-slide image (2:3 portrait)
+SD35L_SCRIPT=$(find ~/.claude/plugins -path "*/sd35l/scripts/generate_image.py" 2>/dev/null | head -1)
+python3 "$SD35L_SCRIPT" \
   --prompt "Cloud computing security shield concept, translucent blue protective barrier around data center, dark environment, glowing edges, professional 3D render, centered composition" \
-  --negative-text "text, watermarks, people, cartoon, bright background" \
-  --width 640 --height 720 \
-  --quality standard --cfg-scale 6.5 \
-  --output-dir /tmp/myslide-assets/ --region us-east-1
+  --negative-prompt "text, watermarks, people, cartoon, bright background" \
+  --aspect-ratio 2:3 --seed 42002 \
+  --output-dir /tmp/myslide-assets/
 ```
 
 ```javascript
@@ -1411,7 +1409,7 @@ slide.addText("Enterprise-Grade Security", {
 });
 
 // Generated image (left side)
-const conceptImg = fs.readFileSync('/tmp/myslide-assets/text_to_image_1.png');
+const conceptImg = fs.readFileSync('/tmp/myslide-assets/sd35l_1.png');
 const conceptBase64 = 'image/png;base64,' + conceptImg.toString('base64');
 
 slide.addImage({
@@ -1459,29 +1457,28 @@ addAwsFooter(slide);
 
 ---
 
-## Full Image Background (Nova Canvas)
+## Full Image Background (sd35l)
 
 Generated image as the entire slide background with a dark overlay for text readability.
-Uses nova-canvas to create an atmospheric, abstract background.
+Uses sd35l to create an atmospheric, abstract background.
 Best for impactful quote slides, key message slides, and section transitions.
 
 **Image generation:**
 ```bash
-# Generate full background (1280x720, 16:9)
-python3 "$NOVA_CANVAS_SCRIPT" \
-  --task text_to_image \
+# Generate full background (16:9)
+SD35L_SCRIPT=$(find ~/.claude/plugins -path "*/sd35l/scripts/generate_image.py" 2>/dev/null | head -1)
+python3 "$SD35L_SCRIPT" \
   --prompt "Abstract dark cosmic nebula, deep space with subtle blue and purple gas clouds, scattered tiny stars, very dark overall tone, cinematic atmosphere, minimal clean composition, suitable as presentation background" \
-  --negative-text "text, watermarks, bright colors, people, objects, busy details, white, light background" \
-  --width 1280 --height 720 \
-  --quality standard --cfg-scale 6.5 \
-  --output-dir /tmp/myslide-assets/ --region us-east-1
+  --negative-prompt "text, watermarks, bright colors, people, objects, busy details, white, light background" \
+  --aspect-ratio 16:9 --seed 60001 \
+  --output-dir /tmp/myslide-assets/
 ```
 
 ```javascript
 let slide = pres.addSlide();
 
 // Generated image as full background
-const bgImg = fs.readFileSync('/tmp/myslide-assets/text_to_image_1.png');
+const bgImg = fs.readFileSync('/tmp/myslide-assets/sd35l_1.png');
 const bgBase64 = 'image/png;base64,' + bgImg.toString('base64');
 slide.background = { data: bgBase64 };
 

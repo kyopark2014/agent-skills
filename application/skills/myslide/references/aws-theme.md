@@ -36,7 +36,8 @@
 | `FF9EA2` | Salmon Pink | Private subnet containers |
 | `00A0C8` | Teal/Cyan | Icon accents, secondary highlight |
 | `69AE35` | AWS Green | Success/positive indicators |
-| `5A6B86` | Slate Gray | Muted text, secondary information |
+| `C8D0D8` | Light Slate | Subtitles, descriptions, secondary text (projector-readable) |
+| `8899AA` | Slate Gray | Footer copyright only (intentionally subtle) |
 
 ### Gradient Definitions
 
@@ -86,7 +87,8 @@ const FONTS = {
 | Subtitle / Sub-header | 20-24 | Bold |
 | Body text | **15-16** | Regular (NEVER below 15pt) |
 | Bullet items | **15-16** | Regular (NEVER below 15pt) |
-| Caption / Footer | 10-12 | Light, color: 5A6B86 |
+| Caption / Secondary | 10-12 | Light, color: C8D0D8 |
+| Footer / Copyright | 8 | Subtle, color: 8899AA |
 | Large stat callout | 60-72 | Heavy |
 
 ## Spacing & Layout
@@ -101,7 +103,7 @@ const FONTS = {
 - AWS logo: bottom-left corner (x=0.47, y=7.15, w=0.7, h=0.25)
 - Copyright: "2025, Amazon Web Services, Inc. or its affiliates. All rights reserved."
   - Position: x=1.3, y=7.15
-  - Font size: 8pt, color: 5A6B86
+  - Font size: 8pt, color: 8899AA (footer only — use C8D0D8 for all other secondary text)
 
 ### Content Card Dimensions
 - Container: x=0.42, y=1.41, w=12.5, h=4.84
@@ -193,7 +195,8 @@ const AWS_THEME = {
     salmonPink: "FF9EA2",
     teal: "00A0C8",
     green: "69AE35",
-    slateGray: "5A6B86",
+    lightSlate: "C8D0D8",
+    slateGray: "8899AA",  // footer copyright only
     lightGray: "F2F4F4",
   },
 

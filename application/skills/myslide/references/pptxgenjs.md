@@ -198,6 +198,74 @@ Tips:
 - Korean text works if the font is installed on the system (e.g., "Noto Sans KR")
 - For a three-stop gradient, add a third `<stop offset="50%" .../>` inside the `<linearGradient>`
 
+### Gradient Border (OOXML Post-Processing)
+
+PptxGenJS doesn't support gradient borders on shapes. But you can apply them via OOXML
+post-processing after generating the PPTX. This is better than the SVG workaround because
+the border remains native and editable in PowerPoint.
+
+Use python-pptx to open the generated PPTX and inject gradient line XML:
+
+```python
+from pptx import Presentation
+from pptx.oxml.ns import qn
+from lxml import etree
+
+def apply_gradient_border(shape, color1="F66C02", color2="5A6B86", width_pt=1.5, angle=90):
+    """Apply gradient line to a shape via OOXML.
+
+    Args:
+        shape: python-pptx shape object
+        color1: start color hex (no #)
+        color2: end color hex (no #)
+        width_pt: border width in points
+        angle: gradient angle (0=right, 90=down, 45=diagonal)
+    """
+    width_emu = int(width_pt * 12700)  # pt to EMU
+    angle_emu = angle * 60000          # degrees to 60000ths
+
+    spPr = shape._element.find(qn('a:spPr'))
+    if spPr is None:
+        spPr = shape._element.makeelement(qn('a:spPr'), {})
+        shape._element.append(spPr)
+
+    # Remove existing line
+    old_ln = spPr.find(qn('a:ln'))
+    if old_ln is not None:
+        spPr.remove(old_ln)
+
+    # Create gradient line
+    ln = etree.SubElement(spPr, qn('a:ln'))
+    ln.set('w', str(width_emu))
+
+    gradFill = etree.SubElement(ln, qn('a:gradFill'))
+    gsLst = etree.SubElement(gradFill, qn('a:gsLst'))
+
+    gs1 = etree.SubElement(gsLst, qn('a:gs'))
+    gs1.set('pos', '0')
+    etree.SubElement(gs1, qn('a:srgbClr')).set('val', color1)
+
+    gs2 = etree.SubElement(gsLst, qn('a:gs'))
+    gs2.set('pos', '100000')
+    etree.SubElement(gs2, qn('a:srgbClr')).set('val', color2)
+
+    lin = etree.SubElement(gradFill, qn('a:lin'))
+    lin.set('ang', str(angle_emu))
+    lin.set('scaled', '1')
+
+# Usage: open generated PPTX, find target shapes, apply gradient
+prs = Presentation("output.pptx")
+slide = prs.slides[5]  # slide index
+for sh in slide.shapes:
+    if sh.name == "Shape 3":  # target by shape name
+        apply_gradient_border(sh, "F66C02", "5A6B86")
+prs.save("output.pptx")
+```
+
+Common angle values: 0=left-to-right, 90=top-to-bottom, 45=diagonal, 135=reverse diagonal.
+
+For three-stop gradients, add a third `<a:gs pos="50000">` element to gsLst.
+
 ---
 
 ## Images

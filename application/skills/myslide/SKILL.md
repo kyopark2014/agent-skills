@@ -10,7 +10,7 @@ description: |
   "slide deck", "AWS slides", "프레젠테이션", "슬라이드 만들어", "발표자료"
 license: MIT License
 metadata:
-  skill-author: Jesam Kim
+  skill-author: 발표자
   version: 1.0.0
 allowed-tools: [Read, Write, Edit, Bash, Grep, Glob, Agent, AskUserQuestion]
 ---
@@ -26,11 +26,20 @@ Every slide should look like it was crafted by the AWS brand team.
 2. Read [references/slide-patterns.md](references/slide-patterns.md) for layout templates
 3. Read [references/pptxgenjs.md](references/pptxgenjs.md) for PptxGenJS creation guide
 4. Read [references/editing.md](references/editing.md) for editing existing PPTX files
+5. Read [references/animations.md](references/animations.md) for animation primitives
 5. Use `scripts/create_aws_slide.py` to generate background/SVG assets
 6. Official AWS service icons are in `icons/` (248 icons extracted from AWS Architecture Icon Deck)
 
 All references and scripts are self-contained within this skill directory.
 No external skill dependencies required.
+
+**Directory Convention** — All generated assets go under `artifacts/` (sibling to the skill directory), never `/tmp`:
+```
+ASSETS_DIR  = {workspace}/artifacts/myslide-assets/   # backgrounds, SVG/PNG assets, generated images
+PARTS_DIR   = {workspace}/artifacts/myslide-parts/    # individual slide JS snippets
+QA_DIR      = {workspace}/artifacts/myslide-qa/       # QA render outputs (PDF, JPEG)
+```
+`{workspace}` is the project root (the directory containing `application/`).
 
 ## Default Presenter
 
@@ -50,18 +59,36 @@ When generating title/thank-you slides, use these defaults unless the user speci
 3. **Generate background images**: Run the gradient background generator script
 4. **Create slides**: Use PptxGenJS (Node.js) with the AWS theme constants
 5. **Add SVG visuals**: Generate SVG diagrams for architecture/flow slides and embed as images
-6. **QA (subagent)**: Always delegate QA to a subagent (Sonnet 4.6+) to protect the main context window from image-heavy inspection. The subagent converts slides to images, visually verifies every slide against the QA Checklist, and returns a text-only report of issues found.
+6. **Apply animations**: Design contextual animations and apply via `apply_animations.py`
+7. **QA (two-phase)**: QA uses two complementary layers — programmatic validation
+   catches what rendered images hide (out-of-bounds shapes, font violations),
+   then visual inspection catches what code cannot judge (aesthetics, readability).
 
-**Paths (Python / `execute_code`):** The host app defines `WORKING_DIR` (the `application/` folder) and `SKILLS_DIR` = `WORKING_DIR/skills`. This skill’s script is **`os.path.join(SKILLS_DIR, "myslide", "scripts", "create_aws_slide.py")`**. Do not append extra segments like `agent-skills/application`—that duplicates the repo path and causes “file not found” even when the file exists. Do not use `os.environ.get("SKILLS_DIR", ...)` with a guessed default. Below, relative paths assume the shell cwd is this skill directory (`.../skills/myslide`).
+   **Phase 1 — Programmatic QA** (fast, deterministic, run in main agent):
+   ```bash
+   python3 scripts/qa_validate.py output.pptx
+   ```
+   If critical issues are found (exit code 1), fix them before proceeding to Phase 2.
+
+   **Phase 2 — Visual QA** (kiro preferred, subagent fallback): Delegates image-heavy
+   inspection to a separate context to protect the main context window. Prefer kiro
+   CLI (Opus 4.6) for higher quality analysis with severity classification. If kiro
+   is not available, fall back to a subagent (Sonnet 4.6+).
 
 ```bash
-# Step 1: Generate AWS gradient backgrounds (run from myslide/ or pass absolute script path as above)
-python3 scripts/create_aws_slide.py backgrounds --output-dir /tmp/myslide-assets/
+# Step 1: Generate AWS gradient backgrounds
+python3 scripts/create_aws_slide.py backgrounds --output-dir {workspace}/artifacts/myslide-assets/
 
 # Step 2: Run the PptxGenJS creation script (generated per presentation)
 node create_presentation.js
 
-# Step 3: QA - delegate to subagent (see "QA Subagent" section below)
+# Step 3: Apply animations (design JSON spec per presentation context)
+python3 scripts/apply_animations.py output.pptx animations.json -o animated.pptx
+
+# Step 4: Programmatic QA — catches structural issues renderers hide
+python3 scripts/qa_validate.py output.pptx
+
+# Step 5: Visual QA — prefer kiro (Opus 4.6), fall back to subagent (see below)
 ```
 
 ### B. Editing an Existing Slide
@@ -87,8 +114,8 @@ Each sub-agent handles an independent group of slides.
 # Sub-agent prompt template:
 Generate slides [N] through [M] for the AWS presentation.
 - Use the AWS theme from references/aws-theme.md
-- Background images are at: /tmp/myslide-assets/
-- Save individual slide JS snippets to: /tmp/myslide-parts/slide-{N}.js
+- Background images are at: {workspace}/artifacts/myslide-assets/
+- Save individual slide JS snippets to: {workspace}/artifacts/myslide-parts/slide-{N}.js
 - Follow the layout pattern specified for each slide type.
 ```
 
@@ -138,7 +165,7 @@ convert to PNG for embedding. This dramatically improves visual quality over pla
 python3 scripts/create_aws_slide.py svg-diagram \
   --type architecture \
   --elements "CloudFront,API Gateway,Lambda,Bedrock,S3" \
-  --output /tmp/myslide-assets/arch-diagram.png
+  --output {workspace}/artifacts/myslide-assets/arch-diagram.png
 ```
 
 **Available icon names** (use these as element names for automatic icon embedding):
@@ -208,18 +235,17 @@ For High-Level diagrams in aws-diagram JSON, use `"type": "generic"` containers:
 **SVG layer order rule** (applies to all SVG diagram generation):
 Icons must render ABOVE arrows. Render order: background > containers > arrows > callouts > icons.
 
-## Nova Canvas Image Generation (Optional)
+## Image Generation (Optional)
 
 When a slide needs a **conceptual illustration, hero image, or visual metaphor** that cannot
-be expressed with SVG diagrams or AWS icons, use the `nova-canvas` skill to generate images
-via Amazon Bedrock Nova Canvas.
+be expressed with SVG diagrams or AWS icons, use the `sd35l` skill (GA) to generate images
+via Amazon Bedrock. `nova2-omni` is also available as an alternative (gated preview).
 
-**Requires**: The `nova-canvas` skill must be installed in the Claude Code environment.
-Script path: `${NOVA_CANVAS_SKILL_PATH}/scripts/generate_image.py`
+**Requires**: The `sd35l` skill must be installed in the Claude Code environment.
 
-### When to Use Nova Canvas vs SVG Diagrams
+### When to Use Image Generation vs SVG Diagrams
 
-| Content Type | Use SVG/Icons | Use Nova Canvas |
+| Content Type | Use SVG/Icons | Use sd35l |
 |---|---|---|
 | AWS architecture diagrams | Yes | No |
 | Process flows, step diagrams | Yes | No |
@@ -229,55 +255,45 @@ Script path: `${NOVA_CANVAS_SKILL_PATH}/scripts/generate_image.py`
 | Screenshot placeholders | No | Yes |
 | Data flow with service icons | Yes | No |
 
-### Slide-Optimized Image Sizes
+### Slide-Optimized Aspect Ratios
 
-All dimensions are divisible by 16 (Nova Canvas requirement).
-
-| Use Case | Width | Height | Ratio | Slide Coverage |
-|---|---|---|---|---|
-| Full-slide background | 1280 | 720 | 16:9 | Entire slide behind text |
-| Hero image (title slide) | 1280 | 720 | 16:9 | Right 60-70% of slide |
-| Half-slide (left or right) | 640 | 720 | ~9:10 | Left/right half |
-| Card illustration | 512 | 512 | 1:1 | Inside a content card |
-| Small icon/illustration | 384 | 384 | 1:1 | Thumbnail in card grid |
-| Banner (wide strip) | 1280 | 384 | 10:3 | Top or bottom strip |
+| Use Case | Aspect Ratio | Slide Coverage |
+|---|---|---|
+| Full-slide background | `16:9` | Entire slide behind text |
+| Hero image (title slide) | `16:9` | Right 60-70% of slide |
+| Half-slide illustration | `2:3` or `3:4` | Left/right half |
+| Card illustration | `1:1` | Inside a content card |
+| Banner (wide strip) | `21:9` | Top or bottom strip |
 
 ### Integration Workflow
 
 ```bash
-# 1. Generate image with nova-canvas (find skill path dynamically)
-NOVA_CANVAS_SCRIPT=$(find ~/.claude/plugins -path "*/nova-canvas/scripts/generate_image.py" 2>/dev/null | head -1)
+# 1. Generate image with sd35l (find skill path dynamically)
+SD35L_SCRIPT=$(find ~/.claude/plugins -path "*/sd35l/scripts/generate_image.py" 2>/dev/null | head -1)
 
-python3 "$NOVA_CANVAS_SCRIPT" \
-  --task text_to_image \
+python3 "$SD35L_SCRIPT" \
   --prompt "Abstract dark gradient with glowing neural network connections, deep navy and purple tones, futuristic technology atmosphere, minimal clean composition" \
-  --negative-text "text, watermarks, logos, people, bright colors, white background" \
-  --width 1280 --height 720 \
-  --quality standard \
-  --cfg-scale 6.5 \
-  --output-dir /tmp/myslide-assets/ \
-  --region us-east-1
+  --negative-prompt "text, watermarks, logos, people, bright colors, white background" \
+  --aspect-ratio 16:9 \
+  --seed 42 \
+  --output-dir {workspace}/artifacts/myslide-assets/
 
-# 2. Read the generated image path from JSON output
-# Result: {"task": "text_to_image", "seed": 12345, "images": ["/tmp/myslide-assets/text_to_image_1.png"]}
+# 2. Result JSON: {"model": "...", "seed": 42, "images": ["{workspace}/artifacts/myslide-assets/sd35l_1.png"]}
 
-# 3. Embed in PptxGenJS using base64 or file path
+# 3. Embed in PptxGenJS using base64
 ```
 
 ### Prompt Guidelines for Presentation Images
-
-Nova Canvas prompts for slides should follow specific conventions to match the AWS dark theme:
 
 **Style keywords to include:**
 - "dark background", "deep navy", "dark gradient" (matches AWS theme)
 - "minimal", "clean composition" (professional look)
 - "glowing", "luminous accents" (matches orange/magenta highlights)
 - "futuristic", "technology", "digital" (AWS tech context)
-- "professional", "corporate" (presentation-appropriate)
 
 **Standard negative prompt for all slide images:**
 ```
-"text, watermarks, logos, signatures, bright white background, oversaturated, cartoon, childish, cluttered, busy composition, low quality, blurry"
+"text, watermarks, logos, bright white background, oversaturated, cartoon, cluttered, busy composition, blurry"
 ```
 
 **Prompt templates by slide type:**
@@ -294,8 +310,7 @@ Nova Canvas prompts for slides should follow specific conventions to match the A
 ```javascript
 const fs = require('fs');
 
-// Read nova-canvas output as base64
-const heroImage = fs.readFileSync('/tmp/myslide-assets/text_to_image_1.png');
+const heroImage = fs.readFileSync('{workspace}/artifacts/myslide-assets/sd35l_1.png');
 const heroBase64 = 'image/png;base64,' + heroImage.toString('base64');
 
 // Full-slide background image
@@ -316,13 +331,12 @@ slide.addShape(pres.shapes.RECTANGLE, {
 
 ### Cost Awareness
 
-- Standard quality 1024x1024: ~$0.04/image
-- Standard quality 1280x720: ~$0.04/image
+- SD3.5 Large: ~$0.04/image regardless of aspect ratio
 - A typical 10-slide deck with 3-4 generated images: ~$0.16
-- Use `--seed` parameter to reproduce exact images when iterating
+- Use `--seed` to reproduce exact images when iterating
 
-See [references/nova-canvas-integration.md](references/nova-canvas-integration.md) for detailed
-prompt examples and advanced techniques.
+See [references/image-generation-integration.md](references/image-generation-integration.md) for detailed
+prompt recipes and advanced techniques.
 
 ## Rounded Rectangle Default
 
@@ -366,6 +380,23 @@ Only use plain `RECTANGLE` for:
 - Table cell backgrounds (must tile without gaps)
 - Decorative gradient accent bars at slide edges
 
+### Thin Accent Lines Under Titles (DO NOT USE)
+
+Do NOT add thin orange/pink accent lines (h: 0.04) under slide titles.
+This creates visual noise and looks repetitive across slides. The title text
+itself is sufficient as the visual anchor. If visual separation is needed
+between title and content, use whitespace (0.3"+ gap) instead of a line.
+
+```javascript
+// ❌ WRONG: Thin accent line under title
+slide.addShape("rect", {
+  x: 0.8, y: 1.05, w: 1.5, h: 0.04, fill: { color: C.orange },
+});
+
+// ✅ CORRECT: Use whitespace gap between title and content
+// Title at y: 0.33, content starts at y: 1.41 (natural 0.3"+ gap)
+```
+
 ## Color Discipline (CRITICAL)
 
 Slides look more professional with fewer, well-chosen colors. Too many colors
@@ -381,7 +412,7 @@ of colors feels chaotic.
 | **Primary Text** | White | `FFFFFF` | All headings, body text, bullets |
 | **Emphasis** | Orange | `F66C02` | Key terms, highlights, numbered badges |
 | **Container** | Dark Navy | `161E2D` | Card fills, table cells, box backgrounds |
-| **Secondary** | Slate Gray | `5A6B86` | Muted text, separators, captions |
+| **Secondary** | Light Slate | `C8D0D8` | Subtitles, descriptions, captions (readable on projectors) |
 
 ### Allowed Accent (sparingly)
 
@@ -502,7 +533,7 @@ slide.addImage({ data: lightCard, x: 1.0, y: 1.5, w: 5.8, h: 4.5 });
 | Warm accent | `F66C02` | `C91F8A` | `161E2D` | Orange→Magenta on dark card |
 | Cool accent | `5600C2` | `2D7CFB` | `F2F4F4` | Purple→Blue on light card |
 | Brand gradient | `C91F8A` | `5600C2` | `161E2D` | Magenta→Purple on dark card |
-| Subtle | `5A6B86` | `161E2D` | `161E2D` | Gray fade, barely visible |
+| Subtle | `C8D0D8` | `161E2D` | `161E2D` | Gray fade, subtle |
 
 See `slide-patterns.md > Gradient Border Cards` for the full multi-card layout pattern.
 
@@ -589,12 +620,17 @@ slide.addText([
 ], { x: 1, y: 2, w: 8, h: 1 });
 ```
 
-### Gradient Text
+### Gradient Effects
 
-For large impact numbers or hero text that needs a gradient color effect (e.g., "80%" with
-orange-to-pink gradient), PptxGenJS doesn't support gradient fills on text natively.
-Use the SVG workaround documented in `references/pptxgenjs.md` (section "Gradient Text").
-The approach renders gradient text as SVG, converts to PNG via sharp, and embeds as an image.
+PptxGenJS doesn't natively support gradients on text or shape borders. Two workarounds
+are documented in `references/pptxgenjs.md`:
+
+- **Gradient Text** (section "Gradient Text"): Render as SVG, convert to PNG via sharp,
+  embed as image. Good for large hero numbers like "80%".
+- **Gradient Border** (section "Gradient Border"): Post-process the generated PPTX with
+  python-pptx to inject OOXML gradient line XML. This is the preferred approach for shape
+  borders because the result is native PowerPoint and remains editable. Use `apply_gradient_border()`
+  from the reference.
 
 ## Conversational Editing
 
@@ -609,6 +645,63 @@ For each edit request:
 2. Describe the proposed change
 3. Apply the change
 4. Show the result for confirmation
+
+## Animations (Contextual Design)
+
+Animations are designed **per-presentation** based on content and narrative flow.
+There are no fixed templates — each slide gets animations tailored to its story.
+
+Read [references/animations.md](references/animations.md) for the full primitives reference.
+
+### Workflow
+
+1. **Design animations** contextually after slides are created:
+   - What appears first? (title, framing context)
+   - What's the focal sequence? (data flow, process steps)
+   - What's the conclusion? (output, call-to-action)
+
+2. **Write JSON spec** describing the animation sequence per slide
+
+3. **Apply with script**:
+   ```bash
+   # List shapes to find target names/IDs
+   python3 scripts/apply_animations.py deck.pptx --list-shapes
+
+   # Apply animations
+   python3 scripts/apply_animations.py deck.pptx animations.json -o animated.pptx
+   ```
+
+### Key Primitives
+
+| Category | Effects | Use Case |
+|----------|---------|----------|
+| **Entrance** | appear, fade_in, fly_in, wipe, zoom_in | Revealing content step-by-step |
+| **Emphasis** | pulse, spin, grow_shrink, color_pulse | Drawing attention to key element |
+| **Exit** | disappear, fade_out, fly_out, zoom_out | Removing elements |
+| **Motion** | motion_path (SVG path syntax) | Data flow, pipeline visualization |
+| **Property** | property_change (fill_color, visibility) | State transitions |
+
+### Triggers
+
+| Trigger | Behavior |
+|---------|----------|
+| `onClick` | New click point — presenter controls timing |
+| `withPrevious` | Simultaneous with previous animation |
+| `afterPrevious` | Auto-starts after previous completes |
+
+### Shape Naming
+
+PptxGenJS does NOT preserve custom `name` attributes. After generating the PPTX,
+run `--list-shapes` to get actual shape names/IDs, then build the animation JSON spec
+using those names.
+
+### Animation Design Principles
+
+- **Less is more** — animate only what serves the narrative
+- **Consistent timing** — use 500ms for standard, 300ms for fast, 800-1000ms for dramatic
+- **Group related elements** — card + text should animate together (withPrevious)
+- **Build left-to-right** — for pipelines and data flows
+- **Fade for text, Fly for shapes** — general heuristic for visual harmony
 
 ## Team-Up Strategy (Large Presentations, 15+ slides)
 
@@ -629,7 +722,7 @@ it enables inter-agent communication, shared task tracking, and phased execution
 | **designer** | Visual Design | sonnet | Generate backgrounds, SVG diagrams, icons |
 | **writer-1** | Content (slides 1-N/2) | sonnet | Write first half slide code |
 | **writer-2** | Content (slides N/2+1-N) | sonnet | Write second half slide code |
-| **qa** | Quality Assurance | sonnet | Render slides to images, check visual quality (image-heavy — needs Sonnet 4.6+) |
+| **qa** | Quality Assurance | opus/sonnet | Run qa_validate.py first, then visual QA via kiro (Opus) or subagent (Sonnet 4.6+) |
 
 **Team Workflow:**
 ```
@@ -638,7 +731,7 @@ it enables inter-agent communication, shared task tracking, and phased execution
    - designer generates all background/SVG assets
    - writers create PptxGenJS code for assigned slides
 3. lead: Combine all parts into single presentation script
-4. qa: Render and inspect every slide, report issues
+4. qa: Run qa_validate.py, fix critical issues, then render and inspect visually
 5. lead: Apply fixes, finalize
 ```
 
@@ -668,26 +761,85 @@ All scripts are self-contained within `scripts/`:
 | `scripts/thumbnail.py` | Generate thumbnail grid for visual overview |
 | `scripts/clean.py` | Clean PPTX XML (remove unused elements) |
 | `scripts/add_slide.py` | Add slides to existing PPTX |
-| `references/nova-canvas-integration.md` | Nova Canvas image generation guide for slides |
+| `scripts/apply_animations.py` | Inject OOXML animations from JSON spec into PPTX |
+| `scripts/qa_validate.py` | Programmatic QA — bounds, connectors, font sizes, zero-size shapes |
+| `references/image-generation-integration.md` | sd35l / nova2-omni image generation guide for slides |
 
-**QA Subagent (ALWAYS use — protects main context from image token cost):**
+**Two-Phase QA (ALWAYS run both phases):**
 
-QA is image-heavy and consumes significant context window tokens. Always spawn a
-dedicated subagent (Sonnet 4.6 or higher) for visual inspection. The subagent runs
-the conversion commands, reads the rendered slide images, checks every item in the
-QA Checklist, and returns a **text-only** summary of pass/fail results and specific
-issues found. The main agent never reads the slide images directly.
-
-Subagent prompt template:
+**Phase 1 — Programmatic QA** (run in main agent, fast):
+```bash
+python3 {skill_path}/scripts/qa_validate.py {pptx_path}
+# Exit code 0 = pass, 1 = critical issues, 2 = error
+# Add --json for machine-readable output
+# Add --strict to include INFO-level findings
 ```
-You are a QA inspector for AWS-themed PowerPoint presentations.
+This catches what rendered images HIDE — shapes extending beyond slide boundaries,
+connector endpoints outside the slide, text below 15pt, zero-size shapes. These
+issues are invisible in rendered images because renderers clip at the slide edge.
+Fix all critical issues before proceeding to Phase 2.
+
+**Phase 2 — Visual QA** (kiro preferred, subagent fallback):
+
+Visual QA is image-heavy and consumes significant context window tokens. Delegate
+it to a separate context — never read slide images in the main agent.
+
+**Option A — Kiro CLI (preferred, Opus 4.6):**
+
+Kiro uses Opus 4.6 which produces more structured reports with severity
+classification and deeper design system analysis. Use when kiro CLI is installed.
+
+```bash
+# First convert PPTX to images
+python3 {skill_path}/scripts/office/soffice.py --headless --convert-to pdf {pptx_path}
+pdftoppm -jpeg -r 150 {pdf_path} {workspace}/artifacts/myslide-qa/slide
+
+# Then delegate visual QA to kiro
+bash {kiro_skill_path}/scripts/run_kiro.sh --trust-all --timeout 300 \
+  "You are a visual QA inspector for AWS-themed PowerPoint presentations.
+
+Read each slide image and inspect for visual quality:
+$(for f in {workspace}/artifacts/myslide-qa/slide-*.jpg; do echo "- $f"; done)
+
+Design system: dark bg (#09051B), white text, orange (#F66C02) emphasis,
+dark navy (#161E2D) cards, rounded rectangles, body text min 15pt.
+
+Phase 1 (programmatic) already verified: bounds, connectors, font sizes.
+Focus on VISUAL quality only:
+- Color contrast, orange highlight usage (max 2-3 per slide)
+- Layout variety (no 3+ identical patterns), card whitespace (text >= 60%)
+- SVG diagram clarity, icon layer order, arrow-icon clearance
+- Thank You slide text overlap, generated image dark theme match
+
+Per-slide report: PASS/FAIL with severity (경미/중간/심각) and specific issues.
+Summary at end."
+```
+
+**Option B — Subagent (fallback, Sonnet 4.6+):**
+
+Use when kiro is not available. Spawn a dedicated subagent for visual inspection.
+
+```
+You are a visual QA inspector for AWS-themed PowerPoint presentations.
+
+Phase 1 (programmatic) already passed. Structural checks are verified.
+Focus on VISUAL quality only.
 
 1. Convert PPTX to images:
    python3 {skill_path}/scripts/office/soffice.py --headless --convert-to pdf {pptx_path}
    pdftoppm -jpeg -r 150 {pdf_path} {output_prefix}
 
-2. Read each slide image and verify against this checklist:
-   [paste QA Checklist items]
+2. Read each slide image and check:
+   - Color contrast sufficient (white on dark)
+   - Orange highlights used sparingly (max 2-3 per slide)
+   - Layout variety across deck (no 3+ identical patterns in a row)
+   - SVG diagrams render cleanly without text overlap
+   - Icons render above arrows (correct layer order)
+   - No arrow lines crossing over service icons
+   - Card whitespace ratio: text fills >= 60% of card height
+   - Thank You slide: English/Korean text not overlapping
+   - Generated images match dark theme (dark with accent glows)
+   - Text overlay on images has sufficient contrast
 
 3. Return a text-only report:
    - Per-slide: PASS or FAIL with specific issues
@@ -695,6 +847,17 @@ You are a QA inspector for AWS-themed PowerPoint presentations.
 
 Do NOT return images. Only return text findings.
 ```
+
+**Choosing between Kiro and Subagent:**
+
+| | Kiro (Opus 4.6) | Subagent (Sonnet 4.6) |
+|---|---|---|
+| **Model quality** | Higher (better design judgment) | Good (catches major issues) |
+| **Report structure** | Severity levels, tables | Prose descriptions |
+| **Context isolation** | Separate process | Subagent within Claude Code |
+| **Availability** | Requires kiro CLI installed | Always available |
+| **Speed** | Comparable | Comparable |
+| **Best for** | Final QA before delivery | Quick iteration checks |
 
 **Editing workflow (unpack/repack):**
 ```bash
@@ -706,7 +869,19 @@ python3 scripts/office/pack.py unpacked/ output.pptx
 
 ## QA Checklist
 
-After generating any presentation:
+### Phase 1 — Programmatic (`qa_validate.py`, run automatically)
+
+These are checked by the script — no manual inspection needed:
+- [ ] All shapes within slide boundaries (no out-of-bounds objects)
+- [ ] All connector/arrow endpoints within slide boundaries
+- [ ] No zero-length connectors (invisible arrows)
+- [ ] No zero-size shapes (invisible objects)
+- [ ] Body text fontSize >= 15pt (NEVER 12-14pt) — includes table cells, process flow cards, column text
+- [ ] No text below 8pt (absolute minimum for captions/footers)
+
+### Phase 2 — Visual (subagent inspection)
+
+These require human/AI visual judgment on rendered images:
 - [ ] Every slide has a visual element (no text-only slides)
 - [ ] Color contrast is sufficient (white text on dark backgrounds)
 - [ ] Orange highlights are used sparingly (max 2-3 per slide)
@@ -720,13 +895,12 @@ After generating any presentation:
 - [ ] Arrow markers use Open Arrow style (stroke, not filled polygon)
 - [ ] All card/container shapes use ROUNDED_RECTANGLE (not plain RECTANGLE)
 - [ ] Accent colors use line border, not overlay bars
-- [ ] 슬라이드당 5색 이내 (bgBase, white, orange, darkNavy, slateGray + magenta 테두리)
-- [ ] 불필요한 색상 사용 없음 (lavender, salmon, teal, green 등 특수 색상 금지)
-- [ ] Body text fontSize >= 15pt (NEVER 12-14pt) — includes table cells, process flow cards, column text
+- [ ] Max 5 colors per slide (bgBase, white, orange, darkNavy, lightSlate `C8D0D8` + magenta border)
+- [ ] No unnecessary colors (lavender, salmon, teal, green reserved for special cases only)
 - [ ] Card whitespace ratio: text fills >= 60% of card height (no excessive bottom gaps)
 - [ ] Grid/multi-card slides use 15pt+ body text (not smaller to "fit")
-- [ ] Thank You slide: 영문/한글 텍스트가 겹치지 않음 (별도 줄에 충분한 간격)
-- [ ] Architecture diagram: 모든 서비스 박스에 AWS 서비스 아이콘이 포함됨 (빈 박스 금지)
+- [ ] Thank You slide: English/Korean text must not overlap (separate lines with sufficient spacing)
+- [ ] Architecture diagram: every service box must include an AWS service icon (no empty boxes)
 - [ ] Footer with AWS logo placement is consistent
 - [ ] Nova Canvas images match AWS dark theme (predominantly dark with accent glows)
 - [ ] Text overlay on generated images has sufficient contrast (dark overlay applied)
