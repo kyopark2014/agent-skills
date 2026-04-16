@@ -49,11 +49,11 @@ The system prompt exposes **`WORKING_DIR`** as the `application/` directory. Thi
 |------|---------|
 | **`{WORKING_DIR}/skills/myslide`** | Root of this skill (`SKILL.md`, `scripts/`, `icons/`, `references/`) |
 
-- Use **`{WORKING_DIR}/skills/myslide`** for every script path, `read_file`, and `cd` — not `~/.claude`, `~/.claude/plugins`, or `~/.claude/plugins/cache/...`.
-- Optional helper skills (`sd35l`, `nova2-omni`, `kiro`, etc.) must be resolved under **`{WORKING_DIR}/skills/<name>`** only (same pattern as myslide).
+- Use **`{WORKING_DIR}/skills/myslide`** for every script path, `read_file`, and `cd`.
+- Optional helper skills (`sd35l`, `nova2-omni`, `kiro`, etc.) must be resolved under **`{WORKING_DIR}/skills/<name>`** (same pattern as myslide).
 
 ```bash
-# Example: locate sd35l under application/skills (never ~/.claude)
+# Example: locate sd35l under application/skills
 SD35L_SCRIPT=$(find "${WORKING_DIR}/skills" -path "*/sd35l/scripts/generate_image.py" 2>/dev/null | head -1)
 ```
 

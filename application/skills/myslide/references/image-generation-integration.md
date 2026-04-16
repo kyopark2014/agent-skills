@@ -18,7 +18,7 @@ seed-based reproducibility which is ideal for iterating on decks.
 
 ## Finding the Script
 
-`WORKING_DIR` is the `application/` directory (see the main agent system prompt). Search only under **`${WORKING_DIR}/skills`**, not `~/.claude` or plugin caches.
+`WORKING_DIR` is the `application/` directory (see the main agent system prompt). Search under **`${WORKING_DIR}/skills`** for helper skills.
 
 ```bash
 # Locate sd35l skill script (recommended)
