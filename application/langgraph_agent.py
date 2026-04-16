@@ -805,7 +805,7 @@ async def should_continue(state: State, config) -> Literal["continue", "end"]:
 
 async def plan_node(state: State, config):
     logger.info(f"###### plan_node ######")
-    containers = config.get("configurable", {}).get("containers", None)
+    notification_queue = config.get("configurable", {}).get("notification_queue", None)
     system = (
         "For the given objective, come up with a simple step by step plan."
         "This plan should involve individual tasks, that if executed correctly will yield the correct answer."
@@ -831,8 +831,8 @@ async def plan_node(state: State, config):
         plan = plan.strip()
         response = HumanMessage(content="다음의 plan을 참고하여 답변하세요.\n" + plan)
 
-        if containers is not None:
-            chat.add_notification(containers, '계획:\n' + plan)
+        if notification_queue is not None:
+            chat.add_notification(notification_queue, '계획:\n' + plan)
 
     except Exception:
         response = HumanMessage(content="")
@@ -998,10 +998,10 @@ active_mcp_servers = []
 active_skills = []
 current_id = None
 
-async def run_langgraph_agent(query: str, mcp_servers: list, history_mode: str="Disable", containers: Optional[dict]=None) -> tuple[str, list]:
+async def run_langgraph_agent(query: str, mcp_servers: list, history_mode: str="Disable", notification_queue=None) -> tuple[str, list]:
     global app, config, active_mcp_servers, active_skills, current_id
     
-    queue = containers['queue'] if containers else None
+    queue = notification_queue if notification_queue else None
     if queue:
         queue.reset()
 
@@ -1025,11 +1025,19 @@ async def run_langgraph_agent(query: str, mcp_servers: list, history_mode: str="
     inputs = {
         "messages": [HumanMessage(content=query)]
     }
+
+    run_config = {
+        **config,
+        "configurable": {
+            **config.get("configurable", {}),
+            "notification_queue": notification_queue,
+        },
+    }
             
     result = ""
     tool_used = False  # Track if tool was used
     tool_name = toolUseId = ""
-    async for stream in app.astream(inputs, config, stream_mode="messages"):
+    async for stream in app.astream(inputs, run_config, stream_mode="messages"):
         if isinstance(stream[0], AIMessageChunk):
             message = stream[0]    
             input = {}        
@@ -1048,7 +1056,8 @@ async def run_langgraph_agent(query: str, mcp_servers: list, history_mode: str="
                                 result += text_content
                                 
                             # logger.info(f"result: {result}")                
-                            chat.update_streaming_result(containers, result, "markdown")
+                            if chat.debug_mode == "Enable" and queue:
+                                chat.update_streaming_result(notification_queue, result, "markdown")
 
                         elif content_item.get('type') == 'tool_use':
                             # logger.info(f"content_item: {content_item}")      
@@ -1077,7 +1086,8 @@ async def run_langgraph_agent(query: str, mcp_servers: list, history_mode: str="
             toolResult = message.content
             toolUseId = message.tool_call_id
             logger.info(f"toolResult: {toolResult}, toolUseId: {toolUseId}")
-            chat.add_notification(containers, f"Tool Result: {toolResult}")
+            if chat.debug_mode == "Enable":
+                chat.add_notification(notification_queue, f"Tool Result: {toolResult}")
             tool_used = True
             
             tool_content, tool_urls, refs = chat.get_tool_info(tool_name, toolResult)
@@ -1120,7 +1130,8 @@ async def run_langgraph_agent(query: str, mcp_servers: list, history_mode: str="
             ref += f"{i+1}. [{reference['title']}]({reference['url']}), {page_content}...\n"    
         result += ref
     
-    chat.update_final_result(containers, result)
+    if notification_queue is not None and chat.debug_mode == "Enable":
+        chat.update_final_result(notification_queue, result)
 
     wiki_targets = list(dict.fromkeys(artifacts + artifact_paths))
     for fpath in wiki_targets:

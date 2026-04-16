@@ -88,7 +88,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             query=user_message,
             mcp_servers=DEFAULT_MCP_SERVERS,
             history_mode="Enable",
-            containers=None,
+            notification_queue=None,
         )
         logger.info(f"[chat_id={chat_id}] response length: {len(response)}")
 
