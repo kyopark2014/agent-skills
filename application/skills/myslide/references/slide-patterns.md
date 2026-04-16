@@ -1305,7 +1305,7 @@ Best for title slides, topic introductions, and visually impactful openers.
 **Image generation:**
 ```bash
 # Generate hero image (16:9)
-SD35L_SCRIPT=$(find ~/.claude/plugins -path "*/sd35l/scripts/generate_image.py" 2>/dev/null | head -1)
+SD35L_SCRIPT=$(find "${WORKING_DIR}/skills" -path "*/sd35l/scripts/generate_image.py" 2>/dev/null | head -1)
 python3 "$SD35L_SCRIPT" \
   --prompt "Futuristic AI neural network visualization, interconnected glowing nodes and pathways, deep navy and purple gradient background, luminous orange and magenta accents, cinematic wide angle, professional technology illustration, ultra detailed" \
   --negative-prompt "text, watermarks, logos, people, bright white background, cartoon, cluttered" \
@@ -1389,7 +1389,7 @@ Best for concept explanations, feature highlights, and storytelling slides.
 **Image generation:**
 ```bash
 # Generate half-slide image (2:3 portrait)
-SD35L_SCRIPT=$(find ~/.claude/plugins -path "*/sd35l/scripts/generate_image.py" 2>/dev/null | head -1)
+SD35L_SCRIPT=$(find "${WORKING_DIR}/skills" -path "*/sd35l/scripts/generate_image.py" 2>/dev/null | head -1)
 python3 "$SD35L_SCRIPT" \
   --prompt "Cloud computing security shield concept, translucent blue protective barrier around data center, dark environment, glowing edges, professional 3D render, centered composition" \
   --negative-prompt "text, watermarks, people, cartoon, bright background" \
@@ -1466,7 +1466,7 @@ Best for impactful quote slides, key message slides, and section transitions.
 **Image generation:**
 ```bash
 # Generate full background (16:9)
-SD35L_SCRIPT=$(find ~/.claude/plugins -path "*/sd35l/scripts/generate_image.py" 2>/dev/null | head -1)
+SD35L_SCRIPT=$(find "${WORKING_DIR}/skills" -path "*/sd35l/scripts/generate_image.py" 2>/dev/null | head -1)
 python3 "$SD35L_SCRIPT" \
   --prompt "Abstract dark cosmic nebula, deep space with subtle blue and purple gas clouds, scattered tiny stars, very dark overall tone, cinematic atmosphere, minimal clean composition, suitable as presentation background" \
   --negative-prompt "text, watermarks, bright colors, people, objects, busy details, white, light background" \

@@ -44,6 +44,8 @@ Dark gradient backgrounds, AWS brand colors, SVG architecture diagrams, and conv
 
 ## Directory Structure
 
+Runtime path in this repository: **`application/skills/myslide`** (the agent’s `WORKING_DIR` is `application/`, so this folder is **`WORKING_DIR/skills/myslide`**). Do not resolve this skill from `~/.claude` or plugin cache paths.
+
 ```
 myslide/
 ├── SKILL.md                          # Main skill instructions

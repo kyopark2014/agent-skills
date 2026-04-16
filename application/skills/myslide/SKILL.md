@@ -41,6 +41,22 @@ QA_DIR      = {workspace}/artifacts/myslide-qa/       # QA render outputs (PDF, 
 ```
 `{workspace}` is the project root (the directory containing `application/`).
 
+### Skill root (this repo)
+
+The system prompt exposes **`WORKING_DIR`** as the `application/` directory. This skill lives only here:
+
+| Path | Meaning |
+|------|---------|
+| **`{WORKING_DIR}/skills/myslide`** | Root of this skill (`SKILL.md`, `scripts/`, `icons/`, `references/`) |
+
+- Use **`{WORKING_DIR}/skills/myslide`** for every script path, `read_file`, and `cd` — not `~/.claude`, `~/.claude/plugins`, or `~/.claude/plugins/cache/...`.
+- Optional helper skills (`sd35l`, `nova2-omni`, `kiro`, etc.) must be resolved under **`{WORKING_DIR}/skills/<name>`** only (same pattern as myslide).
+
+```bash
+# Example: locate sd35l under application/skills (never ~/.claude)
+SD35L_SCRIPT=$(find "${WORKING_DIR}/skills" -path "*/sd35l/scripts/generate_image.py" 2>/dev/null | head -1)
+```
+
 ## Default Presenter
 
 When generating title/thank-you slides, use these defaults unless the user specifies otherwise:
@@ -241,7 +257,7 @@ When a slide needs a **conceptual illustration, hero image, or visual metaphor**
 be expressed with SVG diagrams or AWS icons, use the `sd35l` skill (GA) to generate images
 via Amazon Bedrock. `nova2-omni` is also available as an alternative (gated preview).
 
-**Requires**: The `sd35l` skill must be installed in the Claude Code environment.
+**Requires**: If used, the `sd35l` skill must exist under `{WORKING_DIR}/skills/sd35l` (or adjust the find path above).
 
 ### When to Use Image Generation vs SVG Diagrams
 
@@ -268,8 +284,8 @@ via Amazon Bedrock. `nova2-omni` is also available as an alternative (gated prev
 ### Integration Workflow
 
 ```bash
-# 1. Generate image with sd35l (find skill path dynamically)
-SD35L_SCRIPT=$(find ~/.claude/plugins -path "*/sd35l/scripts/generate_image.py" 2>/dev/null | head -1)
+# 1. Generate image with sd35l (resolve under application/skills only)
+SD35L_SCRIPT=$(find "${WORKING_DIR}/skills" -path "*/sd35l/scripts/generate_image.py" 2>/dev/null | head -1)
 
 python3 "$SD35L_SCRIPT" \
   --prompt "Abstract dark gradient with glowing neural network connections, deep navy and purple tones, futuristic technology atmosphere, minimal clean composition" \
@@ -769,7 +785,7 @@ All scripts are self-contained within `scripts/`:
 
 **Phase 1 — Programmatic QA** (run in main agent, fast):
 ```bash
-python3 {skill_path}/scripts/qa_validate.py {pptx_path}
+python3 "${WORKING_DIR}/skills/myslide/scripts/qa_validate.py" {pptx_path}
 # Exit code 0 = pass, 1 = critical issues, 2 = error
 # Add --json for machine-readable output
 # Add --strict to include INFO-level findings
@@ -791,11 +807,13 @@ classification and deeper design system analysis. Use when kiro CLI is installed
 
 ```bash
 # First convert PPTX to images
-python3 {skill_path}/scripts/office/soffice.py --headless --convert-to pdf {pptx_path}
+python3 "${WORKING_DIR}/skills/myslide/scripts/office/soffice.py" --headless --convert-to pdf {pptx_path}
 pdftoppm -jpeg -r 150 {pdf_path} {workspace}/artifacts/myslide-qa/slide
 
-# Then delegate visual QA to kiro
-bash {kiro_skill_path}/scripts/run_kiro.sh --trust-all --timeout 300 \
+# Then delegate visual QA to kiro (script under application/skills/kiro if present)
+KIRO_RUN=$(find "${WORKING_DIR}/skills" -path "*/kiro/scripts/run_kiro.sh" 2>/dev/null | head -1)
+# If KIRO_RUN is empty, use Option B below — do not run bash with an empty path.
+bash "$KIRO_RUN" --trust-all --timeout 300 \
   "You are a visual QA inspector for AWS-themed PowerPoint presentations.
 
 Read each slide image and inspect for visual quality:
@@ -826,7 +844,7 @@ Phase 1 (programmatic) already passed. Structural checks are verified.
 Focus on VISUAL quality only.
 
 1. Convert PPTX to images:
-   python3 {skill_path}/scripts/office/soffice.py --headless --convert-to pdf {pptx_path}
+   python3 "${WORKING_DIR}/skills/myslide/scripts/office/soffice.py" --headless --convert-to pdf {pptx_path}
    pdftoppm -jpeg -r 150 {pdf_path} {output_prefix}
 
 2. Read each slide image and check:

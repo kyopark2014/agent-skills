@@ -18,17 +18,19 @@ seed-based reproducibility which is ideal for iterating on decks.
 
 ## Finding the Script
 
+`WORKING_DIR` is the `application/` directory (see the main agent system prompt). Search only under **`${WORKING_DIR}/skills`**, not `~/.claude` or plugin caches.
+
 ```bash
 # Locate sd35l skill script (recommended)
-SD35L_SCRIPT=$(find ~/.claude/plugins -path "*/sd35l/scripts/generate_image.py" 2>/dev/null | head -1)
+SD35L_SCRIPT=$(find "${WORKING_DIR}/skills" -path "*/sd35l/scripts/generate_image.py" 2>/dev/null | head -1)
 
 if [ -z "$SD35L_SCRIPT" ]; then
-  echo "sd35l skill not found. Install it with: /plugin install sd35l@my-skills"
+  echo "sd35l skill not found under application/skills/sd35l"
   exit 1
 fi
 
 # Alternative: nova2-omni (if you have gated preview access)
-NOVA2_OMNI_SCRIPT=$(find ~/.claude/plugins -path "*/nova2-omni/scripts/generate_image.py" 2>/dev/null | head -1)
+NOVA2_OMNI_SCRIPT=$(find "${WORKING_DIR}/skills" -path "*/nova2-omni/scripts/generate_image.py" 2>/dev/null | head -1)
 ```
 
 ## sd35l API Format
