@@ -504,6 +504,39 @@ kiro-cli chat --model claude-sonnet-4.6
 ```
 
 
+## Chat UI로 실행
+
+Flask 기반 `chat_ui/app.py`가 정적 파일(`index.html`, `script.js`, `style.css`)과 API(`/api/chat`)를 함께 제공합니다. **반드시 HTTP로 접속**해야 하며, `index.html`만 탐색기에서 `file://`로 여는 방식은 API 호출이 되지 않습니다.
+
+1. **의존성 설치** (저장소 루트에서 가상환경을 쓰는 경우 활성화한 뒤)
+
+   ```bash
+   cd chat_ui
+   pip install -r requirements.txt
+   ```
+
+2. **서버 기동**
+
+   ```bash
+   python app.py
+   ```
+
+   기본 포트는 **5001**입니다. 다른 포트를 쓰려면 예를 들어 `PORT=8080 python app.py`처럼 환경 변수 `PORT`를 지정합니다.
+
+3. **브라우저에서 열기**
+
+   터미널에 표시되는 주소(예: `http://127.0.0.1:5001`)로 접속합니다. 루트(`/`)에서 `index.html`이 서빙되므로 **`chat_ui/index.html` 파일을 직접 더블클릭하여 `file://`로 열 필요가 없습니다.**
+
+   - 정상: `http://127.0.0.1:5001/` 또는 `http://localhost:5001/`
+   - 비권장: `file:///.../chat_ui/index.html` (CORS·경로 문제로 `/api/chat`이 동작하지 않을 수 있음)
+
+4. **포트를 바꾼 경우** (`file://`로 HTML만 열어야 하는 특수한 경우) 브라우저 쪽 API 주소를 맞추려면 `index.html`의 `<head>` 안에 다음과 같이 지정할 수 있습니다.
+
+   ```html
+   <meta name="chat-api-base" content="http://127.0.0.1:8080">
+   ```
+
+
 ## 실행 결과
 
 아래와 같이 SKILL 생성을 요청합니다.
