@@ -136,6 +136,38 @@ def register_plugin_skills(plugin_name: str):
     skill_manager.discover_plugin_skills(skills_dir)
 
 
+def get_skill_info(skill_list: list) -> list:
+    skill_manager = skill_managers.get('base')
+    if skill_manager is None:
+        skill_manager = SkillManager(SKILLS_DIR)
+        skill_managers['base'] = skill_manager
+        skill_manager.discover_plugin_skills(SKILLS_DIR)
+
+    registry = skill_manager.registry
+    
+    if not registry:
+        return []
+    
+    skill_info = []
+    for s in registry.values():
+        if s.name in skill_list:
+            skill_info.append({"name": s.name, "description": s.description})
+        
+    return skill_info
+
+
+def get_plugin_skill_info(plugin_name: str) -> list:
+    skill_manager = skill_managers.get(plugin_name)
+    if skill_manager is None:
+        skills_dir = os.path.join(WORKING_DIR, "plugins", plugin_name, "skills")
+        skill_manager = SkillManager(skills_dir)
+        skill_managers[plugin_name] = skill_manager
+        skill_manager.discover_plugin_skills(skills_dir)
+
+    registry = skill_manager.registry
+    return registry.values()
+
+
 def available_skill_info(plugin_name: str) -> list:
     skill_manager = skill_managers.get(plugin_name)
     if skill_manager is None:
@@ -166,13 +198,13 @@ def selected_skill_info(plugin_name: str) -> list:
         skill_list = config.get("plugin_skills", {}).get(plugin_name) or []
     logger.info(f"plugin_name: {plugin_name}, skill_list: {skill_list}")
 
-    plugin_skill_info = available_skill_info(plugin_name)
+    skill_info = available_skill_info(plugin_name)
 
-    skill_info = []
-    for s in plugin_skill_info:
+    selected_skill_info = []
+    for s in skill_info:
         if s["name"] in skill_list:
-            skill_info.append(s)
-    return skill_info
+            selected_skill_info.append(s)
+    return selected_skill_info
 
 
 SKILL_SYSTEM_PROMPT = (

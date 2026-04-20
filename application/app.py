@@ -374,9 +374,13 @@ if prompt := st.chat_input("메시지를 입력하세요."):
             with st.status("thinking...", expanded=True, state="running") as status:
                 notification_queue = NotificationQueue(container=status)
 
+                skill_list = selected_skills if selected_skills else []
+                logger.info(f"skill_list: {skill_list}")
+
                 response, artifacts = asyncio.run(langgraph_agent.run_langgraph_agent(
                     query=prompt, 
                     mcp_servers=mcp_servers, 
+                    skill_list=skill_list,
                     history_mode=history_mode, 
                     notification_queue=notification_queue))
 
