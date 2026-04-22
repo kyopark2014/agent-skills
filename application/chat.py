@@ -609,9 +609,10 @@ def upload_to_s3(file_bytes, file_name):
         logger.info(f"content_type: {content_type}") 
 
         if content_type == "image/jpeg" or content_type == "image/png":
-            s3_key = f"{s3_image_prefix}/{file_name}"
+            url = path + "/" + s3_image_prefix + "/" + parse.quote(file_name)
         else:
-            s3_key = f"{s3_prefix}/{file_name}"
+            url = path + "/" + s3_prefix + "/" + parse.quote(file_name)
+        return url
         
         user_meta = {  # user-defined metadata
             "content_type": content_type,

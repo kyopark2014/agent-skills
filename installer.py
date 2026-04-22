@@ -3257,10 +3257,11 @@ cat > /home/ssm-user/{git_name}/application/config.json << 'EOF'
 EOF
 chown -R ssm-user:ssm-user /home/ssm-user/{git_name}
 
-# Build and run docker with volume mount for config.json
+# Build and run docker: mount full host application/ (git clone) so telegrams_bot.py, etc. match
+# the repo on disk even if the image was built from an older commit without these files
 cd /home/ssm-user/{git_name}
 docker build -f Dockerfile -t streamlit-app .
-docker run -d --restart=always -p 8501:8501 -v $(pwd)/application/config.json:/app/application/config.json --name app streamlit-app
+docker run -d --restart=always -p 8501:8501 -v /home/ssm-user/{git_name}/application:/app/application --name app streamlit-app
 
 # Telegram bot: same image, background container (only if API key exists in Secrets Manager)
 REGION=$(python3 -c "import json; print(json.load(open('application/config.json'))['region'])")
@@ -3270,7 +3271,8 @@ TG=$(aws secretsmanager get-secret-value --secret-id "$SECRET_ID" --region "$REG
 if [ -n "$TG" ]; then
   docker rm -f telegram-bot 2>/dev/null || true
   docker run -d --restart=always --name telegram-bot \
-    -v $(pwd)/application/config.json:/app/application/config.json \
+    -w /app \
+    -v /home/ssm-user/{git_name}/application:/app/application \
     --entrypoint python \
     streamlit-app \
     application/telegram_bot.py

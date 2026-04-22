@@ -7,6 +7,7 @@ import mcp_config
 import logging
 import sys
 import os
+import uuid
 import asyncio
 import io
 import langgraph_agent
@@ -397,20 +398,37 @@ if prompt := st.chat_input("메시지를 입력하세요."):
                 file_name = url[url.rfind('/')+1:]
                 st.image(url, caption=file_name, use_container_width=True)
                 
-        elif mode == "이미지 분석":
-            if file_bytes is None:
-                st.error("이미지를 먼저 업로드하거나 클립보드에서 붙여넣으세요.")
-                st.stop()
+        else:
+                with st.status("thinking...", expanded=True, state="running") as status:
+                    summary = chat.summarize_image(file_bytes, prompt, st)
+                    st.write(summary)
 
-            else:
-                if modelName == "Claude 3.5 Haiku":
-                    st.error("Claude 3.5 Haiku은 이미지를 지원하지 않습니다. 다른 모델을 선택해주세요.")
-                else:
-                    with st.status("thinking...", expanded=True, state="running") as status:
-                        summary = chat.summarize_image(file_bytes, prompt, st)
-                        st.write(summary)
+                    artifacts_dir = langgraph_agent.ARTIFACTS_DIR
+                    os.makedirs(artifacts_dir, exist_ok=True)
+                    artifact_name = f"image_summary_{uuid.uuid4().hex}.md"
+                    artifact_path = os.path.join(artifacts_dir, artifact_name)
+                    md_body = summary if isinstance(summary, str) else str(summary)
+                    with open(artifact_path, "w", encoding="utf-8") as f:
+                        f.write(md_body)
 
-                        st.session_state.messages.append({"role": "assistant", "content": summary})
+                    artifact_url = chat.upload_to_s3(md_body.encode("utf-8"), artifact_name)
+                    if artifact_url:
+                        st.markdown(
+                            f"마크다운 artifact가 저장되었습니다. "
+                            f"[S3 링크]({artifact_url}) · 로컬: `{artifact_path}`"
+                        )
+                        assistant_content = (
+                            f"{md_body}\n\n---\n\n"
+                            f"[이미지 분석 요약 (markdown artifact)]({artifact_url})"
+                        )
+                    else:
+                        st.warning(
+                            f"S3 업로드에 실패했거나 버킷/공유 URL이 설정되지 않았습니다. "
+                            f"로컬 artifact: `{artifact_path}`"
+                        )
+                        assistant_content = md_body
+
+                    st.session_state.messages.append({"role": "assistant", "content": assistant_content})
 
 def main():
     """Entry point for the application."""
