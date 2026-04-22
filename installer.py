@@ -3229,7 +3229,7 @@ set -x
 yum update -y
 
 # Install packages
-yum install -y git docker
+yum install -y git docker awscli
 
 # Start docker
 systemctl start docker
@@ -3261,6 +3261,23 @@ chown -R ssm-user:ssm-user /home/ssm-user/{git_name}
 cd /home/ssm-user/{git_name}
 docker build -f Dockerfile -t streamlit-app .
 docker run -d --restart=always -p 8501:8501 -v $(pwd)/application/config.json:/app/application/config.json --name app streamlit-app
+
+# Telegram bot: same image, background container (only if API key exists in Secrets Manager)
+REGION=$(python3 -c "import json; print(json.load(open('application/config.json'))['region'])")
+PROJECT=$(python3 -c "import json; print(json.load(open('application/config.json'))['projectName'])")
+SECRET_ID="telegramapikey-$PROJECT"
+TG=$(aws secretsmanager get-secret-value --secret-id "$SECRET_ID" --region "$REGION" --query 'SecretString' --output text 2>/dev/null | python3 -c 'import sys,json; s=sys.stdin.read().strip(); d=json.loads(s) if s else {{}}; print((d.get("telegram_api_key") or "").strip())' 2>/dev/null)
+if [ -n "$TG" ]; then
+  docker rm -f telegram-bot 2>/dev/null || true
+  docker run -d --restart=always --name telegram-bot \
+    -v $(pwd)/application/config.json:/app/application/config.json \
+    --entrypoint python \
+    streamlit-app \
+    application/telegram_bot.py
+  echo "Telegram bot container started (docker logs -f telegram-bot)" >> /var/log/user-data.log
+else
+  echo "Telegram API key not set; skipping telegram-bot container" >> /var/log/user-data.log
+fi
 
 # Make update.sh executable for manual execution via SSM
 chmod a+rx update.sh
