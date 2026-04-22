@@ -1217,7 +1217,7 @@ def run_rag_with_knowledge_base(query, st):
         ref = "\n\n### Reference\n"
         for i, doc in enumerate(relevant_docs):
             page_content = doc["contents"][:100].replace("\n", "")
-            ref += f"{i+1}. [{doc["reference"]['title']}]({doc["reference"]['url']}), {page_content}...\n"    
+            ref += f"{i+1}. [{doc['reference']['title']}]({doc['reference']['url']}), {page_content}...\n"    
         logger.info(f"ref: {ref}")
         msg += ref
     
