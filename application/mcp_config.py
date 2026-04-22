@@ -73,6 +73,10 @@ def load_config(mcp_type):
         mcp_type = "aws_sentral"
     elif mcp_type == "AWS Outlook (Employee)":
         mcp_type = "aws_outlook"
+    elif mcp_type == "AWS Slack (Employee)":
+        mcp_type = "aws_slack"
+    elif mcp_type == "AWS Loop (Employee)":
+        mcp_type = "aws_loop"
 
     if mcp_type == "tavily":
         return {
@@ -362,6 +366,26 @@ def load_config(mcp_type):
                 "mcp-browser-use": {
                     "command": "python",
                     "args": [f"{workingDir}/mcp_server_brower_use.py"]
+                }
+            }
+        }
+    
+    elif mcp_type == "aws_slack":
+        return {
+            "mcpServers" : {
+                "slack-mcp" : {
+                "command" : "slack-mcp",
+                "args" : [ ]
+                }
+            }
+        }
+    
+    elif mcp_type == "aws_loop":
+        return {
+            "mcpServers" : {
+                "loop-mcp" : {
+                    "command" : "loop-mcp",
+                    "args" : [ ]
                 }
             }
         }
