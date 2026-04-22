@@ -22,8 +22,9 @@ logger = logging.getLogger("telegram_bot")
 
 TELEGRAM_BOT_TOKEN = utils.telegram_api_key
 
-DEFAULT_MODEL = "Claude 4.5 Haiku"
-DEFAULT_MCP_SERVERS = ["basic", "knowledge base", "code interpreter", "aws_documentation"]
+DEFAULT_MODEL = "Claude 4.7 Opus"
+DEFAULT_MCP_SERVERS = ["web_fetch", "slack", "notion", "tavily", "aws_documentation"]
+DEFAULT_SKILL_LIST = ["skill-creator", "graphify", "myslide"]
 
 chat.update(DEFAULT_MODEL, "Enable", "Disable", "Enable")
 
@@ -88,6 +89,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         response, image_url = await langgraph_agent.run_langgraph_agent(
             query=user_message,
             mcp_servers=DEFAULT_MCP_SERVERS,
+            skill_list=DEFAULT_SKILL_LIST,
             history_mode="Enable",
             notification_queue=None,
         )
