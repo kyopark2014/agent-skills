@@ -119,7 +119,7 @@ with st.sidebar:
 
         # Change radio to checkbox        
         mcp_selections = {}
-        default_selections = ["web_fetch", "slack", "notion"]
+        default_selections = ["web_fetch", "slack", "notion", "korea_weather"]
         
         with st.expander("MCP 옵션 선택", expanded=True):
             for option in mcp_options:
@@ -427,6 +427,8 @@ if prompt := st.chat_input("메시지를 입력하세요."):
                             f"로컬 artifact: `{artifact_path}`"
                         )
                         assistant_content = md_body
+
+                    chat.save_chat_history("이미지를 내용을 분석합니다.", assistant_content)
 
                     st.session_state.messages.append({"role": "assistant", "content": assistant_content})
 

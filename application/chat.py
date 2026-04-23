@@ -80,8 +80,6 @@ s3_image_prefix = "images"
 path = config.get('sharing_url', '')
 doc_prefix = "docs/"
 
-MSG_LENGTH = 100    
-
 model_name = "Claude 4.5 Sonnet"
 model_type = "claude"
 models = info.get_model_info(model_name)
@@ -175,10 +173,7 @@ def save_chat_history(text, msg):
     
     if memory_chain and hasattr(memory_chain, 'chat_memory'):
         memory_chain.chat_memory.add_user_message(text)
-        if len(msg) > MSG_LENGTH:
-            memory_chain.chat_memory.add_ai_message(msg[:MSG_LENGTH])                          
-        else:
-            memory_chain.chat_memory.add_ai_message(msg) 
+        memory_chain.chat_memory.add_ai_message(msg) 
 
 selected_chat = 0
 def get_max_output_tokens(model_id: str = "") -> int:
