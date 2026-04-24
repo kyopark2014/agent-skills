@@ -3293,23 +3293,18 @@ else
   echo "Telegram API key not set; skipping telegram-bot container" >> /var/log/user-data.log
 fi
 
-# Discord bot: same image, background container (token in Secrets Manager and discord_bot.py present in cloned repo)
+# Discord bot: mount only config.json so application/discord_bot.py comes from the image (full application/ mount would hide image files if host clone lacks them). Rebuild image after git pull if the bot script changed.
 DISCORD_SECRET_ID="discordapikey-$PROJECT"
 DC=$(aws secretsmanager get-secret-value --secret-id "$DISCORD_SECRET_ID" --region "$REGION" --query 'SecretString' --output text 2>/dev/null | python3 -c 'import sys,json; s=sys.stdin.read().strip(); d=json.loads(s) if s else {{}}; print((d.get("discord_bot_token") or "").strip())' 2>/dev/null)
-DISCORD_PY="/home/ssm-user/{git_name}/application/discord_bot.py"
 if [ -n "$DC" ]; then
-  if [ ! -f "$DISCORD_PY" ]; then
-    echo "Discord bot token is set but $DISCORD_PY is missing (git pull / deploy application/discord_bot.py). Skipping discord-bot container." >> /var/log/user-data.log
-  else
-    docker rm -f discord-bot 2>/dev/null || true
-    docker run -d --restart=always --name discord-bot \
-      -w /app \
-      -v /home/ssm-user/{git_name}/application:/app/application \
-      --entrypoint python \
-      streamlit-app \
-      application/discord_bot.py
-    echo "Discord bot container started (docker logs -f discord-bot)" >> /var/log/user-data.log
-  fi
+  docker rm -f discord-bot 2>/dev/null || true
+  docker run -d --restart=always --name discord-bot \
+    -w /app \
+    -v /home/ssm-user/{git_name}/application/config.json:/app/application/config.json \
+    --entrypoint python \
+    streamlit-app \
+    application/discord_bot.py
+  echo "Discord bot container started (docker logs -f discord-bot)" >> /var/log/user-data.log
 else
   echo "Discord bot token not set; skipping discord-bot container" >> /var/log/user-data.log
 fi
@@ -3331,9 +3326,14 @@ echo "Setup completed successfully" >> /var/log/user-data.log
 """
 
 
-def run_setup_script_via_ssm(instance_id: str, environment: Dict[str, str], git_name: str = "mcp") -> Dict[str, str]:
+def run_setup_script_via_ssm(
+    instance_id: str,
+    environment: Dict[str, str],
+    repo_clone_name: Optional[str] = None,
+) -> Dict[str, str]:
     """Run setup script on existing EC2 instance using SSM Run Command."""
-    logger.info(f"Running setup script on EC2 instance {instance_id} via SSM")
+    clone_name = repo_clone_name if repo_clone_name is not None else git_name
+    logger.info(f"Running setup script on EC2 instance {instance_id} via SSM (repo={clone_name})")
     
     # Wait for SSM agent to be ready
     logger.debug("Waiting for SSM agent to be ready...")
@@ -3360,7 +3360,7 @@ def run_setup_script_via_ssm(instance_id: str, environment: Dict[str, str], git_
             raise Exception(f"SSM agent not ready after {max_attempts * 10} seconds")
     
     # Get setup script
-    script = get_setup_script(environment, git_name)
+    script = get_setup_script(environment, clone_name)
     
     # Run command via SSM
     try:
