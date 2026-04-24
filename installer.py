@@ -3293,18 +3293,23 @@ else
   echo "Telegram API key not set; skipping telegram-bot container" >> /var/log/user-data.log
 fi
 
-# Discord bot: same image, background container (only if bot token exists in Secrets Manager)
+# Discord bot: same image, background container (token in Secrets Manager and discord_bot.py present in cloned repo)
 DISCORD_SECRET_ID="discordapikey-$PROJECT"
 DC=$(aws secretsmanager get-secret-value --secret-id "$DISCORD_SECRET_ID" --region "$REGION" --query 'SecretString' --output text 2>/dev/null | python3 -c 'import sys,json; s=sys.stdin.read().strip(); d=json.loads(s) if s else {{}}; print((d.get("discord_bot_token") or "").strip())' 2>/dev/null)
+DISCORD_PY="/home/ssm-user/{git_name}/application/discord_bot.py"
 if [ -n "$DC" ]; then
-  docker rm -f discord-bot 2>/dev/null || true
-  docker run -d --restart=always --name discord-bot \
-    -w /app \
-    -v /home/ssm-user/{git_name}/application:/app/application \
-    --entrypoint python \
-    streamlit-app \
-    application/discord_bot.py
-  echo "Discord bot container started (docker logs -f discord-bot)" >> /var/log/user-data.log
+  if [ ! -f "$DISCORD_PY" ]; then
+    echo "Discord bot token is set but $DISCORD_PY is missing (git pull / deploy application/discord_bot.py). Skipping discord-bot container." >> /var/log/user-data.log
+  else
+    docker rm -f discord-bot 2>/dev/null || true
+    docker run -d --restart=always --name discord-bot \
+      -w /app \
+      -v /home/ssm-user/{git_name}/application:/app/application \
+      --entrypoint python \
+      streamlit-app \
+      application/discord_bot.py
+    echo "Discord bot container started (docker logs -f discord-bot)" >> /var/log/user-data.log
+  fi
 else
   echo "Discord bot token not set; skipping discord-bot container" >> /var/log/user-data.log
 fi
