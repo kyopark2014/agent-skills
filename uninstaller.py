@@ -964,6 +964,7 @@ def delete_secrets():
         f"tavilyapikey-{project_name}",
         f"notionapikey-{project_name}",
         f"telegramapikey-{project_name}",
+        f"discordapikey-{project_name}",
         f"slackapikey-{project_name}"
     ]
     

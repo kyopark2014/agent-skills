@@ -705,6 +705,14 @@ def create_secrets() -> Dict[str, str]:
                 "telegram_api_key": ""
             }
         },
+        "discord": {
+            "name": f"discordapikey-{project_name}",
+            "description": "secret for discord bot token",
+            "secret_value": {
+                "project_name": project_name,
+                "discord_bot_token": ""
+            }
+        },
          "slack": {
             "name": f"slackapikey-{project_name}",
             "description": "secret for slack api key",
@@ -744,6 +752,10 @@ def create_secrets() -> Dict[str, str]:
                     logger.info(f"Enter credential of {secret_config['name']} (Telegram Bot API Key):")
                     api_key = input(f"Creating {secret_config['name']} - Telegram Bot API Key: ").strip()
                     secret_config["secret_value"]["telegram_api_key"] = api_key
+                elif key == "discord":
+                    logger.info(f"Enter credential of {secret_config['name']} (Discord Bot Token):")
+                    api_key = input(f"Creating {secret_config['name']} - Discord Bot Token: ").strip()
+                    secret_config["secret_value"]["discord_bot_token"] = api_key
                 elif key == "slack":
                     logger.info(f"Enter credential of {secret_config['name']} (Slack Team ID and Bot Token):")
                     team_id = input(f"Creating {secret_config['name']} - Slack Team ID: ").strip()
@@ -3279,6 +3291,22 @@ if [ -n "$TG" ]; then
   echo "Telegram bot container started (docker logs -f telegram-bot)" >> /var/log/user-data.log
 else
   echo "Telegram API key not set; skipping telegram-bot container" >> /var/log/user-data.log
+fi
+
+# Discord bot: same image, background container (only if bot token exists in Secrets Manager)
+DISCORD_SECRET_ID="discordapikey-$PROJECT"
+DC=$(aws secretsmanager get-secret-value --secret-id "$DISCORD_SECRET_ID" --region "$REGION" --query 'SecretString' --output text 2>/dev/null | python3 -c 'import sys,json; s=sys.stdin.read().strip(); d=json.loads(s) if s else {{}}; print((d.get("discord_bot_token") or "").strip())' 2>/dev/null)
+if [ -n "$DC" ]; then
+  docker rm -f discord-bot 2>/dev/null || true
+  docker run -d --restart=always --name discord-bot \
+    -w /app \
+    -v /home/ssm-user/{git_name}/application:/app/application \
+    --entrypoint python \
+    streamlit-app \
+    application/discord_bot.py
+  echo "Discord bot container started (docker logs -f discord-bot)" >> /var/log/user-data.log
+else
+  echo "Discord bot token not set; skipping discord-bot container" >> /var/log/user-data.log
 fi
 
 # Make update.sh executable for manual execution via SSM
