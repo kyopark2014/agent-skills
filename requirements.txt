@@ -14,6 +14,7 @@ mcp
 langchain-mcp-adapters
 requests
 python-telegram-bot
+discord.py
 uv
 graphviz
 rich
