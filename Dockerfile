@@ -10,6 +10,7 @@ RUN apt-get update && apt-get install -y curl && \
         libreoffice \
         poppler-utils \
         pandoc \
+        tesseract-ocr \
         fonts-nanum && \
     apt-get clean && rm -rf /var/lib/apt/lists/*
 
@@ -47,7 +48,7 @@ RUN pip install uv kaleido diagrams graphviz rich colorama finance-datareader Py
 RUN pip install python-telegram-bot discord.py
 RUN pip install python-pptx
 # Skills: docx / xlsx / pptx / myslide
-RUN pip install defusedxml lxml openpyxl Pillow "markitdown[pptx]"
+RUN pip install defusedxml lxml openpyxl Pillow pytesseract "markitdown[pptx]"
 # Skills: pdf
 RUN pip install reportlab pypdf pdfplumber PyYAML
 # Skills: browser automation

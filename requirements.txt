@@ -39,6 +39,7 @@ defusedxml
 lxml
 openpyxl
 Pillow
+pytesseract
 markitdown[pptx]
 # Skills: pdf
 reportlab
