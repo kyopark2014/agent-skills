@@ -42,8 +42,8 @@ mode_descriptions = {
     "Agent (Chat)": [
         "SKILL과 MCP를 활용한 Agent를 이용합니다. 채팅 히스토리를 이용해 interative한 대화를 즐길 수 있습니다."
     ],
-    "QA Agent": [
-        "RAG를 이용해 얻은 정보로 Test Case를 생성합니다."
+    "번역하기": [
+        "한국어와 영어에 대한 번역을 제공합니다. 한국어로 입력하면 영어로, 영어로 입력하면 한국어로 번역합니다."        
     ],
     "이미지 분석": [
         "이미지를 선택하여 멀티모달을 이용하여 분석합니다."
@@ -64,7 +64,7 @@ with st.sidebar:
     
     # radio selection
     mode = st.radio(
-        label="원하는 대화 형태를 선택하세요. ",options=["일상적인 대화", "RAG", "Agent", "Agent (Chat)", "이미지 분석"], index=3
+        label="원하는 대화 형태를 선택하세요. ",options=["일상적인 대화", "RAG", "Agent", "Agent (Chat)", "이미지 분석", "번역하기"], index=3
     )   
     st.info(mode_descriptions[mode][0])
     
@@ -397,40 +397,46 @@ if prompt := st.chat_input("메시지를 입력하세요."):
                 logger.info(f"url: {url}")
                 file_name = url[url.rfind('/')+1:]
                 st.image(url, caption=file_name, use_container_width=True)
+
+        elif mode == '번역하기':
+            response = chat.translate_text(prompt)
+            st.write(response)
+
+            st.session_state.messages.append({"role": "assistant", "content": response})
                 
         else:
-                with st.status("thinking...", expanded=True, state="running") as status:
-                    summary = chat.summarize_image(file_bytes, prompt, st)
-                    st.write(summary)
+            with st.status("thinking...", expanded=True, state="running") as status:
+                summary = chat.summarize_image(file_bytes, prompt, st)
+                st.write(summary)
 
-                    artifacts_dir = langgraph_agent.ARTIFACTS_DIR
-                    os.makedirs(artifacts_dir, exist_ok=True)
-                    artifact_name = f"image_summary_{uuid.uuid4().hex}.md"
-                    artifact_path = os.path.join(artifacts_dir, artifact_name)
-                    md_body = summary if isinstance(summary, str) else str(summary)
-                    with open(artifact_path, "w", encoding="utf-8") as f:
-                        f.write(md_body)
+                artifacts_dir = langgraph_agent.ARTIFACTS_DIR
+                os.makedirs(artifacts_dir, exist_ok=True)
+                artifact_name = f"image_summary_{uuid.uuid4().hex}.md"
+                artifact_path = os.path.join(artifacts_dir, artifact_name)
+                md_body = summary if isinstance(summary, str) else str(summary)
+                with open(artifact_path, "w", encoding="utf-8") as f:
+                    f.write(md_body)
 
-                    artifact_url = chat.upload_to_s3(md_body.encode("utf-8"), artifact_name)
-                    if artifact_url:
-                        st.markdown(
-                            f"마크다운 artifact가 저장되었습니다. "
-                            f"[S3 링크]({artifact_url}) · 로컬: `{artifact_path}`"
-                        )
-                        assistant_content = (
-                            f"{md_body}\n\n---\n\n"
-                            f"[이미지 분석 요약 (markdown artifact)]({artifact_url})"
-                        )
-                    else:
-                        st.warning(
-                            f"S3 업로드에 실패했거나 버킷/공유 URL이 설정되지 않았습니다. "
-                            f"로컬 artifact: `{artifact_path}`"
-                        )
-                        assistant_content = md_body
+                artifact_url = chat.upload_to_s3(md_body.encode("utf-8"), artifact_name)
+                if artifact_url:
+                    st.markdown(
+                        f"마크다운 artifact가 저장되었습니다. "
+                        f"[S3 링크]({artifact_url}) · 로컬: `{artifact_path}`"
+                    )
+                    assistant_content = (
+                        f"{md_body}\n\n---\n\n"
+                        f"[이미지 분석 요약 (markdown artifact)]({artifact_url})"
+                    )
+                else:
+                    st.warning(
+                        f"S3 업로드에 실패했거나 버킷/공유 URL이 설정되지 않았습니다. "
+                        f"로컬 artifact: `{artifact_path}`"
+                    )
+                    assistant_content = md_body
 
-                    chat.save_chat_history("이미지를 내용을 분석합니다.", assistant_content)
+                chat.save_chat_history("이미지를 내용을 분석합니다.", assistant_content)
 
-                    st.session_state.messages.append({"role": "assistant", "content": assistant_content})
+                st.session_state.messages.append({"role": "assistant", "content": assistant_content})
 
 def main():
     """Entry point for the application."""
