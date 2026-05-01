@@ -29,3 +29,5 @@ config.json
 *.yaml
 *.yml
 *.mmd
+*.skill
+*/
