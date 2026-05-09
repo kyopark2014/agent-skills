@@ -584,6 +584,7 @@ def get_summary_of_uploaded_file(file_name, st):
 
     return msg
 
+
 def upload_to_s3(file_bytes, file_name):
     """
     Upload a file to S3 and return the URL
@@ -604,27 +605,27 @@ def upload_to_s3(file_bytes, file_name):
         logger.info(f"content_type: {content_type}") 
 
         if content_type == "image/jpeg" or content_type == "image/png":
-            url = path + "/" + s3_image_prefix + "/" + parse.quote(file_name)
+            prefix = s3_image_prefix
         else:
-            url = path + "/" + s3_prefix + "/" + parse.quote(file_name)
-        return url
-        
+            prefix = s3_prefix
+
+        s3_key = f"{prefix}/{file_name}"
+        url = f"{path}/{prefix}/{parse.quote(file_name)}"
+
         user_meta = {  # user-defined metadata
             "content_type": content_type,
             "model_name": model_name
         }
-        
+
         response = s3_client.put_object(
-            Bucket=s3_bucket, 
-            Key=s3_key, 
+            Bucket=s3_bucket,
+            Key=s3_key,
             ContentType=content_type,
-            Metadata = user_meta,
-            Body=file_bytes            
+            Metadata=user_meta,
+            Body=file_bytes
         )
         logger.info(f"upload response: {response}")
 
-        #url = f"https://{s3_bucket}.s3.amazonaws.com/{s3_key}"
-        url = path+'/'+s3_image_prefix+'/'+parse.quote(file_name)
         return url
     
     except Exception as e:
