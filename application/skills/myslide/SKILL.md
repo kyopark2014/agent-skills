@@ -1,37 +1,58 @@
 ---
 name: myslide
 description: |
-  Create professional AWS-themed PowerPoint presentations with dark gradient
-  backgrounds, AWS brand colors, and rich visual elements (SVG diagrams,
-  architecture diagrams, icons). Uses the official AWS reInvent 2023 template
-  design system. Supports creating from scratch, editing specific slides
-  conversationally, and embedding SVG visualizations for maximum design impact.
+  Create professional AWS-themed PowerPoint presentations with two theme options:
+  dark (reInvent 2023/2025 with gradient backgrounds) and light (L100/field
+  enablement with white backgrounds and soft gradient accents). Uses AWS brand
+  colors, rich visual elements (SVG diagrams, architecture diagrams, icons),
+  and cross-skill integration (svg-diagram). Supports creating
+  from scratch, editing specific slides conversationally, and embedding SVG
+  visualizations for maximum design impact.
   Trigger: "myslide", "make slides", "AWS presentation", "create pptx",
-  "slide deck", "AWS slides", "프레젠테이션", "슬라이드 만들어", "발표자료"
+  "slide deck", "AWS slides", "프레젠테이션", "슬라이드 만들어", "발표자료",
+  "L100", "L200", "training deck", "light theme", "밝은 테마", "교육 자료"
 license: MIT License
 metadata:
-  skill-author: 발표자
+  skill-author: Jesam Kim
   version: 1.0.0
 allowed-tools: [Read, Write, Edit, Bash, Grep, Glob, Agent, AskUserQuestion]
 ---
 
 # MySlide - AWS-Themed Presentation Generator
 
-Create visually compelling presentations that follow the AWS reInvent 2023 design system.
+Create visually compelling presentations that follow AWS design systems.
+Supports **two themes**: dark (reInvent 2023/2025) and light (L100/field enablement).
 Every slide should look like it was crafted by the AWS brand team.
+
+## Theme Selection
+
+| Theme | When to Use | Reference |
+|-------|------------|-----------|
+| **Dark** (reInvent 2023/2025) | reInvent, Summit keynotes, tech demos | [aws-theme.md](references/aws-theme.md) |
+| **Light** (L100/Field Enablement) | L100/L200 training, customer-facing, internal workshops, sales enablement | [light-theme.md](references/light-theme.md) |
+
+**Auto-detect**: If the user says "L100", "training deck", "white background", "밝은 테마",
+"교육 자료", "customer-facing" → use Light theme. Otherwise default to Dark theme.
 
 ## Quick Start
 
-1. Read [references/aws-theme.md](references/aws-theme.md) for colors, fonts, and spacing rules
-2. Read [references/slide-patterns.md](references/slide-patterns.md) for layout templates
-3. Read [references/pptxgenjs.md](references/pptxgenjs.md) for PptxGenJS creation guide
-4. Read [references/editing.md](references/editing.md) for editing existing PPTX files
-5. Read [references/animations.md](references/animations.md) for animation primitives
-5. Use `scripts/create_aws_slide.py` to generate background/SVG assets
-6. Official AWS service icons are in `icons/` (248 icons extracted from AWS Architecture Icon Deck)
+1. **Choose theme**: Dark (default) or Light — read the corresponding theme reference
+2. Read [references/aws-theme.md](references/aws-theme.md) for dark theme OR [references/light-theme.md](references/light-theme.md) for light theme
+3. Read [references/slide-patterns.md](references/slide-patterns.md) for layout templates
+4. Read [references/pptxgenjs.md](references/pptxgenjs.md) for PptxGenJS creation guide
+5. Read [references/editing.md](references/editing.md) for editing existing PPTX files
+6. Read [references/animations.md](references/animations.md) for animation primitives
+7. Use `scripts/create_aws_slide.py` to generate background/SVG assets
+8. Official AWS service icons are in `icons/` (304 icons, including 56 Bedrock AgentCore variants)
 
 All references and scripts are self-contained within this skill directory.
 No external skill dependencies required.
+
+### Cross-Skill Integration (Design Enhancement)
+
+For richer visual output, leverage these companion skills when available:
+- **svg-diagram**: Generate pixel-perfect SVG diagrams, architecture visuals, and flowcharts
+  with anti-overlap rules. Use for any slide needing diagrams beyond basic arrow connections.
 
 **Directory Convention** — All generated assets go under `artifacts/` (sibling to the skill directory), never `/tmp`:
 ```
@@ -71,7 +92,38 @@ When generating title/thank-you slides, use these defaults unless the user speci
 ### A. Creating a New Presentation
 
 1. **Gather requirements**: Ask the user for topic, key messages, and target audience
-2. **Plan slide structure**: Outline slide titles and content types before writing any code
+2. **Write a design spec** (when applicable — see gate below): Produce a markdown
+   spec that lists every slide's layout, key message, and visual intent. Save to
+   `design-specs/<deck-name>.md`. See [references/design-spec-template.md](references/design-spec-template.md)
+   for the table format and approval flow.
+
+   **Spec gate — when to require a spec before any PPTX work:**
+
+   | Scope | Spec? | HTML preview? |
+   |-------|-------|---------------|
+   | 1-2 slides, single edit | No | No |
+   | 3-7 slide deck | Yes (markdown only) | Optional |
+   | 8+ slide deck | Yes | Yes |
+   | User says "design first" / "디자인 먼저" / "plan first" | Always | Always |
+
+   The reason: structural rework (wrong slide order, monotonous layout, wrong
+   theme) is the most expensive kind to fix once PptxGenJS code exists. A
+   spec catches it in seconds. For a quick one-pager the gate adds friction
+   without the savings, so skip it.
+
+   **Approval is mandatory** for decks where the gate applies. After writing
+   the spec (and rendering the preview if applicable), wait for the user to
+   say "go" / "승인" / "OK" / "진행" before moving to step 3. If they ask
+   for changes, edit the spec, re-render, ask again — don't start building
+   from a partially-approved spec.
+
+   **HTML preview** (8+ slides):
+   ```bash
+   python3 scripts/render_design_preview.py design-specs/<deck-name>.md
+   # Opens in browser: theme palette chips + per-slide wireframe thumbnails.
+   # Variety warnings (3-streak layouts, no-diagram decks) appear at top.
+   ```
+
 3. **Generate background images**: Run the gradient background generator script
 4. **Create slides**: Use PptxGenJS (Node.js) with the AWS theme constants
 5. **Add SVG visuals**: Generate SVG diagrams for architecture/flow slides and embed as images
@@ -115,6 +167,28 @@ When the user says "change slide 3" or "update the title slide":
 3. Apply targeted changes (text, colors, layout, or visual elements)
 4. Re-render and verify only the affected slides
 
+#### B.1 Overlay on a File You Didn't Generate
+
+If the customer (or a teammate) has drawn a slide in PowerPoint and you need
+to ADD a few elements to it without redrawing everything, use python-pptx
+overlay rather than regenerating from scratch. See
+[references/pptx-overlay.md](references/pptx-overlay.md) for the full workflow,
+including the `add_connector` endpoint-vs-width trap that is the most common
+cause of diagonal arrows piercing the slide title. That reference also has
+ready-to-copy helper functions for dashed lines, arrowheads, transparent
+container boxes, and zero-margin text labels.
+
+Typical overlay use cases:
+- Adding a new external system group (e.g., MCP bridge to on-premises systems)
+  to an existing architecture slide
+- Inserting a callout or annotation on a partner-provided deck
+- Fixing one mispositioned label without touching anything else
+
+For the MCP-specific styling (color, dash pattern, label convention), also
+read `references/mcp-external-integration.md` in the `aws-diagram` skill.
+Even when overlaying on an existing file, the visual conventions should match
+the from-scratch aws-diagram output so diagrams across the deck look consistent.
+
 ### C. Sub-Agent Strategy for Large Decks (8+ slides)
 
 For presentations with many slides, use parallel sub-agents to maximize throughput.
@@ -136,6 +210,201 @@ Generate slides [N] through [M] for the AWS presentation.
 ```
 
 After all sub-agents complete, combine the JS snippets into one PptxGenJS script and execute.
+
+## Visual Diversity Strategy (CRITICAL)
+
+**Never repeat the same visual pattern more than twice in a deck.** Slides that are all
+"dark box + bullet text" create visual fatigue. Use a mix of these patterns:
+
+### Hybrid Approach: SVG Visuals + Native PPTX Text
+
+The most effective method combines SVG diagrams (for gradient shapes, glow effects, icons)
+with native PPTX text (for editability). The workflow:
+
+1. **Generate SVG with visuals only** (shapes, gradients, glow, icons — NO text)
+2. **Convert to transparent PNG** (remove background `<rect>` fill, set to `fill="none"`)
+3. **Embed PNG as slide background image** at the content area position
+4. **Overlay native PPTX text** using `slide.addText()` positioned to match SVG element locations
+
+```javascript
+// Step 1: SVG visual as background (no text, transparent bg)
+slide.addImage({ data: noTextPngBase64, x: 0.15, y: 1.2, w: 13.0, h: 5.4 });
+
+// Step 2: Native PPTX text on top (editable in PowerPoint)
+slide.addText('Title', { x: 5.0, y: 3.0, w: 3.5, h: 0.5, fontSize: 24, bold: true, ... });
+```
+
+**Benefits:**
+- User can edit text directly in PowerPoint
+- Gradient/glow effects preserved from SVG
+- Transparent PNG works on any slide background color
+- Text is searchable and accessible
+
+### SVG Infographic Patterns (use svg-diagram skill)
+
+Generate these via `svg-diagram` skill with transparent backgrounds:
+
+| Pattern | When to Use | Example Slides |
+|---------|------------|----------------|
+| **Hub-Spoke** | Central concept + related items | "What is X?" with Pain→Hub→Solution |
+| **Radial 5-node** | 5 features/capabilities around a center | "Why X?" feature highlights |
+| **Horizontal Icon Strip** | Sequential or parallel items | "5 Advantages" with icon+label |
+| **Cross Quadrant** | 2x2 categorization | "4 Pain Points" with icons per quadrant |
+| **Donut Chart** | Market share, proportions | Statistics with percentage breakdown |
+| **Timeline** | Evolution, roadmap | "4 Stages of AI Coding" |
+| **Architecture** | System/data flow | "LLM Gateway Architecture" |
+| **Process Flow** | Step-by-step | "3-Step Onboarding" |
+
+### Transparent SVG Background Rule
+
+**All SVG infographics MUST have transparent backgrounds** so they work on any template.
+
+When generating SVGs, ensure the first `<rect>` (background) has `fill="none"`:
+```xml
+<rect width="1200" height="500" fill="none"/>
+```
+
+When stripping text from existing SVGs for hybrid approach:
+```javascript
+svg = svg.replace(/<text[^>]*>[^<]*<\/text>/g, '');  // Remove all text elements
+```
+
+### Gradient Shapes in PPTX
+
+PptxGenJS doesn't support native gradient fills. Use pre-rendered gradient PNG images:
+
+```javascript
+// Pre-generate gradient card backgrounds
+async function createGradCard(w, h, c1, c2) {
+  const svg = `<svg ...><linearGradient ...><rect fill="url(#g)"/></svg>`;
+  return sharp(Buffer.from(svg)).png().toBuffer();
+}
+// Embed as image, then overlay transparent ROUNDED_RECTANGLE for border
+slide.addImage({ data: gradPng, x, y, w, h });
+slide.addShape(pres.shapes.ROUNDED_RECTANGLE, { x, y, w, h, fill: { type: 'none' }, line: { color, width } });
+```
+
+### Build-Then-QA Workflow (MANDATORY)
+
+**Every batch of slide changes MUST be followed by visual QA before reporting completion.**
+
+```
+1. Edit slide code (JS files)
+2. Regenerate PPTX: node create_presentation.js
+3. Convert to images: soffice → PDF → pdftoppm (target slides only)
+4. Launch QA subagent (background): check alignment, readability, overlap
+5. If QA finds issues → fix coordinates → regenerate → re-QA
+6. Report completion only after QA PASS
+```
+
+**For hybrid slides (SVG image + native text):** QA must specifically check that
+PPTX native text aligns precisely with SVG visual elements (circles, boxes, etc).
+Coordinate misalignment is the #1 issue — text must be centered inside its target shape.
+
+**Fix workflow for misaligned text:**
+1. Open the user-modified PPTX (if available) with python-pptx
+2. Extract actual coordinates: `shape.left / 914400` (EMU to inches)
+3. Update JS code with corrected coordinates
+4. Regenerate and re-verify
+
+### Hybrid Slide Alignment Lessons (from user corrections)
+
+These rules come from analyzing user manual corrections on hybrid slides.
+**Apply these BEFORE generating** to minimize manual fixes needed:
+
+**1. SVG Image Vertical Offset**
+SVG infographic images should start below the title with extra margin:
+- Title ends at ~y=1.0. Image should start at **y=1.5~1.6**, not y=1.2
+- This gives breathing room and prevents cramped feeling
+
+**2. Radial/Spoke Layout Text Placement**
+For radial (hub + spoke) diagrams:
+- **Top spoke**: text goes ABOVE the icon circle (y = icon_top - 0.6)
+- **Left spokes**: text goes LEFT of icon (x = icon_left - text_width - 0.1)
+- **Right spokes**: text goes RIGHT of icon (x = icon_right + 0.1)
+- **Bottom spokes**: text goes BELOW icon (y = icon_bottom + 0.1)
+- Allow negative x values (e.g. x=-0.15) for left-edge spokes — PPTX clips gracefully
+
+**3. Horizontal Icon Strip Text Y-Position**
+For 5-column horizontal layouts (icon above, text below):
+- Icon occupies y=1.5~3.5 area
+- Title text starts at **y=3.83** (not 4.0) — tighter to icon bottom
+- Korean subtitle at y=4.23, description at y=4.58
+- Column spacing: calculate exact x from SVG icon centers, not evenly dividing
+
+**4. Quadrant Layout Text Positioning**
+For cross-quadrant (2x2) layouts:
+- Text x must be at least **0.15" right of icon right edge** to prevent overlap
+- User corrected: Q1/Q3 left columns x=2.67, Q2/Q4 right columns x=9.12~9.18
+- Start y slightly below quadrant top: top row y=1.99, bottom row y=4.56~4.6
+
+**5. General SVG-Text Alignment Rule**
+Calculate PPTX text positions FROM the SVG source coordinates:
+```
+pptx_x = (svg_element_cx / svg_viewBox_width) * slide_width
+pptx_y = (svg_element_cy / svg_viewBox_height) * (image_h) + image_y_offset
+```
+Then fine-tune: add 0.1~0.2" margin away from icon edges.
+
+### QA Delegation Rules
+
+**Always delegate QA to subagents or kiro** to protect the main context window:
+- Visual QA (image-heavy) → `run_in_background: true` subagent or kiro skill
+- Content fact-checking → dedicated subagent with reference MD files
+- Alignment QA for hybrid slides → subagent with specific coordinate check instructions
+- **Never** read slide images directly in the main agent context
+- Main agent only receives QA text summary and applies fixes
+
+## Narrative Flow Patterns (Slide Ordering)
+
+These patterns come from analyzing user reordering of customer case study slides.
+**Plan slide order BEFORE generating** based on the narrative pattern that fits.
+
+### Case Studies Pattern: "Specific → General" (Preferred)
+
+When presenting customer case studies followed by a summary:
+
+```
+[Case 1] → [Case 2] → [Case 3] → [Section Header: "N 사례"] → [Summary Table]
+```
+
+**Why this works:**
+- Audience sees concrete examples first (easier to grasp)
+- Section header acts as a "conclusion marker" reinforcing the pattern
+- Summary table at end provides reference/recap (not an introduction)
+
+**Avoid this order (common mistake):**
+```
+[Section Header] → [Summary Table] → [Case 1] → [Case 2] → [Case 3]
+```
+This creates a "abstract first, concrete later" flow which feels academic
+and forces the audience to remember the table while watching individual cases.
+
+### Section Header Placement
+
+**Two valid placements:**
+1. **Opening** — "Here's what we'll cover" (introduces the section)
+2. **Closing/Bridging** — "This is what we just saw" (wraps up the section, bridges to next)
+
+The closing/bridging placement is especially effective when:
+- Cases have been shown individually first
+- The section serves as a summary or pivot point
+- You want the audience to mentally organize what they just saw
+
+### Strength-of-Recommendation Language
+
+User corrections consistently favor **conditional recommendations** over
+absolute ones, especially in customer-facing decks:
+
+| Too Strong (Avoid) | Preferred (Conditional) |
+|--------------------|-------------------------|
+| "Amazon Bedrock 우선 검토 권장" | "엔터프라이즈 거버넌스 상이라면 → Amazon Bedrock 우선 검토 권장" |
+| "X is the best choice" | "If your requirement is Y, X is the best choice" |
+| "Always use Z" | "For scenarios requiring Z, use Z" |
+
+Frame recommendations with the condition/qualifier FIRST so the customer
+feels empowered rather than dictated to. This is especially important for
+AWS customer-facing content where neutrality matters.
 
 ## Slide Types
 
@@ -159,10 +428,25 @@ Each presentation should use a MIX of these layouts. Never repeat the same layou
 | **Evolution/Progression** | Maturity stages, AI evolution | slide-patterns.md > Evolution |
 | **Multi-Card Grid** | 2x2 or 3x2 feature cards | slide-patterns.md > Multi-Card Grid |
 | **Gradient Border Cards** | Light cards with colored borders on dark bg | slide-patterns.md > Gradient Border Cards |
-| **Image Hero** | Topic intro with generated visual | slide-patterns.md > Image Hero |
-| **Image + Text Split** | Concept with illustration | slide-patterns.md > Image + Text Split |
-| **Full Image Background** | Impactful quotes, key messages | slide-patterns.md > Full Image Background |
 | **Thank You** | Last slide | slide-patterns.md > Thank You |
+
+### Light Theme Additional Patterns
+
+These layouts are specific to the Light theme (L100/field enablement style).
+See [references/light-theme.md](references/light-theme.md) for full code examples.
+
+| Type | When to Use | Reference |
+|------|-------------|-----------|
+| **Section Divider (Light)** | Chapter breaks with gradient blob accents | light-theme.md > Section Divider |
+| **Data + Citation** | Market data with bar charts + source quotes | light-theme.md > Data + Citation |
+| **Key Points Grid** | 2x3/2x4 grid with purple ALL-CAPS labels | light-theme.md > Key Points Grid |
+| **Feature Badges + Screenshot** | Tan pill badges + product screenshot | light-theme.md > Feature List + Screenshot |
+| **Full-Color Background** | Bold single-color slide (max 1 per deck) | light-theme.md > Full-Color Background Slide |
+| **Step Guide** | Purple numbered badges + screenshots | light-theme.md > Step Guide with Screenshots |
+| **Customer Case Study** | Logo + Challenge/Solution/Result + pill tags | light-theme.md > Customer Case Study |
+| **Do's vs Don'ts** | Green/red color-coded comparison columns | light-theme.md > Do's vs Don'ts Comparison |
+| **CTA Slide** | Orange numbered badges + action items | light-theme.md > Call to Action |
+| **Dashboard Evidence** | Product UI screenshot as proof point | light-theme.md > Dashboard Screenshot Slide |
 
 ## SVG Visual Elements
 
@@ -185,28 +469,22 @@ python3 scripts/create_aws_slide.py svg-diagram \
 ```
 
 **Available icon names** (use these as element names for automatic icon embedding):
-Lambda, EC2, S3, DynamoDB, API Gateway, CloudFront, Bedrock, ECS, EKS, RDS,
+Lambda, EC2, S3, DynamoDB, API Gateway, CloudFront, Bedrock, Bedrock AgentCore, ECS, EKS, RDS,
 Aurora, VPC, ELB, Route 53, CloudWatch, IAM, Cognito, SNS, SQS, Step Functions,
 EventBridge, Kinesis, SageMaker, Redshift, Athena, Glue, KMS, WAF, Shield,
 Fargate, ECR, AppSync, OpenSearch, ElastiCache, Secrets Manager, ACM, and 200+ more.
 See `icons/` directory for the full list of available service icons.
 
+**AgentCore component-specific icons**: 56 variants covering 9 AgentCore components
+(logo, ai-agent, runtime, gateway, identity, code-interpreter, observability, browser-tool, memory)
+across 4 color accents (teal, blue, purple, cyan) and 2 themes (light, dark).
+Pattern: `agentcore-{component}-{color}-{theme}.svg` — e.g., `agentcore-runtime-teal-light.svg`.
+Use these in slides when highlighting individual AgentCore services with matching color to slide theme:
+- Light-theme (L100/field-enablement) slides → `*-light` variants (black outline + accent)
+- Dark-theme (reInvent) slides → `*-dark` variants (white outline + accent)
+Embed via `<img src="icons/agentcore-{name}.svg">` or place through svg-diagram.
+
 Alternatively, craft SVG inline in the Node.js script and use `sharp` to convert to PNG base64.
-
-### Matplotlib charts (Python `execute_code` / PNG for slides)
-
-When generating bar, line, or metric charts with **Matplotlib** (e.g. LangGraph `execute_code`), the environment may ship **matplotlib 3.9+**. In those versions, `tick_params` and `Axis.set_tick_params` **do not accept `fontsize`** — that raises `ValueError: keyword fontsize is not recognized`. Use **`labelsize`** for tick label size instead.
-
-```python
-# ✅ CORRECT — tick label size
-ax.tick_params(axis="both", colors="#C8D0D8", labelsize=11)
-
-# ❌ WRONG — breaks on matplotlib 3.9+
-ax.tick_params(axis="both", colors="#C8D0D8", fontsize=11)
-```
-
-- **Axis titles** (`set_xlabel`, `set_ylabel`, `set_title`) still accept `fontsize` on the text artist — that API is unchanged.
-- Save chart PNGs under **`{workspace}/artifacts/myslide-assets/`** (same as other slide assets), then embed in PptxGenJS; do not rely on `/tmp` for assets that must be bundled with the deck.
 
 ### Diagram Type Selection for Presentations
 
@@ -435,7 +713,7 @@ create visual noise and distract from the message. Limit each slide to **5 core
 colors** maximum. A restrained palette feels intentional and polished; a rainbow
 of colors feels chaotic.
 
-### The 5 Core Colors
+### The 5 Core Colors (Dark Theme)
 
 | Role | Color | HEX | When to use |
 |------|-------|-----|-------------|
@@ -444,6 +722,20 @@ of colors feels chaotic.
 | **Emphasis** | Orange | `F66C02` | Key terms, highlights, numbered badges |
 | **Container** | Dark Navy | `161E2D` | Card fills, table cells, box backgrounds |
 | **Secondary** | Light Slate | `C8D0D8` | Subtitles, descriptions, captions (readable on projectors) |
+
+### The 5 Core Colors (Light Theme)
+
+| Role | Color | HEX | When to use |
+|------|-------|-----|-------------|
+| **Background** | White | `FFFFFF` | Slide background |
+| **Primary Text** | Near Black | `1A1A1A` | All headings, titles |
+| **Accent** | Sky Blue | `4FC3F7` | Table headers, bullets, links |
+| **Card Fill** | Cream/Beige | `F5F0EB` | Card backgrounds, content areas |
+| **Body Text** | Dark Gray | `333333` | Body text, descriptions |
+
+Light theme allows additional accents sparingly: coral (`C96842`) for key stats,
+purple (`6B46C1`) for architecture labels/badges, AWS orange (`FF9900`) for
+internal badges and CTA numbers. See [light-theme.md](references/light-theme.md) for full palette.
 
 ### Allowed Accent (sparingly)
 
@@ -784,7 +1076,7 @@ All scripts are self-contained within `scripts/`:
 
 | Script / Directory | Purpose |
 |--------|---------|
-| `icons/` | 248 official AWS service icons (SVG, from AWS Architecture Icon Deck) |
+| `icons/` | 304 official AWS service icons (SVG), including 56 AgentCore component variants |
 | `scripts/create_aws_slide.py` | Generate AWS gradient backgrounds, SVG diagrams with official icons, logo |
 | `scripts/office/soffice.py` | Convert PPTX to PDF via LibreOffice |
 | `scripts/office/unpack.py` | Unpack PPTX to XML for direct editing |
@@ -794,6 +1086,8 @@ All scripts are self-contained within `scripts/`:
 | `scripts/add_slide.py` | Add slides to existing PPTX |
 | `scripts/apply_animations.py` | Inject OOXML animations from JSON spec into PPTX |
 | `scripts/qa_validate.py` | Programmatic QA — bounds, connectors, font sizes, zero-size shapes |
+| `scripts/render_design_preview.py` | Design spec → HTML preview (palette chips + slide wireframes) for pre-build approval |
+| `references/design-spec-template.md` | Pre-build design spec template (slide table, approval flow, variety check) |
 | `references/image-generation-integration.md` | sd35l / nova2-omni image generation guide for slides |
 
 **Two-Phase QA (ALWAYS run both phases):**

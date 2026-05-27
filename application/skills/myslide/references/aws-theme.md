@@ -216,13 +216,13 @@ const AWS_THEME = {
     copyright: { x: 1.3, y: 7.15 },
   },
 
-  // Presenter defaults
+  // Presenter defaults (replace with your own)
   presenter: {
-    nameKo: "김제삼",
-    nameEn: "Jesam Kim",
+    nameKo: "홍길동",
+    nameEn: "Gildong Hong",
     title: "Solutions Architect",
-    company: "Amazon Web Services",
-    email: "jesamkim@amazon.com",
+    company: "Your Company",
+    email: "you@example.com",
   },
 };
 ```
