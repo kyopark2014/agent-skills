@@ -88,6 +88,20 @@ nova_2_lite_models = [   # Nova 2 Lite
     }
 ]
 
+
+claude_4_8_opus_models = [   # Opus 4.8
+    {
+        "bedrock_region": "us-west-2", # Oregon
+        "model_type": "claude",
+        "model_id": "us.anthropic.claude-opus-4-8"
+    },
+    {
+        "bedrock_region": "us-east-1", # N.Virginia
+        "model_type": "claude",
+        "model_id": "us.anthropic.claude-opus-4-8"
+    }
+]
+
 claude_4_7_opus_models = [   # Opus 4.7
     {
         "bedrock_region": "us-west-2", # Oregon
@@ -220,6 +234,8 @@ def get_model_info(model_name):
         models = claude_4_6_opus_models
     elif model_name == "Claude 4.7 Opus":
         models = claude_4_7_opus_models
+    elif model_name == "Claude 4.8 Opus":
+        models = claude_4_8_opus_models
     elif model_name == "Nova Premier":
         models = nova_premier
     elif model_name == "OpenAI OSS 120B":
