@@ -7,6 +7,7 @@ import uuid
 import base64
 import info 
 import utils
+import bedrock_data_retention
 import csv
 import PyPDF2
 from langchain_core.documents import Document
@@ -207,6 +208,12 @@ def get_chat(extended_thinking):
     number_of_models = len(models)
 
     logger.info(f"LLM: {selected_chat}, bedrock_region: {bedrock_region}, modelId: {modelId}, model_type: {model_type}")
+
+    if "fable" in modelId.lower():
+        bedrock_data_retention.ensure_fable_data_retention(
+            modelId,
+            bedrock_region=bedrock_region,
+        )
 
     if profile['model_type'] == 'nova':
         STOP_SEQUENCE = '"\n\n<thinking>", "\n<thinking>", " <thinking>"'
@@ -683,6 +690,12 @@ def get_parallel_processing_chat(models, selected):
     model_type = profile['model_type']
     maxOutputTokens = 4096
     logger.info(f'selected_chat: {selected}, bedrock_region: {bedrock_region}, modelId: {modelId}, model_type: {model_type}')
+
+    if "fable" in modelId.lower():
+        bedrock_data_retention.ensure_fable_data_retention(
+            modelId,
+            bedrock_region=bedrock_region,
+        )
 
     if profile['model_type'] == 'nova':
         STOP_SEQUENCE = '"\n\n<thinking>", "\n<thinking>", " <thinking>"'
