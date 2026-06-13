@@ -11,6 +11,9 @@ import logging
 import argparse
 import base64
 import ipaddress
+import subprocess
+import shutil
+import os
 from datetime import datetime
 from typing import Dict, List, Optional
 from botocore.exceptions import ClientError
@@ -39,6 +42,9 @@ elbv2_client = boto3.client("elbv2", region_name=region)
 cloudfront_client = boto3.client("cloudfront", region_name=region)
 lambda_client = boto3.client("lambda", region_name=region)
 ssm_client = boto3.client("ssm", region_name=region)
+ecr_client = boto3.client("ecr", region_name=region)
+ecs_client = boto3.client("ecs", region_name=region)
+logs_client = boto3.client("logs", region_name=region)
 
 bucket_name = f"storage-for-{project_name}-{account_id}-{region}"
 
@@ -416,34 +422,11 @@ def create_agent_role() -> str:
     return role_arn
 
 
-def create_ec2_role(knowledge_base_role_arn: str) -> str:
-    """Create EC2 IAM role."""
-    logger.info("[3/10] Creating EC2 IAM role")
-    role_name = f"role-ec2-for-{project_name}-{region}"
-    
-    assume_role_policy = {
-        "Version": "2012-10-17",
-        "Statement": [
-            {
-                "Effect": "Allow",
-                "Principal": {
-                    "Service": ["ec2.amazonaws.com", "bedrock.amazonaws.com"]
-                },
-                "Action": "sts:AssumeRole"
-            }
-        ]
-    }
-    
-    managed_policies = [
-        "arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy",
-        "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
-    ]
-    role_arn = create_iam_role(role_name, assume_role_policy, managed_policies)
-    
-    # Attach inline policies
-    policies = [
+def _get_ecs_task_inline_policies(knowledge_base_role_arn: str, role_prefix: str) -> List[Dict]:
+    """Inline IAM policies shared by the ECS task role."""
+    return [
         {
-            "name": f"secret-manager-policy-ec2-for-{project_name}",
+            "name": f"secret-manager-policy-{role_prefix}-for-{project_name}",
             "document": {
                 "Version": "2012-10-17",
                 "Statement": [
@@ -456,20 +439,7 @@ def create_ec2_role(knowledge_base_role_arn: str) -> str:
             }
         },
         {
-            "name": f"pvre-policy-ec2-for-{project_name}",
-            "document": {
-                "Version": "2012-10-17",
-                "Statement": [
-                    {
-                        "Effect": "Allow",
-                        "Action": ["ssm:*", "ssmmessages:*", "ec2messages:*", "tag:*"],
-                        "Resource": ["*"]
-                    }
-                ]
-            }
-        },
-        {
-            "name": f"bedrock-policy-ec2-for-{project_name}",
+            "name": f"bedrock-policy-{role_prefix}-for-{project_name}",
             "document": {
                 "Version": "2012-10-17",
                 "Statement": [
@@ -482,14 +452,19 @@ def create_ec2_role(knowledge_base_role_arn: str) -> str:
                         "Effect": "Allow",
                         "Action": [
                             "bedrock:InvokeModel",
-                            "bedrock:InvokeModelWithResponseStream"
+                            "bedrock:InvokeModelWithResponseStream",
+                            "bedrock:GetFoundationModel",
+                            "bedrock:GetInferenceProfile",
+                            "bedrock:ListFoundationModels",
+                            "bedrock:ListInferenceProfiles"
                         ],
                         "Resource": [
                             "arn:aws:bedrock:*:*:inference-profile/*",
-                            "arn:aws:bedrock:us-west-2:*:foundation-model/*",
-                            "arn:aws:bedrock:us-east-1:*:foundation-model/*",
-                            "arn:aws:bedrock:us-east-2:*:foundation-model/*",
-                            "arn:aws:bedrock:ap-northeast-2:*:foundation-model/*"
+                            "arn:aws:bedrock:*::foundation-model/*",
+                            "arn:aws:bedrock:us-west-2::foundation-model/*",
+                            "arn:aws:bedrock:us-east-1::foundation-model/*",
+                            "arn:aws:bedrock:us-east-2::foundation-model/*",
+                            "arn:aws:bedrock:ap-northeast-2::foundation-model/*"
                         ]
                     }
                 ]
@@ -503,19 +478,6 @@ def create_ec2_role(knowledge_base_role_arn: str) -> str:
                     {
                         "Effect": "Allow",
                         "Action": ["ce:GetCostAndUsage"],
-                        "Resource": ["*"]
-                    }
-                ]
-            }
-        },
-        {
-            "name": f"ec2-policy-for-{project_name}",
-            "document": {
-                "Version": "2012-10-17",
-                "Statement": [
-                    {
-                        "Effect": "Allow",
-                        "Action": ["ec2:*"],
                         "Resource": ["*"]
                     }
                 ]
@@ -646,25 +608,52 @@ def create_ec2_role(knowledge_base_role_arn: str) -> str:
                     }
                 ]
             }
-        }
+        },
     ]
-    
-    for policy in policies:
-        attach_inline_policy(role_name, policy["name"], policy["document"])
-    
-    # Create instance profile
-    instance_profile_name = f"instance-profile-{project_name}-{region}"
-    try:
-        iam_client.create_instance_profile(InstanceProfileName=instance_profile_name)
-        iam_client.add_role_to_instance_profile(
-            InstanceProfileName=instance_profile_name,
-            RoleName=role_name
-        )
-    except ClientError as e:
-        if e.response["Error"]["Code"] != "EntityAlreadyExists":
-            raise
-    
-    return role_arn
+
+
+def create_ecs_roles(knowledge_base_role_arn: str) -> Dict[str, str]:
+    """Create ECS task role and task execution role."""
+    logger.info("[3/10] Creating ECS IAM roles")
+
+    task_role_name = f"role-ecs-task-for-{project_name}-{region}"
+    execution_role_name = f"role-ecs-execution-for-{project_name}-{region}"
+
+    task_assume_role_policy = {
+        "Version": "2012-10-17",
+        "Statement": [
+            {
+                "Effect": "Allow",
+                "Principal": {"Service": ["ecs-tasks.amazonaws.com", "bedrock.amazonaws.com"]},
+                "Action": "sts:AssumeRole"
+            }
+        ]
+    }
+    execution_assume_role_policy = {
+        "Version": "2012-10-17",
+        "Statement": [
+            {
+                "Effect": "Allow",
+                "Principal": {"Service": "ecs-tasks.amazonaws.com"},
+                "Action": "sts:AssumeRole"
+            }
+        ]
+    }
+
+    task_role_arn = create_iam_role(task_role_name, task_assume_role_policy)
+    execution_role_arn = create_iam_role(
+        execution_role_name,
+        execution_assume_role_policy,
+        managed_policies=["arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"],
+    )
+
+    for policy in _get_ecs_task_inline_policies(knowledge_base_role_arn, "ecs-task"):
+        attach_inline_policy(task_role_name, policy["name"], policy["document"])
+
+    return {
+        "task_role_arn": task_role_arn,
+        "execution_role_arn": execution_role_arn,
+    }
 
 
 def create_secrets() -> Dict[str, str]:
@@ -848,7 +837,7 @@ def create_opensearch_collection(ec2_role_arn: str = None, knowledge_base_role_a
                     needs_update = False
                     roles_to_add = []
                     if ec2_role_arn:
-                        roles_to_add.append(("EC2", ec2_role_arn))
+                        roles_to_add.append(("ECS", ec2_role_arn))
                     if knowledge_base_role_arn:
                         roles_to_add.append(("Knowledge Base", knowledge_base_role_arn))
                     
@@ -949,10 +938,10 @@ def create_opensearch_collection(ec2_role_arn: str = None, knowledge_base_role_a
     account_arn = f"arn:aws:iam::{account_id}:root"
     principals = [account_arn]
     
-    # Add EC2 role to principals if provided
+    # Add ECS task role to principals if provided
     if ec2_role_arn:
         principals.append(ec2_role_arn)
-        logger.debug(f"Adding EC2 role to data access policy: {ec2_role_arn}")
+        logger.debug(f"Adding ECS task role to data access policy: {ec2_role_arn}")
     
     # Add Knowledge Base role to principals if provided
     if knowledge_base_role_arn:
@@ -1012,7 +1001,7 @@ def create_opensearch_collection(ec2_role_arn: str = None, knowledge_base_role_a
                 needs_update = False
                 roles_to_add = []
                 if ec2_role_arn:
-                    roles_to_add.append(("EC2", ec2_role_arn))
+                    roles_to_add.append(("ECS", ec2_role_arn))
                 if knowledge_base_role_arn:
                     roles_to_add.append(("Knowledge Base", knowledge_base_role_arn))
                 
@@ -1044,7 +1033,7 @@ def create_opensearch_collection(ec2_role_arn: str = None, knowledge_base_role_a
             except Exception as update_error:
                 logger.warning(f"Could not update existing data access policy: {update_error}")
                 if ec2_role_arn:
-                    logger.warning(f"Please manually add EC2 role {ec2_role_arn} to the data access policy")
+                    logger.warning(f"Please manually add ECS task role {ec2_role_arn} to the data access policy")
                 if knowledge_base_role_arn:
                     logger.warning(f"Please manually add Knowledge Base role {knowledge_base_role_arn} to the data access policy")
         else:
@@ -1956,7 +1945,7 @@ def ensure_private_subnets(vpc_id: str, public_subnets: List[str], existing_subn
     
     # If no private subnets found, create them automatically
     if not private_subnets:
-        logger.info("  No private subnets found. Creating private subnets for EC2 deployment...")
+        logger.info("  No private subnets found. Creating private subnets for ECS deployment...")
         
         # Get VPC CIDR and availability zones
         vpc_detail = ec2_client.describe_vpcs(VpcIds=[vpc_id])["Vpcs"][0]
@@ -1999,7 +1988,7 @@ def ensure_private_subnets(vpc_id: str, public_subnets: List[str], existing_subn
                 "Please ensure your VPC has available CIDR space and try again."
             )
         
-        logger.info(f"  ✓ Created {len(private_subnets)} private subnet(s) for EC2 deployment")
+        logger.info(f"  ✓ Created {len(private_subnets)} private subnet(s) for ECS deployment")
     
     # Verify private subnets are available (filter out non-available ones)
     available_private_subnets = []
@@ -2081,27 +2070,29 @@ def create_vpc() -> Dict[str, str]:
                 Filters=[{"Name": "vpc-id", "Values": [vpc_id]}]
             )
             alb_sg_id = None
-            ec2_sg_id = None
+            ecs_sg_id = None
             for sg in sgs["SecurityGroups"]:
                 if sg["GroupName"] != "default":
                     for tag in sg.get("Tags", []):
                         if tag["Key"] == "Name":
                             if f"alb-sg-for-{project_name}" in tag["Value"]:
                                 alb_sg_id = sg["GroupId"]
+                            elif f"ecs-sg-for-{project_name}" in tag["Value"]:
+                                ecs_sg_id = sg["GroupId"]
                             elif f"ec2-sg-for-{project_name}" in tag["Value"]:
-                                ec2_sg_id = sg["GroupId"]
+                                ecs_sg_id = sg["GroupId"]
             
             # If security groups not found, create them
-            if not alb_sg_id or not ec2_sg_id:
+            if not alb_sg_id or not ecs_sg_id:
                 logger.info("  Creating missing security groups...")
                 if not alb_sg_id:
                     alb_sg_id = create_alb_security_group(vpc_id)
                 
-                if not ec2_sg_id:
-                    ec2_sg_id = create_security_group(
+                if not ecs_sg_id:
+                    ecs_sg_id = create_security_group(
                         vpc_id=vpc_id,
-                        group_name=f"ec2-sg-for-{project_name}",
-                        description="Security group for ec2",
+                        group_name=f"ecs-sg-for-{project_name}",
+                        description="Security group for ECS tasks",
                         ingress_rules=[
                             {
                                 "IpProtocol": "tcp",
@@ -2156,7 +2147,7 @@ def create_vpc() -> Dict[str, str]:
                 "public_subnets": public_subnets,
                 "private_subnets": private_subnets,
                 "alb_sg_id": alb_sg_id,
-                "ec2_sg_id": ec2_sg_id,
+                "ecs_sg_id": ecs_sg_id,
                 "vpc_endpoint_id": vpc_endpoint_id
             }
         except Exception as e:
@@ -2242,7 +2233,7 @@ def create_vpc() -> Dict[str, str]:
                     logger.info(f"  ✓ Successfully created {len(private_subnets)} private subnet(s)")
                 except Exception as e:
                     logger.error(f"  Failed to create private subnets: {e}")
-                    logger.warning(f"  EC2 instance creation may fail without private subnets")
+                    logger.warning(f"  ECS service deployment may fail without private subnets")
             
             # Get or create security groups if not already set
             if 'alb_sg_id' not in locals() or not alb_sg_id:
@@ -2267,49 +2258,42 @@ def create_vpc() -> Dict[str, str]:
                     logger.warning(f"  Could not get or create ALB security group: {e}")
                     alb_sg_id = None
             
-            if 'ec2_sg_id' not in locals() or not ec2_sg_id:
+            if 'ecs_sg_id' not in locals() or not ecs_sg_id:
                 try:
                     sgs = ec2_client.describe_security_groups(
                         Filters=[{"Name": "vpc-id", "Values": [vpc_id]}]
                     )
-                    ec2_sg_id = None
+                    ecs_sg_id = None
                     for sg in sgs["SecurityGroups"]:
                         if sg["GroupName"] != "default":
                             for tag in sg.get("Tags", []):
-                                if tag["Key"] == "Name" and f"ec2-sg-for-{project_name}" in tag["Value"]:
-                                    ec2_sg_id = sg["GroupId"]
+                                if tag["Key"] == "Name" and (
+                                    f"ecs-sg-for-{project_name}" in tag["Value"]
+                                    or f"ec2-sg-for-{project_name}" in tag["Value"]
+                                ):
+                                    ecs_sg_id = sg["GroupId"]
                                     break
-                            if ec2_sg_id:
+                            if ecs_sg_id:
                                 break
                     
-                    if not ec2_sg_id:
-                        logger.info("  Creating EC2 security group...")
-                        # Get VPC CIDR for ingress rule
-                        vpc_detail = ec2_client.describe_vpcs(VpcIds=[vpc_id])["Vpcs"][0]
-                        vpc_cidr = vpc_detail["CidrBlock"]
-                        
-                        ec2_sg_id = create_security_group(
+                    if not ecs_sg_id:
+                        logger.info("  Creating ECS security group...")
+                        ecs_sg_id = create_security_group(
                             vpc_id=vpc_id,
-                            group_name=f"ec2-sg-for-{project_name}",
-                            description="Security group for ec2",
+                            group_name=f"ecs-sg-for-{project_name}",
+                            description="Security group for ECS tasks",
                             ingress_rules=[
                                 {
                                     "IpProtocol": "tcp",
                                     "FromPort": 8501,
                                     "ToPort": 8501,
                                     "UserIdGroupPairs": [{"GroupId": alb_sg_id}] if alb_sg_id else []
-                                },
-                                {
-                                    "IpProtocol": "tcp",
-                                    "FromPort": 443,
-                                    "ToPort": 443,
-                                    "IpRanges": [{"CidrIp": vpc_cidr}]
                                 }
                             ]
                         )
                 except Exception as e:
-                    logger.warning(f"  Could not get or create EC2 security group: {e}")
-                    ec2_sg_id = None
+                    logger.warning(f"  Could not get or create ECS security group: {e}")
+                    ecs_sg_id = None
             
             # Return minimal configuration with existing VPC
             return {
@@ -2317,7 +2301,7 @@ def create_vpc() -> Dict[str, str]:
                 "public_subnets": public_subnets if 'public_subnets' in locals() else [],
                 "private_subnets": private_subnets if 'private_subnets' in locals() else [],
                 "alb_sg_id": alb_sg_id if 'alb_sg_id' in locals() else None,
-                "ec2_sg_id": ec2_sg_id if 'ec2_sg_id' in locals() else None,
+                "ecs_sg_id": ecs_sg_id if 'ecs_sg_id' in locals() else None,
                 "vpc_endpoint_id": vpc_endpoint_id if 'vpc_endpoint_id' in locals() else None
             }
     
@@ -2391,11 +2375,11 @@ def create_vpc() -> Dict[str, str]:
     alb_sg_id = create_alb_security_group(vpc_id)
     logger.debug(f"ALB security group created: {alb_sg_id}")
     
-    # Create EC2 security group
-    ec2_sg_id = create_security_group(
+    # Create ECS security group
+    ecs_sg_id = create_security_group(
         vpc_id=vpc_id,
-        group_name=f"ec2-sg-for-{project_name}",
-        description="Security group for ec2",
+        group_name=f"ecs-sg-for-{project_name}",
+        description="Security group for ECS tasks",
         ingress_rules=[
             {
                 "IpProtocol": "tcp",
@@ -2411,7 +2395,7 @@ def create_vpc() -> Dict[str, str]:
             }
         ]
     )
-    logger.debug(f"EC2 security group created: {ec2_sg_id}")
+    logger.debug(f"ECS security group created: {ecs_sg_id}")
     
     # Create VPC endpoints for Bedrock and SSM
     logger.debug("Creating VPC endpoints")
@@ -2421,7 +2405,7 @@ def create_vpc() -> Dict[str, str]:
         vpc_id=vpc_id,
         service_name=f"com.amazonaws.{region}.bedrock-runtime",
         subnet_ids=private_subnets,
-        security_group_ids=[ec2_sg_id],
+        security_group_ids=[ecs_sg_id],
         endpoint_name=f"bedrock-endpoint-{project_name}",
         check_existing=True
     )
@@ -2435,7 +2419,7 @@ def create_vpc() -> Dict[str, str]:
         "public_subnets": public_subnets,
         "private_subnets": private_subnets,
         "alb_sg_id": alb_sg_id,
-        "ec2_sg_id": ec2_sg_id,
+        "ecs_sg_id": ecs_sg_id,
         "vpc_endpoint_id": vpc_endpoint_id
     }
 
@@ -3231,6 +3215,503 @@ def create_cloudfront_distribution(alb_info: Dict[str, str], s3_bucket_name: str
         "domain": distribution_domain
     }
 
+
+def build_app_environment(
+    knowledge_base_role_arn: str,
+    opensearch_info: Dict[str, str],
+    s3_bucket_name: str,
+    cloudfront_domain: str,
+    knowledge_base_id: str,
+    agentcore_memory_role_arn: str = "",
+) -> Dict[str, str]:
+    """Build application config used by the container at runtime."""
+    env = {
+        "projectName": project_name,
+        "accountId": account_id,
+        "region": region,
+        "knowledge_base_id": knowledge_base_id,
+        "knowledge_base_role": knowledge_base_role_arn,
+        "collectionArn": opensearch_info["arn"],
+        "opensearch_url": opensearch_info["endpoint"],
+        "s3_bucket": s3_bucket_name,
+        "s3_arn": f"arn:aws:s3:::{s3_bucket_name}",
+        "sharing_url": f"https://{cloudfront_domain}",
+    }
+    if agentcore_memory_role_arn:
+        env["agentcore_memory_role"] = agentcore_memory_role_arn
+    return env
+
+
+def _application_config_path() -> str:
+    project_root = os.path.dirname(os.path.abspath(__file__))
+    return os.path.join(project_root, "application", "config.json")
+
+
+def write_application_config(config_data: Dict, *, merge_existing: bool = True) -> bool:
+    """Write application/config.json for local development and ECS runtime."""
+    config_path = _application_config_path()
+    data = dict(config_data)
+
+    if merge_existing:
+        try:
+            with open(config_path, "r") as f:
+                data = {**json.load(f), **data}
+        except FileNotFoundError:
+            logger.info(f"Creating new {config_path}")
+        except Exception as e:
+            logger.warning(f"Could not read existing {config_path}: {e}")
+
+    try:
+        os.makedirs(os.path.dirname(config_path), exist_ok=True)
+        with open(config_path, "w") as f:
+            json.dump(data, f, indent=2)
+        return True
+    except Exception as e:
+        logger.warning(f"Could not write {config_path}: {e}")
+        return False
+
+
+def build_config_from_deployment_state(
+    knowledge_base_id: Optional[str] = None,
+    knowledge_base_role_arn: Optional[str] = None,
+    agentcore_memory_role_arn: Optional[str] = None,
+    opensearch_info: Optional[Dict[str, str]] = None,
+    s3_bucket_name: Optional[str] = None,
+    cloudfront_info: Optional[Dict[str, str]] = None,
+) -> Dict[str, str]:
+    """Build config.json payload from whatever deployment resources are available."""
+    config_data: Dict[str, str] = {
+        "projectName": project_name,
+        "accountId": account_id,
+        "region": region,
+    }
+    if knowledge_base_id:
+        config_data["knowledge_base_id"] = knowledge_base_id
+    if knowledge_base_role_arn:
+        config_data["knowledge_base_role"] = knowledge_base_role_arn
+    if opensearch_info:
+        config_data["collectionArn"] = opensearch_info.get("arn", "")
+        config_data["opensearch_url"] = opensearch_info.get("endpoint", "")
+    if s3_bucket_name:
+        config_data["s3_bucket"] = s3_bucket_name
+        config_data["s3_arn"] = f"arn:aws:s3:::{s3_bucket_name}"
+    if cloudfront_info:
+        config_data["sharing_url"] = f"https://{cloudfront_info.get('domain', '')}"
+    if agentcore_memory_role_arn:
+        config_data["agentcore_memory_role"] = agentcore_memory_role_arn
+    return config_data
+
+
+def create_ecr_repository() -> str:
+    """Create ECR repository and return repository URI."""
+    logger.info("[8/10] Creating ECR repository")
+    repository_name = f"ecr-for-{project_name}"
+
+    try:
+        response = ecr_client.create_repository(
+            repositoryName=repository_name,
+            imageScanningConfiguration={"scanOnPush": True},
+            imageTagMutability="MUTABLE",
+        )
+        repository_uri = response["repository"]["repositoryUri"]
+        logger.info(f"  ✓ Created ECR repository: {repository_uri}")
+        return repository_uri
+    except ClientError as e:
+        if e.response["Error"]["Code"] == "RepositoryAlreadyExistsException":
+            response = ecr_client.describe_repositories(repositoryNames=[repository_name])
+            repository_uri = response["repositories"][0]["repositoryUri"]
+            logger.warning(f"  ECR repository already exists: {repository_uri}")
+            return repository_uri
+        raise
+
+
+def _run_command(command: List[str], cwd: Optional[str] = None, *, stream: bool = False) -> None:
+    """Run a shell command and raise on failure."""
+    cmd_str = " ".join(command)
+    logger.debug(f"Running command: {cmd_str}")
+
+    if stream:
+        result = subprocess.run(command, cwd=cwd, check=False)
+        if result.returncode != 0:
+            raise RuntimeError(f"Command failed ({result.returncode}): {cmd_str}")
+        return
+
+    result = subprocess.run(
+        command,
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.stdout:
+        logger.debug(result.stdout.strip())
+    if result.returncode != 0:
+        stderr = result.stderr.strip() if result.stderr else "Unknown error"
+        raise RuntimeError(f"Command failed ({result.returncode}): {cmd_str}\n{stderr}")
+
+
+def build_and_push_docker_image(repository_uri: str, image_tag: str = "latest") -> str:
+    """Build Docker image from Dockerfile and push to ECR."""
+    logger.info("[8/10] Building and pushing Docker image to ECR")
+
+    if shutil.which("docker") is None:
+        raise RuntimeError("Docker CLI is required to build and push the container image")
+
+    registry = repository_uri.split("/")[0]
+    image_uri = f"{repository_uri}:{image_tag}"
+    project_root = os.path.dirname(os.path.abspath(__file__))
+
+    logger.info(f"  Logging in to ECR registry: {registry}")
+    login_cmd = [
+        "aws", "ecr", "get-login-password",
+        "--region", region,
+    ]
+    login_result = subprocess.run(login_cmd, capture_output=True, text=True, check=False)
+    if login_result.returncode != 0:
+        raise RuntimeError(f"Failed to get ECR login password: {login_result.stderr.strip()}")
+
+    docker_login = subprocess.run(
+        ["docker", "login", "--username", "AWS", "--password-stdin", registry],
+        input=login_result.stdout,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if docker_login.returncode != 0:
+        raise RuntimeError(f"Docker login to ECR failed: {docker_login.stderr.strip()}")
+    logger.info("  ✓ ECR login successful")
+
+    logger.info(f"  Building Docker image: {image_uri}")
+    logger.info("  First build can take 10-30 minutes (Chrome, Playwright, Node.js, etc.).")
+    logger.info("  Build progress will stream below:")
+    _run_command(
+        [
+            "docker", "build",
+            "--progress=plain",
+            "--platform", "linux/amd64",
+            "-t", image_uri,
+            ".",
+        ],
+        cwd=project_root,
+        stream=True,
+    )
+    logger.info("  ✓ Docker image built")
+
+    logger.info(f"  Pushing image to ECR: {image_uri}")
+    logger.info("  Push progress will stream below:")
+    _run_command(["docker", "push", image_uri], stream=True)
+    logger.info(f"  ✓ Pushed image: {image_uri}")
+    return image_uri
+
+
+def create_ecs_log_group() -> str:
+    """Create CloudWatch log group for ECS tasks."""
+    log_group_name = f"/ecs/app-for-{project_name}"
+    try:
+        logs_client.create_log_group(logGroupName=log_group_name)
+        logger.info(f"  ✓ Created log group: {log_group_name}")
+    except ClientError as e:
+        if e.response["Error"]["Code"] != "ResourceAlreadyExistsException":
+            raise
+        logger.warning(f"  Log group already exists: {log_group_name}")
+    return log_group_name
+
+
+def create_ecs_cluster() -> str:
+    """Create ECS cluster."""
+    cluster_name = f"cluster-for-{project_name}"
+    try:
+        response = ecs_client.create_cluster(
+            clusterName=cluster_name,
+            tags=[{"key": "Name", "value": cluster_name}],
+        )
+        cluster_arn = response["cluster"]["clusterArn"]
+        logger.info(f"  ✓ Created ECS cluster: {cluster_name}")
+        return cluster_arn
+    except ClientError as e:
+        if e.response["Error"]["Code"] != "ResourceAlreadyExistsException":
+            raise
+        clusters = ecs_client.describe_clusters(clusters=[cluster_name])
+        if clusters["clusters"]:
+            return clusters["clusters"][0]["clusterArn"]
+        raise
+
+
+def create_alb_target_group_for_ecs(vpc_info: Dict[str, str]) -> str:
+    """Create ALB target group for ECS Fargate (IP target type)."""
+    target_port = 8501
+    target_group_name = f"TG-for-{project_name}"
+
+    try:
+        tgs = elbv2_client.describe_target_groups(Names=[target_group_name])
+        if tgs["TargetGroups"]:
+            tg = tgs["TargetGroups"][0]
+            if tg.get("TargetType") != "ip":
+                raise ValueError(
+                    f"Existing target group {target_group_name} uses TargetType="
+                    f"{tg.get('TargetType')}. Delete it or rename before ECS deployment."
+                )
+            logger.warning(f"  Target group already exists: {tg['TargetGroupArn']}")
+            return tg["TargetGroupArn"]
+    except ClientError as e:
+        if e.response["Error"]["Code"] != "TargetGroupNotFound":
+            raise
+
+    tg_response = elbv2_client.create_target_group(
+        Name=target_group_name,
+        Protocol="HTTP",
+        Port=target_port,
+        VpcId=vpc_info["vpc_id"],
+        TargetType="ip",
+        HealthCheckProtocol="HTTP",
+        HealthCheckPath="/_stcore/health",
+        HealthCheckIntervalSeconds=30,
+        HealthCheckTimeoutSeconds=5,
+        HealthyThresholdCount=2,
+        UnhealthyThresholdCount=3,
+    )
+    tg_arn = tg_response["TargetGroups"][0]["TargetGroupArn"]
+    logger.info(f"  ✓ Created ECS target group: {tg_arn}")
+    return tg_arn
+
+
+def create_alb_listener_with_target_group(alb_info: Dict[str, str], tg_arn: str) -> str:
+    """Create ALB listener forwarding to the ECS target group."""
+    listener_arn = None
+    try:
+        listeners = elbv2_client.describe_listeners(LoadBalancerArn=alb_info["arn"])
+        for listener in listeners.get("Listeners", []):
+            if listener["Port"] == 80 and listener["Protocol"] == "HTTP":
+                listener_arn = listener["ListenerArn"]
+                logger.warning(f"  Listener already exists on port 80: {listener_arn}")
+                break
+    except ClientError as e:
+        logger.warning(f"  Error checking existing listeners: {e}")
+
+    if not listener_arn:
+        listener_response = elbv2_client.create_listener(
+            LoadBalancerArn=alb_info["arn"],
+            Protocol="HTTP",
+            Port=80,
+            DefaultActions=[{"Type": "forward", "TargetGroupArn": tg_arn}],
+        )
+        listener_arn = listener_response["Listeners"][0]["ListenerArn"]
+        logger.info(f"  ✓ Created ALB listener: {listener_arn}")
+
+    rule_exists = False
+    try:
+        rules = elbv2_client.describe_rules(ListenerArn=listener_arn)
+        for rule in rules.get("Rules", []):
+            if rule.get("Priority") == "10":
+                for condition in rule.get("Conditions", []):
+                    if (
+                        condition.get("Field") == "http-header"
+                        and condition.get("HttpHeaderConfig", {}).get("HttpHeaderName") == custom_header_name
+                    ):
+                        rule_exists = True
+                        break
+                if rule_exists:
+                    break
+    except ClientError as e:
+        logger.debug(f"  Error checking existing rules: {e}")
+
+    if not rule_exists:
+        try:
+            elbv2_client.create_rule(
+                ListenerArn=listener_arn,
+                Priority=10,
+                Conditions=[
+                    {
+                        "Field": "http-header",
+                        "HttpHeaderConfig": {
+                            "HttpHeaderName": custom_header_name,
+                            "Values": [custom_header_value],
+                        },
+                    }
+                ],
+                Actions=[{"Type": "forward", "TargetGroupArn": tg_arn}],
+            )
+            logger.info("  ✓ Created rule for custom header")
+        except ClientError as e:
+            if e.response["Error"]["Code"] not in ["PriorityInUse", "RuleAlreadyExists"]:
+                raise
+
+    return listener_arn
+
+
+def _ensure_private_subnets(vpc_info: Dict[str, str]) -> List[str]:
+    """Return available private subnet IDs for ECS tasks."""
+    private_subnets = vpc_info.get("private_subnets", [])
+    if not private_subnets:
+        logger.warning("  No private subnets in vpc_info, attempting to refresh from AWS...")
+        vpc_id = vpc_info.get("vpc_id")
+        if vpc_id:
+            subnets_response = ec2_client.describe_subnets(
+                Filters=[{"Name": "vpc-id", "Values": [vpc_id]}]
+            )
+            classified = classify_subnets(subnets_response["Subnets"], filter_available=True)
+            private_subnets = classified["private_subnets"]
+            if private_subnets:
+                vpc_info["private_subnets"] = private_subnets
+
+    if not private_subnets:
+        raise ValueError(
+            f"No private subnets found in VPC {vpc_info.get('vpc_id', 'unknown')}. "
+            "ECS tasks require at least one private subnet."
+        )
+
+    available_subnets = []
+    for subnet_id in private_subnets:
+        try:
+            response = ec2_client.describe_subnets(SubnetIds=[subnet_id])
+            if response["Subnets"] and response["Subnets"][0]["State"] == "available":
+                available_subnets.append(subnet_id)
+        except Exception as e:
+            logger.warning(f"  Could not verify subnet {subnet_id}: {e}")
+
+    if not available_subnets:
+        for subnet_id in private_subnets:
+            if wait_for_subnet_available(subnet_id, max_wait_time=60):
+                available_subnets.append(subnet_id)
+
+    if not available_subnets:
+        raise ValueError(
+            f"No available private subnets found in VPC {vpc_info.get('vpc_id', 'unknown')}."
+        )
+
+    vpc_info["private_subnets"] = available_subnets
+    return available_subnets
+
+
+def deploy_ecs_service(
+    vpc_info: Dict[str, str],
+    alb_info: Dict[str, str],
+    ecs_roles: Dict[str, str],
+    image_uri: str,
+    app_environment: Dict[str, str],
+    log_group_name: str,
+) -> Dict[str, str]:
+    """Create ECS task definition and Fargate service behind the ALB."""
+    logger.info("[9/10] Deploying ECS Fargate service")
+
+    if not vpc_info.get("ecs_sg_id"):
+        raise ValueError(
+            f"No ECS security group found in VPC {vpc_info.get('vpc_id', 'unknown')}."
+        )
+
+    private_subnets = _ensure_private_subnets(vpc_info)
+    cluster_arn = create_ecs_cluster()
+    tg_arn = create_alb_target_group_for_ecs(vpc_info)
+    listener_arn = create_alb_listener_with_target_group(alb_info, tg_arn)
+
+    task_family = f"task-for-{project_name}"
+    service_name = f"service-for-{project_name}"
+    container_name = "app"
+
+    task_def_response = ecs_client.register_task_definition(
+        family=task_family,
+        networkMode="awsvpc",
+        requiresCompatibilities=["FARGATE"],
+        cpu="1024",
+        memory="2048",
+        executionRoleArn=ecs_roles["execution_role_arn"],
+        taskRoleArn=ecs_roles["task_role_arn"],
+        containerDefinitions=[
+            {
+                "name": container_name,
+                "image": image_uri,
+                "essential": True,
+                "portMappings": [{"containerPort": 8501, "protocol": "tcp"}],
+                "environment": [
+                    {
+                        "name": "APP_CONFIG_JSON",
+                        "value": json.dumps(app_environment),
+                    }
+                ],
+                "logConfiguration": {
+                    "logDriver": "awslogs",
+                    "options": {
+                        "awslogs-group": log_group_name,
+                        "awslogs-region": region,
+                        "awslogs-stream-prefix": "ecs",
+                    },
+                },
+                "healthCheck": {
+                    "command": [
+                        "CMD-SHELL",
+                        "curl -f http://localhost:8501/_stcore/health || exit 1",
+                    ],
+                    "interval": 30,
+                    "timeout": 5,
+                    "retries": 3,
+                    "startPeriod": 60,
+                },
+            }
+        ],
+    )
+    task_definition_arn = task_def_response["taskDefinition"]["taskDefinitionArn"]
+    logger.info(f"  ✓ Registered task definition: {task_definition_arn}")
+
+    cluster_name = cluster_arn.split("/")[-1]
+    service_arn = None
+    try:
+        services = ecs_client.describe_services(cluster=cluster_name, services=[service_name])
+        if services["services"] and services["services"][0]["status"] != "INACTIVE":
+            service_arn = services["services"][0]["serviceArn"]
+            logger.warning(f"  ECS service already exists: {service_name}")
+            ecs_client.update_service(
+                cluster=cluster_name,
+                service=service_name,
+                taskDefinition=task_definition_arn,
+                desiredCount=1,
+                forceNewDeployment=True,
+            )
+            logger.info("  ✓ Updated ECS service with new task definition")
+    except ClientError:
+        pass
+
+    if not service_arn:
+        service_response = ecs_client.create_service(
+            cluster=cluster_name,
+            serviceName=service_name,
+            taskDefinition=task_definition_arn,
+            desiredCount=1,
+            launchType="FARGATE",
+            networkConfiguration={
+                "awsvpcConfiguration": {
+                    "subnets": private_subnets,
+                    "securityGroups": [vpc_info["ecs_sg_id"]],
+                    "assignPublicIp": "DISABLED",
+                }
+            },
+            loadBalancers=[
+                {
+                    "targetGroupArn": tg_arn,
+                    "containerName": container_name,
+                    "containerPort": 8501,
+                }
+            ],
+            healthCheckGracePeriodSeconds=120,
+            tags=[{"key": "Name", "value": service_name}],
+        )
+        service_arn = service_response["service"]["serviceArn"]
+        logger.info(f"  ✓ Created ECS service: {service_name}")
+
+    logger.info("  Waiting for ECS service to become stable...")
+    waiter = ecs_client.get_waiter("services_stable")
+    waiter.wait(cluster=cluster_name, services=[service_name])
+
+    logger.info(f"✓ ECS service deployed in private subnets: {', '.join(private_subnets)}")
+    return {
+        "cluster_arn": cluster_arn,
+        "service_arn": service_arn,
+        "service_name": service_name,
+        "task_definition_arn": task_definition_arn,
+        "target_group_arn": tg_arn,
+        "listener_arn": listener_arn,
+    }
+
+
 def get_setup_script(environment: Dict[str, str], git_name: str) -> str:
     """Generate setup script for EC2 instance."""
     return f"""#!/bin/bash
@@ -3995,12 +4476,17 @@ def main():
         metavar="INSTANCE_ID",
         nargs="?",
         const="",
-        help="Run setup script on existing EC2 instance via SSM. If INSTANCE_ID is not provided, will find instance by name."
+        help="(Legacy EC2) Run setup script on existing EC2 instance via SSM.",
     )
     parser.add_argument(
         "--verify-deployment",
         action="store_true",
-        help="Verify that existing EC2 instances are properly deployed in private subnets"
+        help="(Legacy EC2) Verify EC2 instances are deployed in private subnets.",
+    )
+    parser.add_argument(
+        "--skip-docker-build",
+        action="store_true",
+        help="Skip local Docker build/push and reuse the latest image tag in ECR.",
     )
     
     args = parser.parse_args()
@@ -4026,6 +4512,19 @@ def main():
     logger.info("="*60)
     
     start_time = time.time()
+
+    s3_bucket_name = None
+    knowledge_base_role_arn = None
+    agentcore_memory_role_arn = None
+    opensearch_info = None
+    knowledge_base_id = None
+    vpc_info = None
+    alb_info = None
+    cloudfront_info = None
+    ecs_info = None
+    app_environment = None
+    image_uri = None
+    deployment_success = False
     
     try:
         # 1. Create secrets
@@ -4039,15 +4538,20 @@ def main():
         # 3. Create IAM roles
         knowledge_base_role_arn = create_knowledge_base_role()
         agent_role_arn = create_agent_role()
-        ec2_role_arn = create_ec2_role(knowledge_base_role_arn)
+        ecs_roles = create_ecs_roles(knowledge_base_role_arn)
+        agentcore_memory_role_arn = create_agentcore_memory_role()
         logger.info(f"IAM roles created...")
         
-        # 4. Create OpenSearch collection (with EC2 and Knowledge Base roles for data access)
-        opensearch_info = create_opensearch_collection(ec2_role_arn, knowledge_base_role_arn)
+        # 4. Create OpenSearch collection (with ECS task and Knowledge Base roles for data access)
+        opensearch_info = create_opensearch_collection(
+            ecs_roles["task_role_arn"], knowledge_base_role_arn
+        )
         logger.info(f"OpenSearch collection created...")
         
         # 5. Create Knowledge Base with correct OpenSearch collection        
-        knowledge_base_id = create_knowledge_base_with_opensearch(opensearch_info, knowledge_base_role_arn, s3_bucket_name)
+        knowledge_base_id = create_knowledge_base_with_opensearch(
+            opensearch_info, knowledge_base_role_arn, s3_bucket_name
+        )
         logger.info(f"Knowledge base created...")
         
         # 6. Create VPC
@@ -4062,21 +4566,42 @@ def main():
         cloudfront_info = create_cloudfront_distribution(alb_info, s3_bucket_name)
         logger.info(f"CloudFront distribution created...")
         
-        # 9. Create EC2 instance
-        instance_id = create_ec2_instance(
-            vpc_info, ec2_role_arn, knowledge_base_role_arn,
-            opensearch_info, s3_bucket_name, cloudfront_info["domain"],
-            knowledge_base_id
+        # 9. Build and push Docker image to ECR, then deploy ECS service
+        app_environment = build_app_environment(
+            knowledge_base_role_arn,
+            opensearch_info,
+            s3_bucket_name,
+            cloudfront_info["domain"],
+            knowledge_base_id,
+            agentcore_memory_role_arn,
         )
-        logger.info(f"EC2 instance created...")
-        
-        # 10. Create ALB target group and listener
-        alb_listener_info = create_alb_target_group_and_listener(alb_info, instance_id, vpc_info)
-        logger.info(f"ALB target group and listener created...")
+        if write_application_config(app_environment):
+            logger.info("Local testing is available while deployment continues:")
+            logger.info("  streamlit run application/app.py")
+        repository_uri = create_ecr_repository()
+        if args.skip_docker_build:
+            image_uri = f"{repository_uri}:latest"
+            logger.warning(f"Skipping Docker build; using existing image: {image_uri}")
+        else:
+            image_uri = build_and_push_docker_image(repository_uri)
+            if write_application_config(app_environment):
+                logger.info(f"✓ Updated {_application_config_path()} after Docker build")
+        log_group_name = create_ecs_log_group()
+        ecs_info = deploy_ecs_service(
+            vpc_info,
+            alb_info,
+            ecs_roles,
+            image_uri,
+            app_environment,
+            log_group_name,
+        )
+        logger.info("ECS service deployed...")
         
         # Check whether the application is ready
         logger.info(f"Checking if application is ready: {cloudfront_info['domain']}")
         check_application_ready(cloudfront_info["domain"])        
+        
+        deployment_success = True
         
         # Output summary
         elapsed_time = time.time() - start_time
@@ -4091,54 +4616,17 @@ def main():
         logger.info(f"  Private Subnets: {', '.join(vpc_info['private_subnets'])}")
         logger.info(f"  ALB DNS: http://{alb_info['dns']}/")
         logger.info(f"  CloudFront Domain: https://{cloudfront_info['domain']}")
-        logger.info(f"  EC2 Instance ID: {instance_id} (deployed in private subnet)")
+        logger.info(f"  ECS Service: {ecs_info['service_name']} (Fargate in private subnet)")
+        logger.info(f"  ECR Image: {image_uri}")
         logger.info(f"  OpenSearch Endpoint: {opensearch_info['endpoint']}")
         logger.info(f"  Knowledge Base ID: {knowledge_base_id}")
         logger.info(f"  Knowledge Base Role: {knowledge_base_role_arn}")
+        logger.info(f"  AgentCore Memory Role: {agentcore_memory_role_arn}")
         logger.info("")
         logger.info(f"Total deployment time: {elapsed_time/60:.2f} minutes")
         logger.info("="*60)
-        logger.info("Note: CloudFront distribution may take 15-20 minutes to fully deploy")
-        logger.info("Note: EC2 instance user data script will install and start the application")
+        logger.info("Note: ECS service deployment and CloudFront distribution may take 15-20 minutes to fully deploy")
         logger.info("="*60)
-        
-        # Update application/config.json
-        config_path = "application/config.json"
-        config_data = {}
-        
-        # Read existing config if it exists
-        try:
-            with open(config_path, 'r') as f:
-                config_data = json.load(f)
-        except FileNotFoundError:
-            logger.info(f"Creating new {config_path}")
-        except Exception as e:
-            logger.warning(f"Could not read existing {config_path}: {e}")
-        
-        # Update only necessary fields
-        config_data.update({
-            "projectName": project_name,
-            "accountId": account_id,
-            "region": region,
-            "knowledge_base_id": knowledge_base_id,
-            "knowledge_base_role": knowledge_base_role_arn,
-            "collectionArn": opensearch_info["arn"],
-            "opensearch_url": opensearch_info["endpoint"],
-            "s3_bucket": s3_bucket_name,
-            "s3_arn": f"arn:aws:s3:::{s3_bucket_name}",
-            "sharing_url": f"https://{cloudfront_info['domain']}"
-        })
-        
-        # Log the OpenSearch collection ARN for verification
-        logger.info(f"OpenSearch Collection ARN: {opensearch_info['arn']}")
-        logger.info(f"OpenSearch Collection Endpoint: {opensearch_info['endpoint']}")
-        
-        try:
-            with open(config_path, 'w') as f:
-                json.dump(config_data, f, indent=2)
-            logger.info(f"✓ Updated {config_path}")
-        except Exception as e:
-            logger.warning(f"Could not update {config_path}: {e}")
         
         logger.info("="*60)
         logger.info("")
@@ -4147,7 +4635,7 @@ def main():
         logger.info("="*60)
         logger.info(f" CloudFront URL: https://{cloudfront_info['domain']}")
         logger.info("")
-        logger.info("Note: CloudFront distribution and agent application on EC2 instance may take 15-20 minutes to fully deploy")
+        logger.info("Note: CloudFront distribution and ECS service may take 15-20 minutes to fully deploy")
         logger.info("      Once deployed, you can access your application at the URL above")
         logger.info("="*60)
         logger.info("")
@@ -4164,6 +4652,29 @@ def main():
         import traceback
         logger.error(traceback.format_exc())
         raise
+    finally:
+        config_path = _application_config_path()
+        if app_environment is not None:
+            config_data = app_environment
+        else:
+            config_data = build_config_from_deployment_state(
+                knowledge_base_id=knowledge_base_id,
+                knowledge_base_role_arn=knowledge_base_role_arn,
+                agentcore_memory_role_arn=agentcore_memory_role_arn,
+                opensearch_info=opensearch_info,
+                s3_bucket_name=s3_bucket_name,
+                cloudfront_info=cloudfront_info,
+            )
+
+        if opensearch_info:
+            logger.info(f"OpenSearch Collection ARN: {opensearch_info.get('arn', 'N/A')}")
+            logger.info(f"OpenSearch Collection Endpoint: {opensearch_info.get('endpoint', 'N/A')}")
+
+        if write_application_config(config_data):
+            if deployment_success:
+                logger.info(f"✓ Updated {config_path}")
+            else:
+                logger.info(f"✓ Saved partial deployment info to {config_path}")
 
 
 if __name__ == "__main__":

@@ -75,7 +75,6 @@ with st.sidebar:
         "knowledge base", 
         "aws_documentation", 
         "trade_info", 
-        "code interpreter", 
         "web_fetch",
         "drawio",
         "text_extraction",

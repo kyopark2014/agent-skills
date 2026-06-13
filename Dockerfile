@@ -38,7 +38,7 @@ RUN npx -y mcp-server-fetch-typescript --version 2>/dev/null || true && \
 
 # Install Python packages
 RUN pip install streamlit streamlit-chat streamlit_paste_button
-RUN pip install boto3 langchain_aws langchain langchain_community langgraph langchain_experimental langgraph-supervisor langgraph-swarm langchain-text-splitters
+RUN pip install boto3 langchain_aws langchain langchain_community langgraph langgraph-supervisor langgraph-swarm langchain-text-splitters
 RUN pip install mcp langchain-mcp-adapters
 RUN pip install pandas numpy
 RUN pip install tavily-python pytz
@@ -59,8 +59,11 @@ COPY config.toml /root/.streamlit/
 
 COPY . .
 
+COPY docker-entrypoint.sh /docker-entrypoint.sh
+RUN chmod +x /docker-entrypoint.sh
+
 EXPOSE 8501
 
 HEALTHCHECK CMD curl --fail http://localhost:8501/_stcore/health
 
-ENTRYPOINT ["python", "-m", "streamlit", "run", "application/app.py", "--server.port=8501", "--server.address=0.0.0.0"]
+ENTRYPOINT ["/docker-entrypoint.sh"]

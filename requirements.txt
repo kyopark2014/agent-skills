@@ -6,7 +6,6 @@ langchain_aws
 langchain
 langchain_community
 langgraph
-langchain_experimental
 langgraph-supervisor
 langgraph-swarm
 langchain-text-splitters

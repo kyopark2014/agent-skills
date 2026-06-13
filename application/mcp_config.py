@@ -65,9 +65,7 @@ def get_secret_value(secret_name):
         return None
 
 def load_config(mcp_type):
-    if mcp_type == "code interpreter":
-        mcp_type = "repl_coder"
-    elif mcp_type == "knowledge base":
+    if mcp_type == "knowledge base":
         mcp_type = "kb-retriever"    
     elif mcp_type == "AWS Sentral (Employee)":
         mcp_type = "aws_sentral"
@@ -123,18 +121,6 @@ def load_config(mcp_type):
                 }
             }
         }
-    
-    elif mcp_type == "repl_coder":
-        return {
-            "mcpServers": {
-                "repl_coder": {
-                    "command": "python",
-                    "args": [
-                        f"{workingDir}/mcp_server_repl_coder.py"
-                    ]
-                }
-            }
-        }    
 
     elif mcp_type == "terminal (MAC)":
         return {

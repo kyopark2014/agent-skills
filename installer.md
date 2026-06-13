@@ -382,7 +382,7 @@ RUN pip install terminal-control-mcp
 
 # Install Python packages
 RUN pip install streamlit streamlit-chat
-RUN pip install boto3 langchain_aws langchain langchain_community langgraph langchain_experimental langgraph-supervisor langgraph-swarm langchain-text-splitters
+RUN pip install boto3 langchain_aws langchain langchain_community langgraph langgraph-supervisor langgraph-swarm langchain-text-splitters
 RUN pip install mcp langchain-mcp-adapters
 RUN pip install pandas numpy
 RUN pip install tavily-python==0.5.0 pytz>=2025.2
