@@ -28,6 +28,10 @@ def _get_bearer_token(region: str) -> str:
     return provide_token(region=region)
 
 
+def get_bedrock_bearer_token(region: str) -> str:
+    return _get_bearer_token(region)
+
+
 def _request_bedrock_control_plane(
     method: str, region: str, body: dict | None = None
 ) -> tuple[int, str]:
