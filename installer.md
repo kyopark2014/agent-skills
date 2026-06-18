@@ -382,12 +382,12 @@ RUN pip install terminal-control-mcp
 
 # Install Python packages
 RUN pip install streamlit streamlit-chat
-RUN pip install boto3 langchain_aws langchain langchain_community langgraph langgraph-supervisor langgraph-swarm langchain-text-splitters
+RUN pip install "boto3>=1.43.32" "botocore>=1.43.32" langchain_aws langchain langchain_community langgraph langgraph-supervisor langgraph-swarm langchain-text-splitters
 RUN pip install mcp langchain-mcp-adapters
 RUN pip install pandas numpy
 RUN pip install tavily-python==0.5.0 pytz>=2025.2
 RUN pip install beautifulsoup4==4.12.3 plotly_express==0.4.1 matplotlib==3.10.0 
-RUN pip install opensearch-py wikipedia aioboto3 requests
+RUN pip install opensearch-py wikipedia requests
 RUN pip install uv kaleido diagrams graphviz rich colorama finance-datareader PyPDF2
 
 RUN mkdir -p /root/.streamlit

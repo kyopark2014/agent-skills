@@ -38,12 +38,12 @@ RUN npx -y mcp-server-fetch-typescript --version 2>/dev/null || true && \
 
 # Install Python packages
 RUN pip install streamlit streamlit-chat streamlit_paste_button
-RUN pip install boto3 langchain_aws langchain langchain_community langgraph langgraph-supervisor langgraph-swarm langchain-text-splitters
+RUN pip install "boto3>=1.43.32" "botocore>=1.43.32" langchain_aws langchain langchain_community langgraph langgraph-supervisor langgraph-swarm langchain-text-splitters
 RUN pip install mcp langchain-mcp-adapters
 RUN pip install pandas numpy
 RUN pip install tavily-python pytz
 RUN pip install beautifulsoup4==4.12.3 plotly_express==0.4.1 matplotlib==3.10.0 
-RUN pip install opensearch-py wikipedia aioboto3 requests
+RUN pip install opensearch-py wikipedia requests
 RUN pip install uv kaleido diagrams graphviz rich colorama finance-datareader PyPDF2 pyyaml
 RUN pip install python-telegram-bot discord.py
 RUN pip install python-pptx

@@ -74,8 +74,7 @@ def get_agentcore_gateway_mcp_url(gateway_name: str, gateway_region: str) -> str
 
             gateway_id = item["gatewayId"]
             gateway = client.get_gateway(gatewayIdentifier=gateway_id)
-            gateway_url = gateway["gatewayUrl"].rstrip("/")
-            return f"{gateway_url}/mcp"
+            return gateway["gatewayUrl"].rstrip("/")
     except Exception as e:
         logger.error(f"Error resolving AgentCore gateway URL for {gateway_name}: {e}")
 

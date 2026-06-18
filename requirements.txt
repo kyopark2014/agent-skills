@@ -1,7 +1,8 @@
 streamlit
 streamlit-chat
 streamlit-paste-button
-boto3
+boto3>=1.43.32
+botocore>=1.43.32
 langchain_aws
 langchain
 langchain_community
@@ -27,7 +28,6 @@ plotly_express==0.4.1
 matplotlib==3.10.0
 opensearch-py
 wikipedia
-aioboto3
 kaleido
 diagrams
 colorama
