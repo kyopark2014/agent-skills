@@ -315,9 +315,102 @@ tools.append(mcp_tools)
 
 ## SigV4 인증
 
-[agentcore_sigv4_auth.py](./application/agentcore_sigv4_auth.py)는 httpx `Auth` 구현체입니다. boto3 세션의 현재 IAM 자격 증명으로 Gateway MCP URL에 대한 요청을 `bedrock-agentcore` 서비스 SigV4로 서명합니다. 상세 구현과 LangGraph 연동 패턴은 [agentcore-IAM.md](./agentcore-IAM.md)를 참조하세요.
+websearch MCP는 API Key나 Bearer 토큰 대신 **실행 환경의 IAM identity로 HTTP 요청 자체를 SigV4 서명**합니다. [agentcore_sigv4_auth.py](./application/agentcore_sigv4_auth.py)는 httpx `Auth` 구현체이며, boto3 세션의 현재 IAM 자격 증명으로 Gateway MCP URL에 대한 요청을 `bedrock-agentcore` 서비스 SigV4로 서명합니다. Gateway IAM 정책·역할 설정은 [agentcore-IAM.md](./agentcore-IAM.md)를 참조하세요.
 
-로컬 개발 환경에서 **실행 환경의 AWS credential**(프로파일 등)이 Gateway 호출 권한을 가져야 합니다.
+### 인증 흐름
+
+```mermaid
+sequenceDiagram
+    participant Config as mcp_config
+    participant Loader as load_multiple_mcp_server_parameters
+    participant Client as MultiServerMCPClient
+    participant Auth as AgentCoreSigV4Auth
+    participant Boto3 as boto3.Session
+    participant Gateway as AgentCore Gateway (HTTP)
+
+    Config->>Loader: auth_type=aws_sigv4 설정
+    Loader->>Client: connection["auth"] = AgentCoreSigV4Auth(...)
+    Client->>Gateway: httpx HTTP 요청
+    Auth->>Boto3: get_credentials()
+    Boto3-->>Auth: access_key, secret_key, token
+    Auth->>Auth: SigV4Auth로 Authorization 헤더 생성
+    Auth->>Gateway: 서명된 요청 전송
+```
+
+| 단계 | 구성요소 | 역할 |
+|------|----------|------|
+| 1. 설정 | [mcp_config.py](./application/mcp_config.py) | `auth_type`, `auth_region`, `auth_service` 메타데이터 반환 |
+| 2. 연결 | [langgraph_agent.py](./application/langgraph_agent.py) | `auth_type == "aws_sigv4"`일 때 `AgentCoreSigV4Auth` 인스턴스를 connection에 연결 |
+| 3. 클라이언트 | `MultiServerMCPClient` | langchain-mcp-adapters가 내부 httpx 클라이언트에 `auth` 객체 연결 |
+| 4. 서명 | [agentcore_sigv4_auth.py](./application/agentcore_sigv4_auth.py) | 요청마다 boto3 credential으로 SigV4 서명 후 헤더 주입 |
+| 5. 검증 | AgentCore Gateway | IAM으로 `Authorization` 헤더 검증 (`authorizerType: AWS_IAM`) |
+
+### 1단계: connection에 auth 객체 연결
+
+[langgraph_agent.py](./application/langgraph_agent.py)의 `load_multiple_mcp_server_parameters()`는 MCP 서버가 `streamable_http`/`http` 타입이고 `auth_type: "aws_sigv4"`인 경우에만 `connection` 딕셔너리에 `auth` 키를 추가합니다.
+
+```python
+if cfg.get("auth_type") == "aws_sigv4":
+    connection["auth"] = agentcore_sigv4_auth.AgentCoreSigV4Auth(
+        region=cfg.get("auth_region", "us-east-1"),
+        service=cfg.get("auth_service", "bedrock-agentcore"),
+    )
+```
+
+- `region`: SigV4 서명에 쓰는 AWS 리전 (websearch는 `us-east-1` 고정)
+- `service`: SigV4 서비스 이름 (`bedrock-agentcore`)
+
+이 단계는 credential을 직접 다루지 않고, **“이 MCP 서버는 IAM SigV4로 인증한다”**는 플래그를 connection 객체에 달아주는 설정입니다.
+
+### 2단계: AWS Credential 획득 및 SigV4 서명
+
+MCP 클라이언트가 Gateway URL로 HTTP 요청을 보낼 때마다 httpx가 `AgentCoreSigV4Auth.auth_flow()`를 호출합니다.
+
+```python
+class AgentCoreSigV4Auth(httpx.Auth):
+    def auth_flow(self, request: httpx.Request):
+        credentials = boto3.Session().get_credentials().get_frozen_credentials()
+        headers = dict(request.headers)
+        body = request.content
+
+        aws_request = AWSRequest(
+            method=request.method,
+            url=str(request.url),
+            data=body,
+            headers=headers,
+        )
+        SigV4Auth(credentials, self.service, self.region).add_auth(aws_request)
+        prepared = aws_request.prepare()
+
+        for key, value in prepared.headers.items():
+            request.headers[key] = value
+
+        yield request
+```
+
+#### Credential 소스 (boto3 기본 chain)
+
+코드에 access key를 하드코딩하지 않습니다. `boto3.Session().get_credentials()`가 실행 환경에서 자격 증명을 자동으로 찾습니다.
+
+| 우선순위 | 소스 |
+|---------|------|
+| 1 | 환경 변수 (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`) |
+| 2 | `~/.aws/credentials` |
+| 3 | EC2/ECS/Lambda IAM Role (instance metadata 등) |
+| 4 | `AWS_PROFILE`로 지정한 프로파일 |
+
+`.get_frozen_credentials()`는 요청 시점의 credential을 불변 스냅샷으로 고정합니다. STS 임시 credential인 경우 `token`(session token)도 포함됩니다.
+
+#### SigV4 서명 과정
+
+1. httpx가 Gateway로 보낼 HTTP 요청(method, URL, body, headers)을 `botocore.awsrequest.AWSRequest`로 감쌉니다.
+2. `botocore.auth.SigV4Auth(credentials, "bedrock-agentcore", "us-east-1").add_auth()`가 AWS Signature Version 4 서명을 계산합니다.
+3. 서명 결과가 `Authorization`, `X-Amz-Date`, `X-Amz-Security-Token`(임시 credential인 경우) 등의 헤더로 요청에 추가됩니다.
+4. 서명된 요청이 AgentCore Gateway(`authorizerType: AWS_IAM`)로 전송되고, Gateway가 IAM으로 서명을 검증합니다.
+
+### 런타임 요구사항
+
+로컬 개발 환경에서 **실행 환경의 AWS credential**(프로파일 등)이 Gateway 호출 권한을 가져야 합니다. 최소 `bedrock-agentcore:InvokeGateway`, `bedrock-agentcore:InvokeWebSearch`가 허용된 IAM 사용자·역할이어야 합니다.
 
 ## 사전 준비
 
