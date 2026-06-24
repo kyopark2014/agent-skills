@@ -476,3 +476,5 @@ streamlit run application/app.py
 | [application/agentcore_sigv4_auth.py](./application/agentcore_sigv4_auth.py) | httpx SigV4 auth |
 | [application/app.py](./application/app.py) | Streamlit MCP·Skill UI |
 | [application/chat.py](./application/chat.py) | LangGraph Agent 생성 및 MCP 도구 등록 |
+
+[Announcing Web Search on Amazon Bedrock AgentCore: Ground your AI agents in current, accurate web knowledge](https://aws.amazon.com/ko/blogs/aws/announcing-web-search-on-amazon-bedrock-agentcore-ground-your-ai-agents-in-current-accurate-web-knowledge/)
