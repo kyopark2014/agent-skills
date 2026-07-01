@@ -22,7 +22,7 @@ logger = logging.getLogger("telegram_bot")
 
 TELEGRAM_BOT_TOKEN = utils.telegram_api_key
 
-DEFAULT_MODEL = "Claude 4.7 Opus"
+DEFAULT_MODEL = "Claude 5.0 Sonnet"
 DEFAULT_MCP_SERVERS = ["web_fetch", "slack", "notion", "tavily", "aws_documentation"]
 DEFAULT_SKILL_LIST = ["skill-creator", "graphify", "myslide"]
 
