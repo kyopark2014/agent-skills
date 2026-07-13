@@ -79,6 +79,7 @@ with st.sidebar:
         "web_fetch",
         "drawio",
         "text_extraction",
+        "memory",
         "slack",
         "notion",
         "outlook",
@@ -119,7 +120,7 @@ with st.sidebar:
 
         # Change radio to checkbox        
         mcp_selections = {}
-        default_selections = ["web_fetch", "slack", "notion", "korea_weather", "websearch"]
+        default_selections = ["web_fetch", "slack", "notion", "korea_weather", "websearch", "memory"]
         
         with st.expander("MCP 옵션 선택", expanded=True):
             for option in mcp_options:
@@ -194,7 +195,11 @@ with st.sidebar:
 
     # skill checkbox
     select_skillMode = st.checkbox('Skill Mode', value=True)
-    skillMode = 'Enable' if select_skillMode else 'Disable'    
+    skillMode = 'Enable' if select_skillMode else 'Disable'
+
+    # memory checkbox
+    select_memoryMode = st.checkbox('Memory Mode', value=True)
+    memoryMode = 'Enable' if select_memoryMode else 'Disable'
 
     # debug checkbox
     select_debugMode = st.checkbox('Debug Mode', value=True)
@@ -228,7 +233,7 @@ with st.sidebar:
         st.markdown("**또는** 화면 캡처를 붙여넣으세요:")
         pasted_image = safe_paste_button("📋 클립보드에서 붙여넣기", key="paste_image")
         
-    chat.update(modelName, debugMode, reasoningMode, skillMode)    
+    chat.update(modelName, debugMode, reasoningMode, skillMode, memoryMode)    
 
     st.success(f"Connected to {modelName}", icon="💚")
     clear_button = st.button("대화 초기화", key="clear")
@@ -402,6 +407,9 @@ if prompt := st.chat_input("메시지를 입력하세요."):
                 logger.info(f"url: {url}")
                 file_name = url[url.rfind('/')+1:]
                 st.image(url, caption=file_name, use_container_width=True)
+
+            if memoryMode == "Enable":
+                chat.save_to_memory(prompt, response)
 
         elif mode == '번역하기':
             response = chat.translate_text(prompt)

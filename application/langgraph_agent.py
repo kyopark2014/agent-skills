@@ -1046,6 +1046,11 @@ async def create_agent(mcp_servers: list, skill_list: list, history_mode: str="D
 
     else:
         system_prompt = BASE_SYSTEM_PROMPT
+
+    if chat.memory_mode == "Enable":
+        tools.extend([memory_search, memory_get])
+        system_prompt = f"{system_prompt}\n\n{MEMORY_SYSTEM_PROMPT}"
+        logger.info("memory_mode enabled: memory_search, memory_get added")
         
     tool_list = [tool.name for tool in tools] if tools else []
     logger.info(f"tool_list: {tool_list}")
@@ -1078,6 +1083,8 @@ async def create_agent(mcp_servers: list, skill_list: list, history_mode: str="D
 app = config = None
 active_mcp_servers = []
 active_skills = []
+active_skill_mode = None
+active_memory_mode = None
 current_id = None
 
 def _sanitize_reference_text(text: str, max_len: int) -> str:
@@ -1106,7 +1113,7 @@ def _format_references_markdown(references: list) -> str:
 
 
 async def run_langgraph_agent(query: str, mcp_servers: list, skill_list: list, history_mode: str="Disable", notification_queue: NotificationQueue =None) -> tuple[str, list]:
-    global app, config, active_mcp_servers, active_skills, current_id
+    global app, config, active_mcp_servers, active_skills, active_skill_mode, active_memory_mode, current_id
     
     queue = notification_queue if notification_queue else None
     if queue:
@@ -1116,9 +1123,16 @@ async def run_langgraph_agent(query: str, mcp_servers: list, skill_list: list, h
     artifact_paths = []
     references = []
 
-    if app is None or active_mcp_servers != mcp_servers or active_skills != skill_list or current_id != chat.user_id:
+    if (app is None
+        or active_mcp_servers != mcp_servers
+        or active_skills != skill_list
+        or active_skill_mode != chat.skill_mode
+        or active_memory_mode != chat.memory_mode
+        or current_id != chat.user_id):
         active_mcp_servers = mcp_servers
         active_skills = skill_list
+        active_skill_mode = chat.skill_mode
+        active_memory_mode = chat.memory_mode
         current_id = chat.user_id
 
         app, config = await create_agent(mcp_servers, skill_list, history_mode)

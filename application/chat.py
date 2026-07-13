@@ -89,14 +89,21 @@ number_of_models = len(models)
 model_id = models[0]["model_id"]
 debug_mode = "Enable"
 skill_mode = "Disable"
+memory_mode = "Disable"
 
 reasoning_mode = 'Disable'
 user_id = "agent"
 multi_region = 'Disable'
 
-def update(modelName, debugMode, reasoningMode, skillMode):    
+# AgentCore Memory session state (initialized in initiate_memory)
+memory_id = None
+actor_id = None
+session_id = None
+agent_type = "langgraph"
+
+def update(modelName, debugMode, reasoningMode, skillMode, memoryMode="Disable"):    
     global model_name, model_id, model_type, debug_mode, reasoning_mode
-    global models, user_id, skill_mode
+    global models, user_id, skill_mode, memory_mode
 
     if model_name != modelName:
         model_name = modelName
@@ -118,6 +125,10 @@ def update(modelName, debugMode, reasoningMode, skillMode):
         skill_mode = skillMode
         logger.info(f"skill_mode: {skill_mode}")
 
+    if memory_mode != memoryMode:
+        memory_mode = memoryMode
+        logger.info(f"memory_mode: {memory_mode}")
+
     # logger.info(f"mcp.env updated: {mcp_env}")
 
 map_chain = dict() 
@@ -129,10 +140,12 @@ checkpointer = MemorySaver()
 memorystore = InMemoryStore()
 
 def initiate():
-    global user_id
+    global user_id, memory_id, actor_id, session_id
     
     user_id = uuid.uuid4().hex
     logger.info(f"user_id: {user_id}")
+
+    memory_id = actor_id = session_id = None
 
     global memory_chain, checkpointer, memorystore, checkpointers, memorystores
 
@@ -1671,3 +1684,62 @@ def get_tool_info(tool_name, tool_content):
             pass
 
     return content, urls, tool_references
+
+
+#########################################################
+# AgentCore Memory
+#########################################################
+import agentcore_memory
+
+
+def initiate_memory():
+    global memory_id, actor_id, session_id
+
+    effective_user_id = user_id if user_id and str(user_id).strip() else agent_type
+    if not effective_user_id or not str(effective_user_id).strip():
+        effective_user_id = "default"
+    logger.info(f"Using user_id: {effective_user_id}")
+
+    memory_id, actor_id, session_id, namespace = agentcore_memory.load_memory_variables(effective_user_id)
+    logger.info(
+        f"memory_id: {memory_id}, actor_id: {actor_id}, "
+        f"session_id: {session_id}, namespace: {namespace}"
+    )
+
+    if memory_id is None:
+        memory_id = agentcore_memory.retrieve_memory_id()
+        logger.info(f"memory_id: {memory_id}")
+
+        if memory_id is None:
+            logger.info("Memory will be created...")
+            memory_id = agentcore_memory.create_memory(namespace, effective_user_id)
+            logger.info(f"Memory was created... {memory_id}")
+
+        agentcore_memory.create_strategy_if_not_exists(
+            memory_id=memory_id,
+            namespace=namespace,
+            strategy_name=effective_user_id,
+        )
+
+        agentcore_memory.update_memory_variables(
+            user_id=effective_user_id,
+            memory_id=memory_id,
+            actor_id=actor_id,
+            session_id=session_id,
+            namespace=namespace,
+        )
+
+
+def save_to_memory(query, result):
+    """Save conversation to AgentCore Memory when Memory Mode is enabled."""
+    global memory_id, actor_id, session_id
+
+    if memory_mode != "Enable":
+        return
+
+    if memory_id is None:
+        initiate_memory()
+
+    agentcore_memory.save_conversation_to_memory(
+        memory_id, actor_id, session_id, query, result
+    )

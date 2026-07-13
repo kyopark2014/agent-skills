@@ -12,6 +12,7 @@ import os
 from datetime import datetime
 from typing import Dict, List, Optional
 from botocore.exceptions import ClientError
+from bedrock_agentcore.memory import MemoryClient
 
 # Configuration
 project_name = "agent-skills"  # at least 3 characters
@@ -1271,7 +1272,7 @@ def create_agentcore_memory_role() -> str:
     """Create AgentCore Memory IAM role."""
     logger.info("[3/6] Creating AgentCore Memory IAM role")
     role_name = f"role-agentcore-memory-for-{project_name}-{region}"
-    
+
     assume_role_policy = {
         "Version": "2012-10-17",
         "Statement": [
@@ -1280,13 +1281,13 @@ def create_agentcore_memory_role() -> str:
                 "Principal": {
                     "Service": "bedrock-agentcore.amazonaws.com"
                 },
-                "Action": "sts:AssumeRole"
+                "Action": "sts:AssumeRole",
             }
-        ]
+        ],
     }
-    
+
     role_arn = create_iam_role(role_name, assume_role_policy)
-    
+
     memory_policy = {
         "Version": "2012-10-17",
         "Statement": [
@@ -1304,18 +1305,75 @@ def create_agentcore_memory_role() -> str:
                     "bedrock:CreateMemoryRecord",
                     "bedrock:DeleteMemoryRecord",
                     "bedrock:DescribeMemoryRecord",
-                    "bedrock:UpdateMemoryRecord"
+                    "bedrock:UpdateMemoryRecord",
                 ],
                 "Resource": [
                     "arn:aws:bedrock:*::foundation-model/*",
-                    "arn:aws:bedrock:*:*:inference-profile/*"
-                ]
+                    "arn:aws:bedrock:*:*:inference-profile/*",
+                ],
             }
-        ]
+        ],
     }
     attach_inline_policy(role_name, f"agentcore-memory-policy-for-{project_name}", memory_policy)
-    
+
     return role_arn
+
+
+USER_PREFERENCE_PROMPT = (
+    "You are tasked with analyzing conversations to extract the user's preferences. You'll be analyzing two sets of data:\n"
+    "<past_conversation>\n"
+    "[Past conversations between the user and system will be placed here for context]\n"
+    "</past_conversation>\n"
+    "<current_conversation>\n"
+    "[The current conversation between the user and system will be placed here]\n"
+    "</current_conversation>\n"
+    "Your job is to identify and categorize the user's preferences into two main types:\n"
+    "- Explicit preferences: Directly stated preferences by the user.\n"
+    "- Implicit preferences: Inferred from patterns, repeated inquiries, or contextual clues. Take a close look at user's request for implicit preferences.\n"
+    "For explicit preference, extract only preference that the user has explicitly shared. Do not infer user's preference.\n"
+    "For implicit preference, it is allowed to infer user's preference, but only the ones with strong signals, such as requesting something multiple times.\n"
+    "Use Korean.\n"
+)
+
+
+def create_agentcore_memory(role_arn: str, user_id: str = "installer") -> str:
+    """Create AgentCore Memory with custom strategy."""
+    logger.info("[3/6] Creating AgentCore Memory")
+
+    memory_client = MemoryClient(region_name=region)
+    memory_name = project_name.replace("-", "_")
+    namespace = f"/users/{user_id}"
+
+    memories = memory_client.list_memories()
+    for memory in memories:
+        if memory.get("id", "").split("-")[0] == memory_name:
+            memory_id = memory.get("id")
+            logger.info(f"  Memory already exists: {memory_id}")
+            return memory_id
+
+    result = memory_client.create_memory_and_wait(
+        name=memory_name,
+        description=f"Memory for {project_name}",
+        event_expiry_days=365,
+        strategies=[{
+            "customMemoryStrategy": {
+                "name": user_id,
+                "namespaces": [namespace],
+                "configuration": {
+                    "userPreferenceOverride": {
+                        "extraction": {
+                            "modelId": "us.anthropic.claude-haiku-4-5-20251001-v1:0",
+                            "appendToPrompt": USER_PREFERENCE_PROMPT,
+                        }
+                    }
+                },
+            }
+        }],
+        memory_execution_role_arn=role_arn,
+    )
+    memory_id = result.get("id")
+    logger.info(f"  ✓ Memory created: {memory_id}")
+    return memory_id
 
 
 def _agentcore_websearch_tool_arn() -> str:
@@ -1658,6 +1716,7 @@ def build_app_environment(
     cloudfront_domain: str,
     knowledge_base_id: str,
     agentcore_memory_role_arn: str = "",
+    memory_id: str = "",
     agentcore_websearch_gateway_info: Optional[Dict[str, str]] = None,
 ) -> Dict[str, str]:
     env = {
@@ -1675,6 +1734,8 @@ def build_app_environment(
     }
     if agentcore_memory_role_arn:
         env["agentcore_memory_role"] = agentcore_memory_role_arn
+    if memory_id:
+        env["memory_id"] = memory_id
     _apply_websearch_gateway_config(env, agentcore_websearch_gateway_info)
     return env
 
@@ -1710,6 +1771,7 @@ def build_config_from_deployment_state(
     knowledge_base_id: Optional[str] = None,
     knowledge_base_role_arn: Optional[str] = None,
     agentcore_memory_role_arn: Optional[str] = None,
+    memory_id: Optional[str] = None,
     agentcore_websearch_gateway_info: Optional[Dict[str, str]] = None,
     opensearch_info: Optional[Dict[str, str]] = None,
     s3_bucket_name: Optional[str] = None,
@@ -1735,6 +1797,8 @@ def build_config_from_deployment_state(
         config_data["sharing_url"] = f"https://{cloudfront_info.get('domain', '')}"
     if agentcore_memory_role_arn:
         config_data["agentcore_memory_role"] = agentcore_memory_role_arn
+    if memory_id:
+        config_data["memory_id"] = memory_id
     _apply_websearch_gateway_config(config_data, agentcore_websearch_gateway_info)
     return config_data
 
@@ -1753,6 +1817,7 @@ def main():
     s3_bucket_name = None
     knowledge_base_role_arn = None
     agentcore_memory_role_arn = None
+    memory_id = None
     agentcore_websearch_gateway_info = None
     opensearch_info = None
     knowledge_base_id = None
@@ -1766,6 +1831,7 @@ def main():
         knowledge_base_role_arn = create_knowledge_base_role()
         create_agent_role()
         agentcore_memory_role_arn = create_agentcore_memory_role()
+        memory_id = create_agentcore_memory(agentcore_memory_role_arn)
         agentcore_websearch_gateway_role_arn = create_agentcore_websearch_gateway_role()
         agentcore_websearch_gateway_info = get_or_create_agentcore_websearch_gateway(
             agentcore_websearch_gateway_role_arn
@@ -1782,6 +1848,7 @@ def main():
             cloudfront_info["domain"],
             knowledge_base_id,
             agentcore_memory_role_arn,
+            memory_id,
             agentcore_websearch_gateway_info,
         )
         deployment_success = True
@@ -1796,6 +1863,8 @@ def main():
         logger.info(f"  OpenSearch Endpoint: {opensearch_info['endpoint']}")
         logger.info(f"  Knowledge Base ID: {knowledge_base_id}")
         logger.info(f"  Knowledge Base Role: {knowledge_base_role_arn}")
+        logger.info(f"  AgentCore Memory Role: {agentcore_memory_role_arn}")
+        logger.info(f"  Memory ID: {memory_id}")
         logger.info(f"Total deployment time: {elapsed_time / 60:.2f} minutes")
         logger.info("Run locally: streamlit run application/app.py")
         logger.info("=" * 60)
@@ -1813,6 +1882,7 @@ def main():
                 knowledge_base_id=knowledge_base_id,
                 knowledge_base_role_arn=knowledge_base_role_arn,
                 agentcore_memory_role_arn=agentcore_memory_role_arn,
+                memory_id=memory_id,
                 agentcore_websearch_gateway_info=agentcore_websearch_gateway_info,
                 opensearch_info=opensearch_info,
                 s3_bucket_name=s3_bucket_name,

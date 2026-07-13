@@ -251,6 +251,16 @@ def load_config(mcp_type):
                 }
             }
         }
+
+    elif mcp_type == "memory":
+        return {
+            "mcpServers": {
+                "memory": {
+                    "command": "python",
+                    "args": [f"{workingDir}/mcp_server_memory.py"]
+                }
+            }
+        }
     
     elif mcp_type == "outlook":
         secret_name = f"outlook-mcp-user-email"
