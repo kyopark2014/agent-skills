@@ -65,13 +65,19 @@ def load_memory_variables(user_id: str):
         logger.error(f"Error loading agentcore config: {e}")
         pass
 
-    if actor_id is None:
-        actor_id = user_id
+    # actor_id is always the application user_id
+    actor_id = user_id
     if session_id is None:
         session_id = uuid.uuid4().hex
     if namespace is None:
         namespace = f"/users/{actor_id}"
     
+    # Prefer installer-written memory_id from config.json
+    if memory_id is None:
+        memory_id = config.get("memory_id")
+        if memory_id:
+            logger.info(f"memory_id from config.json: {memory_id}")
+
     # If memory_id is None, try to retrieve existing memory or create a new one
     if memory_id is None:
         logger.info(f"memory_id is None, attempting to retrieve existing memory...")
@@ -79,11 +85,11 @@ def load_memory_variables(user_id: str):
         if memory_id is None:
             logger.info(f"No existing memory found, creating new memory...")
             memory_id = create_memory(namespace, user_id)
-            # Save the memory_id to the user config file
             update_memory_variables(user_id, memory_id=memory_id, actor_id=actor_id, session_id=session_id, namespace=namespace)
         else:
-            # Save the retrieved memory_id to the user config file
             update_memory_variables(user_id, memory_id=memory_id, actor_id=actor_id, session_id=session_id, namespace=namespace)
+    else:
+        update_memory_variables(user_id, memory_id=memory_id, actor_id=actor_id, session_id=session_id, namespace=namespace)
     
     return memory_id, actor_id, session_id, namespace
 
@@ -205,6 +211,12 @@ def load_memory_strategy(memory_id: str):
     logger.info(f"strategies: {strategies}")
     return strategies
 
+# Must be an inference profile available in the configured region (us-west-2).
+# Foundation IDs like anthropic.claude-3-5-haiku-... fail UpdateMemory with:
+# "Bedrock model is not available in region us-west-2"
+MEMORY_EXTRACTION_MODEL_ID = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
+
+
 def add_strategy(memory_id: str, namespace: str, strategy_name: str):
     if not strategy_name:
         raise ValueError("strategy_name cannot be None or empty")
@@ -216,7 +228,7 @@ def add_strategy(memory_id: str, namespace: str, strategy_name: str):
                 "configuration" : {
                     "userPreferenceOverride" : {
                         "extraction" : {
-                            "modelId" : "anthropic.claude-3-5-haiku-20241022-v1:0",
+                            "modelId" : MEMORY_EXTRACTION_MODEL_ID,
                             "appendToPrompt": USER_PREFERENCE_PROMPT
                         }
                     }
@@ -229,18 +241,22 @@ def add_strategy(memory_id: str, namespace: str, strategy_name: str):
 
 def create_strategy_if_not_exists(memory_id: str, namespace: str, strategy_name: str):
     # create strategy if not exists
-    has_strategy = False
-    strategies = load_memory_strategy(memory_id)
-    for strategy in strategies:
-        logger.info(f"strategy: {strategy}")
-        if strategy.get("name") == strategy_name:
-            logger.info(f"UserPreference strategy found")
-            has_strategy = True
-            break
-    if not has_strategy:
-        logger.info(f"UserPreference strategy not found, adding...")
-        add_strategy(memory_id, namespace, strategy_name)
-        logger.info(f"UserPreference strategy was added...")
+    try:
+        has_strategy = False
+        strategies = load_memory_strategy(memory_id)
+        for strategy in strategies:
+            logger.info(f"strategy: {strategy}")
+            if strategy.get("name") == strategy_name:
+                logger.info(f"UserPreference strategy found")
+                has_strategy = True
+                break
+        if not has_strategy:
+            logger.info(f"UserPreference strategy not found, adding...")
+            add_strategy(memory_id, namespace, strategy_name)
+            logger.info(f"UserPreference strategy was added...")
+    except Exception as e:
+        # Do not block CreateEvent short-term save if strategy UpdateMemory fails
+        logger.error(f"Failed to ensure memory strategy (continuing without update): {e}")
 
 def create_memory(namespace: str, user_id: str):
     if not user_id:
@@ -259,7 +275,7 @@ def create_memory(namespace: str, user_id: str):
                 "configuration" : {
                     "userPreferenceOverride" : {
                         "extraction" : {
-                            "modelId" : "us.anthropic.claude-haiku-4-5-20251001-v1:0",
+                            "modelId" : MEMORY_EXTRACTION_MODEL_ID,
                             "appendToPrompt": USER_PREFERENCE_PROMPT
                         }
                     }

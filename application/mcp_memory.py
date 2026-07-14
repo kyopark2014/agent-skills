@@ -14,7 +14,6 @@ import boto3
 import os
 import sys
 import agentcore_memory
-import utils
 
 from typing import Dict, List, Optional, Set
 
@@ -195,12 +194,11 @@ def recall_memory(
     - get: Fetch a specific memory by ID
     """
     try:
-        mcp_env = utils.load_mcp_env()
-        user_id = mcp_env.get('user_id')
-        # Use default user_id if None or empty
-        if not user_id or (isinstance(user_id, str) and not user_id.strip()):
+        # Prefer user_id injected when the memory MCP process was spawned
+        user_id = (os.environ.get("AGENTCORE_USER_ID") or "").strip()
+        if not user_id:
             user_id = "default"
-            logger.info(f"user_id was None or empty, using default: {user_id}")
+            logger.info(f"AGENTCORE_USER_ID was empty, using default: {user_id}")
         memory_id, actor_id, session_id, namespace = agentcore_memory.load_memory_variables(user_id)
         logger.info(f"memory_id: {memory_id}, user_id: {user_id}, actor_id: {actor_id}, session_id: {session_id}, namespace: {namespace}")
 
@@ -212,6 +210,11 @@ def recall_memory(
         )
         
         # Execute the appropriate action
+        action = (action or "retrieve").strip().lower()
+        if action == "retrieve" and not (query or "").strip():
+            query = "집 회사 주소 통근 교통 선호 프로필 user preferences home office commute"
+            logger.info(f"retrieve query was empty; using default profile query: {query}")
+
         logger.info(f"###### action: {action} ######")
         try:
             if action == "retrieve":

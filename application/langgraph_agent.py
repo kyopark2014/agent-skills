@@ -1016,7 +1016,15 @@ async def create_agent(mcp_servers: list, skill_list: list, history_mode: str="D
     # logger.info(f"mcp_json: {mcp_json}")
 
     server_params = load_multiple_mcp_server_parameters(mcp_json)
-    # logger.info(f"server_params: {server_params}")    
+    # logger.info(f"server_params: {server_params}")
+
+    # Pass current user_id to memory MCP via process env (no shared mcp.env file)
+    memory_params = server_params.get("memory")
+    if memory_params and memory_params.get("transport") == "stdio":
+        env = dict(memory_params.get("env") or {})
+        env["AGENTCORE_USER_ID"] = chat.user_id
+        memory_params["env"] = env
+        logger.info(f"memory MCP AGENTCORE_USER_ID={chat.user_id}")
 
     try:
         client = MultiServerMCPClient(server_params)

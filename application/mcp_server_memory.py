@@ -35,35 +35,29 @@ def recall_memory(
     next_token: Optional[str] = None,
 ) -> Dict:
     """
-    Recall agent memories including user profile preferences.
+    Look up the user's long-term memories and profile BEFORE answering personal questions.
 
-    This tool helps agents access long-term memories and the user's profile
-    (preferences, style, facts extracted from past conversations).
+    Call this tool whenever the answer depends on stored personal context, for example:
+    home/office address, commute, preferred transport, schedule, diet, brands,
+    or anything the user previously shared (Korean: 집, 회사, 통근, 선호, 주소, 프로필).
 
-    Key Capabilities:
-    - Semantic search across conversation memories and user profile
-    - Browse and list all stored memories (including user profile records)
-    - Retrieve specific memories by ID
+    Do NOT guess personal facts. Prefer retrieve first; use list if retrieve is empty.
 
-    Supported Actions:
-    -----------------
-    - retrieve: Find relevant memories using semantic search.
-        Searches both general long-term memories and the user profile namespace.
-        Best for queries like "find memories about X" or "what are the user's preferences".
-
-    - list: Browse all stored memories including user profile records.
-
-    - get: Fetch a specific memory by ID.
+    Actions:
+    - retrieve: Semantic search (recommended default).
+        Example: action="retrieve", query="집 주소 회사 위치 통근 교통"
+    - list: Browse stored memory / profile records in the user namespace.
+    - get: Fetch one record by memory_record_id.
 
     Args:
-        action: The memory operation to perform (one of: "retrieve", "list", "get")
-        query: Search terms for finding relevant memories / user profile (required for retrieve)
-        memory_record_id: ID of a specific memory (required for get action)
-        max_results: Maximum number of results to return (optional)
-        next_token: Pagination token (optional)
+        action: One of "retrieve", "list", "get"
+        query: Search text for retrieve (required for retrieve)
+        memory_record_id: Required for get
+        max_results: Optional result cap
+        next_token: Optional pagination token
 
     Returns:
-        Dict: Response containing the requested memory information or operation status
+        Dict with matching memory content or operation status
     """
     logger.info(f"###### recall_memory ######")
     logger.info(f"action: {action}")

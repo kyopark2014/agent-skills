@@ -129,8 +129,6 @@ def update(modelName, debugMode, reasoningMode, skillMode, memoryMode="Disable")
         memory_mode = memoryMode
         logger.info(f"memory_mode: {memory_mode}")
 
-    # logger.info(f"mcp.env updated: {mcp_env}")
-
 map_chain = dict() 
 checkpointers = dict() 
 memorystores = dict() 

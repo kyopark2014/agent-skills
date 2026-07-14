@@ -257,7 +257,11 @@ def load_config(mcp_type):
             "mcpServers": {
                 "memory": {
                     "command": "python",
-                    "args": [f"{workingDir}/mcp_server_memory.py"]
+                    "args": [f"{workingDir}/mcp_server_memory.py"],
+                    "env": {
+                        "PYTHONPATH": workingDir,
+                        # AGENTCORE_USER_ID is injected at runtime in langgraph_agent.create_agent()
+                    },
                 }
             }
         }
