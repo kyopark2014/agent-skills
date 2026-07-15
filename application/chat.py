@@ -277,7 +277,6 @@ def _build_openai_chat(profile: dict, max_output_tokens: int):
             base_url=f"https://bedrock-mantle.{bedrock_region}.api.aws/openai/v1",
             use_responses_api=True,
             max_tokens=max_output_tokens,
-            temperature=0.1,
         )
 
     boto3_bedrock = boto3.client(
@@ -293,7 +292,6 @@ def _build_openai_chat(profile: dict, max_output_tokens: int):
         client=boto3_bedrock,
         model_kwargs={
             "max_tokens": max_output_tokens,
-            "temperature": 0.1,
         },
         region_name=bedrock_region,
     )
