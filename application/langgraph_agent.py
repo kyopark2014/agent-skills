@@ -3,6 +3,7 @@ import sys
 import os
 import subprocess
 import traceback
+import json
 import chat
 import utils
 import skill
@@ -1119,6 +1120,19 @@ def _sanitize_reference_text(text: str, max_len: int) -> str:
     return cleaned
 
 
+def _merge_streaming_tool_args(prev: str, new: str) -> str:
+    """Merge streamed tool-argument fragments (delta or cumulative snapshot)."""
+    if not new:
+        return prev or ""
+    if not prev:
+        return new
+    if new.startswith(prev):
+        return new  # cumulative snapshot
+    if prev.startswith(new):
+        return prev  # older/shorter snapshot
+    return prev + new  # delta
+
+
 def _format_references_markdown(references: list) -> str:
     """Build a Reference section safe for markdown list rendering."""
     lines = ["\n\n### Reference"]
@@ -1214,12 +1228,13 @@ async def run_langgraph_agent(query: str, mcp_servers: list, skill_list: list, h
                                                                     
                             if 'partial_json' in content_item:
                                 partial_json = content_item.get('partial_json', '')
-                                
-                                if toolUseId not in chat.tool_input_list:
-                                    chat.tool_input_list[toolUseId] = ""                                
-                                chat.tool_input_list[toolUseId] += partial_json
+                                prev = chat.tool_input_list.get(toolUseId, "")
+                                chat.tool_input_list[toolUseId] = _merge_streaming_tool_args(
+                                    prev, partial_json
+                                )
                                 input = chat.tool_input_list[toolUseId]
-                                handled_tool_input = True
+                                if partial_json:
+                                    handled_tool_input = True
 
                                 if queue:
                                     queue.tool_update(toolUseId, f"Tool: {tool_name}, Input: {input}")
@@ -1239,9 +1254,14 @@ async def run_langgraph_agent(query: str, mcp_servers: list, skill_list: list, h
                                 arguments = content_item.get('arguments', '')
                                 if not isinstance(arguments, str):
                                     arguments = str(arguments)
-                                chat.tool_input_list[toolUseId] = arguments
+                                prev = chat.tool_input_list.get(toolUseId, "")
+                                chat.tool_input_list[toolUseId] = _merge_streaming_tool_args(
+                                    prev, arguments
+                                )
                                 input = chat.tool_input_list[toolUseId]
-                                handled_tool_input = True
+                                # Empty arguments on early chunks must not block tool_call_chunks.
+                                if arguments:
+                                    handled_tool_input = True
                                 if queue:
                                     queue.tool_update(toolUseId, f"Tool: {tool_name}, Input: {input}")
 
@@ -1260,31 +1280,36 @@ async def run_langgraph_agent(query: str, mcp_servers: list, skill_list: list, h
                     continue
                 args_delta = tc.get("args")
                 if args_delta is not None and toolUseId:
-                    if toolUseId not in chat.tool_input_list:
-                        chat.tool_input_list[toolUseId] = ""
-                    if isinstance(args_delta, str):
-                        chat.tool_input_list[toolUseId] += args_delta
-                    elif args_delta:
-                        chat.tool_input_list[toolUseId] = str(args_delta)
+                    if not isinstance(args_delta, str):
+                        args_delta = str(args_delta) if args_delta else ""
+                    prev = chat.tool_input_list.get(toolUseId, "")
+                    chat.tool_input_list[toolUseId] = _merge_streaming_tool_args(
+                        prev, args_delta
+                    )
                     if queue:
                         queue.tool_update(
                             toolUseId,
                             f"Tool: {tool_name}, Input: {chat.tool_input_list[toolUseId]}",
                         )
 
-            # Fallback: completed tool_calls on a chunk (no streaming args path)
-            if (
-                not handled_tool_input
-                and not tool_call_chunks
-                and getattr(message, "tool_calls", None)
-            ):
+            # Prefer completed tool_calls when present (authoritative final args)
+            if getattr(message, "tool_calls", None):
                 for tc in message.tool_calls:
                     tid = tc.get("id", "")
                     tname = tc.get("name", "")
                     targs = tc.get("args", {})
-                    if tid and tname and queue:
+                    if not (tid and tname and targs):
+                        continue
+                    if isinstance(targs, dict):
+                        chat.tool_input_list[tid] = json.dumps(targs, ensure_ascii=False)
+                    else:
+                        chat.tool_input_list[tid] = str(targs)
+                    if queue:
                         queue.register_tool(tid, tname)
-                        queue.tool_update(tid, f"Tool: {tname}, Input: {targs}")
+                        queue.tool_update(
+                            tid,
+                            f"Tool: {tname}, Input: {chat.tool_input_list[tid]}",
+                        )
                         
         elif isinstance(stream[0], ToolMessage):
             message = stream[0]
