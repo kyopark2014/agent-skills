@@ -235,6 +235,14 @@ with st.sidebar:
         
         st.markdown("**또는** 화면 캡처를 붙여넣으세요:")
         pasted_image = safe_paste_button("📋 클립보드에서 붙여넣기", key="paste_image")
+
+    elif mode=='RAG' or mode=='Agent' or mode=='Agent (Chat)':
+        st.subheader("📋 문서/이미지 업로드")
+        uploaded_file = st.file_uploader(
+            "RAG를 위한 파일을 선택합니다.",
+            type=["pdf", "txt", "py", "md", "csv", "json", "png", "jpg", "jpeg"],
+            key=chat.fileId,
+        )
         
     chat.update(modelName, debugMode, reasoningMode, skillMode, memoryMode)    
 
