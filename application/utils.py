@@ -4,6 +4,7 @@ import json
 import traceback
 import boto3
 import os
+from urllib import parse
 from langchain_community.utilities.tavily_search import TavilySearchAPIWrapper
 
 logging.basicConfig(
@@ -94,30 +95,35 @@ def persist_config_updates(updates):
 
 
 def get_contents_type(file_name):
-    if file_name.lower().endswith((".jpg", ".jpeg")):
+    lower = file_name.lower()
+    if lower.endswith((".jpg", ".jpeg")):
         content_type = "image/jpeg"
-    elif file_name.lower().endswith((".pdf")):
-        content_type = "application/pdf"
-    elif file_name.lower().endswith((".txt")):
-        content_type = "text/plain"
-    elif file_name.lower().endswith((".csv")):
-        content_type = "text/csv"
-    elif file_name.lower().endswith((".ppt", ".pptx")):
-        content_type = "application/vnd.ms-powerpoint"
-    elif file_name.lower().endswith((".doc", ".docx")):
-        content_type = "application/msword"
-    elif file_name.lower().endswith((".xls")):
-        content_type = "application/vnd.ms-excel"
-    elif file_name.lower().endswith((".py")):
-        content_type = "text/x-python"
-    elif file_name.lower().endswith((".js")):
-        content_type = "application/javascript"
-    elif file_name.lower().endswith((".md")):
-        content_type = "text/markdown"
-    elif file_name.lower().endswith((".png")):
+    elif lower.endswith(".png"):
         content_type = "image/png"
+    elif lower.endswith(".webp"):
+        content_type = "image/webp"
+    elif lower.endswith(".gif"):
+        content_type = "image/gif"
+    elif lower.endswith(".pdf"):
+        content_type = "application/pdf"
+    elif lower.endswith(".txt"):
+        content_type = "text/plain"
+    elif lower.endswith(".csv"):
+        content_type = "text/csv"
+    elif lower.endswith((".ppt", ".pptx")):
+        content_type = "application/vnd.ms-powerpoint"
+    elif lower.endswith((".doc", ".docx")):
+        content_type = "application/msword"
+    elif lower.endswith((".xls", ".xlsx")):
+        content_type = "application/vnd.ms-excel"
+    elif lower.endswith(".py"):
+        content_type = "text/x-python"
+    elif lower.endswith(".js"):
+        content_type = "application/javascript"
+    elif lower.endswith(".md"):
+        content_type = "text/markdown"
     else:
-        content_type = "no info"    
+        content_type = "no info"
     return content_type
 
 def load_mcp_env():
@@ -159,7 +165,7 @@ if tavily_key:
 else:
     try:
         get_tavily_api_secret = secretsmanager.get_secret_value(
-            SecretId=f"tavilyapikey-{projectName}"
+            SecretId="tavilyapikey"
         )
         secret = json.loads(get_tavily_api_secret["SecretString"])
 
@@ -183,7 +189,7 @@ if notion_api_key:
 else:
     try:
         get_notion_api_secret = secretsmanager.get_secret_value(
-            SecretId=f"notionapikey-{projectName}"
+            SecretId="notionapikey"
         )
         secret = json.loads(get_notion_api_secret["SecretString"])
 
@@ -206,7 +212,7 @@ if telegram_api_key:
 else:
     try:
         get_telegram_api_secret = secretsmanager.get_secret_value(
-            SecretId=f"telegramapikey-{projectName}"
+            SecretId="telegramapikey"
         )
         secret = json.loads(get_telegram_api_secret["SecretString"])
 
@@ -229,7 +235,7 @@ if discord_bot_token:
 else:
     try:
         get_discord_secret = secretsmanager.get_secret_value(
-            SecretId=f"discordapikey-{projectName}"
+            SecretId="discordapikey"
         )
         secret = json.loads(get_discord_secret["SecretString"])
 
@@ -258,7 +264,7 @@ if slack_team_id:
 if not slack_bot_token or not slack_team_id:
     try:
         get_slack_secret = secretsmanager.get_secret_value(
-            SecretId=f"slackapikey-{projectName}"
+            SecretId="slackapikey"
         )
         secret = json.loads(get_slack_secret["SecretString"])
         if not slack_bot_token:
@@ -418,18 +424,70 @@ if not knowledge_base_id or not data_source_id:
     knowledge_base_id, data_source_id = update_rag_info()
 
 def sync_data_source():
-    if knowledge_base_id and data_source_id:
-        try:
-            bedrock_client = boto3.client(
-                service_name='bedrock-agent',
-                region_name=region
-            )
-                
-            response = bedrock_client.start_ingestion_job(
-                knowledgeBaseId=knowledge_base_id,
-                dataSourceId=data_source_id
-            )
-            logger.info(f"(start_ingestion_job) response: {response}")
-        except Exception:
-            err_msg = traceback.format_exc()
-            logger.info(f"error message: {err_msg}")
+    """Start a Knowledge Base ingestion job for the configured data source."""
+    if not knowledge_base_id or not data_source_id:
+        logger.error("knowledge_base_id or data_source_id is not configured")
+        return None
+
+    try:
+        bedrock_client = boto3.client(
+            service_name="bedrock-agent",
+            region_name=region,
+        )
+        response = bedrock_client.start_ingestion_job(
+            knowledgeBaseId=knowledge_base_id,
+            dataSourceId=data_source_id,
+        )
+        logger.info("(start_ingestion_job) response: %s", response)
+        job = response.get("ingestionJob", {})
+        return {
+            "ingestion_job_id": job.get("ingestionJobId"),
+            "status": job.get("status"),
+        }
+    except Exception:
+        logger.error("Error syncing data source: %s", traceback.format_exc())
+        return None
+
+
+def upload_to_s3(file_bytes: bytes, file_name: str) -> dict | None:
+    """Upload a file to S3 under docs/ (or images/) and return upload metadata."""
+    if not s3_bucket:
+        logger.error("s3_bucket is not configured")
+        return None
+
+    try:
+        s3_client = boto3.client(service_name="s3", region_name=bedrock_region)
+        content_type = get_contents_type(file_name)
+        logger.info("content_type: %s", content_type)
+
+        prefix = "images" if content_type.startswith("image/") else "docs"
+        s3_key = f"{prefix}/{file_name}"
+        user_meta = {"content_type": content_type}
+
+        put_params = {
+            "Bucket": s3_bucket,
+            "Key": s3_key,
+            "Metadata": user_meta,
+            "Body": file_bytes,
+        }
+        if content_type != "no info":
+            put_params["ContentType"] = content_type
+        if content_type == "application/pdf":
+            put_params["ContentDisposition"] = "inline"
+
+        response = s3_client.put_object(**put_params)
+        logger.info("upload response: %s", response)
+
+        url = None
+        if sharing_url:
+            url = f"{sharing_url.rstrip('/')}/{prefix}/{parse.quote(file_name)}"
+
+        return {
+            "file_name": file_name,
+            "s3_key": s3_key,
+            "content_type": content_type,
+            "url": url,
+        }
+    except Exception:
+        logger.error("Error uploading to S3: %s", traceback.format_exc())
+        return None

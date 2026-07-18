@@ -247,6 +247,12 @@ openai_gpt_54_models = [
 
 openai_gpt_5_5_models = [
     {
+        "bedrock_region": "us-east-1", # N.Virginia
+        "model_type": "openai",
+        "model_id": "openai.gpt-5.5",
+        "mantle_api": "responses",
+    },
+    {
         "bedrock_region": "us-east-2", # Ohio
         "model_type": "openai",
         "model_id": "openai.gpt-5.5",
@@ -311,12 +317,12 @@ openai_gpt_5_6_luna_models = [   # GPT-5.6 Luna
     },
 ]
 
+
 openai_oss_120b_models = [
     {
         "bedrock_region": "us-west-2", # Oregon
         "model_type": "openai",
-        "model_id": "openai.gpt-oss-120b-1:0",
-        "mantle_api": "chat",
+        "model_id": "openai.gpt-oss-120b-1:0"
     }
 ]
 
@@ -324,8 +330,7 @@ openai_oss_20b_models = [
     {
         "bedrock_region": "us-west-2", # Oregon
         "model_type": "openai",
-        "model_id": "openai.gpt-oss-20b-1:0",
-        "mantle_api": "chat",
+        "model_id": "openai.gpt-oss-20b-1:0"
     }
 ]
 

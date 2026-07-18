@@ -1,72 +1,120 @@
 import logging
 import sys
-import os
-import subprocess
 import traceback
-import json
 import chat
 import utils
-import skill
-import mcp_config
 import agentcore_sigv4_auth
-import datetime
-import boto3
-        
-from typing import Literal, Optional
+import sys
+import subprocess
+
 from langgraph.prebuilt import ToolNode
+from typing import Literal
 from langgraph.graph import START, END, StateGraph
 from typing_extensions import Annotated, TypedDict
 from langgraph.graph.message import add_messages
-from langchain_core.prompts import MessagesPlaceholder, ChatPromptTemplate
-from langchain_core.messages import HumanMessage, AIMessage, ToolMessage, AIMessageChunk
+from langchain_core.messages import HumanMessage, AIMessage, ToolMessage, SystemMessage
+from langchain_core.messages.ai import AIMessage, AIMessageChunk
 from langchain_core.messages.base import BaseMessage, BaseMessageChunk
-from langchain_mcp_adapters.client import MultiServerMCPClient
-from pytz import timezone
-from langchain_core.tools import tool
-from urllib import parse
-from urllib import parse as url_parse
-from notification_queue import NotificationQueue
+from langgraph.prebuilt import ToolNode
+from typing import Literal
+from langgraph.graph import START, END, StateGraph
+from typing_extensions import Annotated, TypedDict
+from langgraph.graph.message import add_messages
 
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.INFO,  
     format='%(filename)s:%(lineno)d | %(message)s',
-    handlers=[logging.StreamHandler(sys.stderr)]
+    handlers=[
+        logging.StreamHandler(sys.stderr)
+    ]
 )
-logger = logging.getLogger("agent")
+logger = logging.getLogger("langgraph_agent")
 
 config = utils.load_config()
-sharing_url = config.get("sharing_url")
+sharing_url = config["sharing_url"] if "sharing_url" in config else None
 s3_prefix = "docs"
-capture_prefix = "captures"
-
-s3_bucket = config.get("s3_bucket")
-        
-def s3_uri_to_console_url(uri: str, region: str) -> str:
-    """Open the object in the AWS S3 console (when sharing_url is not configured)."""
-    if not uri or not uri.startswith("s3://"):
-        return ""
-    rest = uri[5:]
-    parts = rest.split("/", 1)
-    bucket = parts[0]
-    key = parts[1] if len(parts) > 1 else ""
-    enc_key = parse.quote(key, safe="")
-    return f"https://{region}.console.aws.amazon.com/s3/object/{bucket}?prefix={enc_key}"
 
 import io, os, sys, json, traceback
 import subprocess as _subprocess, pathlib as _pathlib, shutil as _shutil
 import tempfile as _tempfile, glob as _glob, datetime as _datetime
 import math as _math, re as _re, requests as _requests
-import concurrent.futures
 from urllib.parse import quote
 from langchain_core.tools import tool
-from pathlib import Path
 
 WORKING_DIR = os.path.dirname(os.path.abspath(__file__))
 ARTIFACTS_DIR = os.path.join(WORKING_DIR, "artifacts")
 
-ARTIFACT_EXT = frozenset({".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".bmp", "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx"})
+_py_ver = f"{sys.version_info.major}.{sys.version_info.minor}"
+_user_bin = os.path.expanduser(f"~/Library/Python/{_py_ver}/bin")
+if os.path.isdir(_user_bin) and _user_bin not in os.environ.get("PATH", ""):
+    os.environ["PATH"] = _user_bin + os.pathsep + os.environ.get("PATH", "")
+
+ARTIFACT_EXT = frozenset({
+    ".png",
+    ".jpg",
+    ".jpeg",
+    ".gif",
+    ".webp",
+    ".svg",
+    ".bmp",
+    ".pdf",
+    ".doc",
+    ".docx",
+    ".xls",
+    ".xlsx",
+    ".ppt",
+    ".pptx",
+    ".js",  # e.g. generated scripts; still offer download when created
+})
 
 _mpl_runtime_ready = False
+
+_EXCLUDED_SNAPSHOT_DIRS = frozenset({
+    "node_modules",
+    ".git",
+    "__pycache__",
+    ".venv",
+    "venv",
+    "site-packages",
+    "dist",
+    "build",
+    ".mypy_cache",
+    ".pytest_cache",
+})
+
+
+def _working_dir_files_mtime_snapshot() -> dict:
+    """Relative path -> mtime for files under WORKING_DIR (vendor/cache dirs excluded).
+
+    Code often writes under artifacts/ but may also write to the working dir root;
+    scanning only artifacts/ missed those files and left download lists empty.
+    """
+    snap = {}
+    if not os.path.isdir(WORKING_DIR):
+        return snap
+    for dirpath, dirnames, filenames in os.walk(WORKING_DIR):
+        dirnames[:] = [d for d in dirnames if d not in _EXCLUDED_SNAPSHOT_DIRS]
+        for fn in filenames:
+            full = os.path.join(dirpath, fn)
+            try:
+                rel = os.path.relpath(full, WORKING_DIR)
+                snap[rel] = os.path.getmtime(full)
+            except OSError:
+                pass
+    return snap
+
+
+def _ensure_node_path():
+    """Expose /app/node_modules to Node require() for bash and execute_code."""
+    node_modules = os.path.join(WORKING_DIR, "node_modules")
+    if not os.path.isdir(node_modules):
+        return
+    existing = os.environ.get("NODE_PATH", "")
+    if node_modules not in existing.split(os.pathsep):
+        os.environ["NODE_PATH"] = (
+            f"{node_modules}{os.pathsep}{existing}" if existing else node_modules
+        )
+
 
 def _ensure_cli_scripts_on_path() -> None:
     """Prepend pip user script dir so CLIs (e.g. browser-use) resolve in subprocess."""
@@ -92,25 +140,8 @@ def _ensure_cli_scripts_on_path() -> None:
             parts.insert(0, d)
     os.environ["PATH"] = os.pathsep.join(parts)
 
-
-def _artifact_files_mtime_snapshot() -> dict:
-    """Relative path from WORKING_DIR -> mtime. Only scans under artifacts/."""
-    snap = {}
-    if not os.path.isdir(ARTIFACTS_DIR):
-        return snap
-    for dirpath, _, filenames in os.walk(ARTIFACTS_DIR):
-        for fn in filenames:
-            full = os.path.join(dirpath, fn)
-            try:
-                rel = os.path.relpath(full, WORKING_DIR)
-                snap[rel] = os.path.getmtime(full)
-            except OSError:
-                pass
-    return snap
-
-
 def _touched_artifact_paths(before: dict, after: dict) -> list:
-    """Only files created or modified between pre/post execution snapshots."""
+    """Return files that were newly created or modified between two snapshots."""
     touched = []
     for rel, mt in after.items():
         if rel not in before or before[rel] != mt:
@@ -119,12 +150,15 @@ def _touched_artifact_paths(before: dict, after: dict) -> list:
 
 
 def _paths_for_ui(relative_paths: list) -> list:
-    """absolute path for Streamlit st.image."""
+    """Return public URLs if sharing_url is set, otherwise absolute local paths."""
     out = []
+    base = sharing_url.rstrip("/") if sharing_url else ""
     for rel in relative_paths:
+        if base:
+            out.append(f"{base}/{quote(rel)}")
+        else:
             out.append(os.path.abspath(os.path.join(WORKING_DIR, rel)))
     return out
-
 
 def _ensure_matplotlib_runtime():
     """Use non-interactive Agg backend, prefer CJK-capable fonts, silence headless/show noise."""
@@ -170,6 +204,46 @@ def _ensure_matplotlib_runtime():
         logger.info(f"matplotlib runtime setup skipped: {e}")
         _mpl_runtime_ready = True
 
+
+def register_korean_font() -> str:
+    """Register a Korean-capable font for ReportLab (execute_code tool).
+
+    Prefer ``WORKING_DIR/assets/NanumGothic-Regular.ttf``, then common system paths,
+    then built-in CID ``HYGothic-Medium``. Returns the font name to pass as
+    ``fontName`` / ``bulletFontName`` on ParagraphStyle and table styles.
+    """
+    try:
+        from reportlab.pdfbase import pdfmetrics
+        from reportlab.pdfbase.ttfonts import TTFont
+        from reportlab.pdfbase.cidfonts import UnicodeCIDFont
+    except ImportError:
+        return "Helvetica"
+
+    ttf_candidates = [
+        os.path.join(WORKING_DIR, "assets", "NanumGothic-Regular.ttf"),
+        os.path.join("assets", "NanumGothic-Regular.ttf"),
+        "/usr/share/fonts/truetype/nanum/NanumGothic.ttf",
+        "/usr/share/fonts/nanum/NanumGothic.ttf",
+        "/Library/Fonts/NanumGothic.ttf",
+    ]
+    for path in ttf_candidates:
+        if not os.path.isfile(path):
+            continue
+        try:
+            pdfmetrics.registerFont(TTFont("KoreanFont", path))
+            return "KoreanFont"
+        except Exception:
+            continue
+
+    try:
+        pdfmetrics.registerFont(UnicodeCIDFont("HYGothic-Medium"))
+        return "HYGothic-Medium"
+    except Exception:
+        pass
+
+    return "Helvetica"
+
+
 _exec_globals = {
     "__builtins__": __builtins__,
     "subprocess": _subprocess,
@@ -187,7 +261,11 @@ _exec_globals = {
     "requests": _requests,
     "WORKING_DIR": WORKING_DIR,
     "ARTIFACTS_DIR": ARTIFACTS_DIR,
+    "register_korean_font": register_korean_font,
 }
+
+import datetime
+from pytz import timezone
 
 @tool
 def get_current_time(format: str=f"%Y-%m-%d %H:%M:%S")->str:
@@ -212,9 +290,14 @@ def execute_code(code: str) -> str:
     Variables and imports from previous calls persist across invocations.
     Generated files should be saved to the 'artifacts/' directory.
 
+    Document types (do not confuse extensions):
+    - Word / 한글 보고서 산출물 → 반드시 '.docx' (권장: Python python-docx). '.js'는 자바스크립트 소스용이며 Word 본문 보고서 파일명으로 쓰지 마세요.
+    - PDF → '.pdf', Excel → '.xlsx' 등 실제 형식에 맞는 확장자를 사용하세요.
+
     Path variables (pre-defined, do NOT redefine):
     - WORKING_DIR: absolute path to application directory
     - ARTIFACTS_DIR: absolute path to artifacts directory (WORKING_DIR/artifacts)
+    - register_korean_font(): registers Nanum TTF or CID fallback for ReportLab; returns font name str
 
     Args:
         code: Python code to execute.
@@ -225,7 +308,7 @@ def execute_code(code: str) -> str:
     """
     logger.info(f"###### execute_code ######")
     os.makedirs(ARTIFACTS_DIR, exist_ok=True)
-    before_files = _artifact_files_mtime_snapshot()
+    before_files = _working_dir_files_mtime_snapshot()
 
     old_cwd = os.getcwd()
     stdout_capture = io.StringIO()
@@ -238,15 +321,8 @@ def execute_code(code: str) -> str:
 
         _ensure_cli_scripts_on_path()
         _ensure_matplotlib_runtime()
-
-        node_modules = os.path.join(WORKING_DIR, "node_modules")
-        if os.path.isdir(node_modules):
-            existing = os.environ.get("NODE_PATH", "")
-            if node_modules not in existing.split(os.pathsep):
-                os.environ["NODE_PATH"] = (
-                    f"{node_modules}{os.pathsep}{existing}" if existing else node_modules
-                )
-
+        _ensure_node_path()
+        
         exec(code, _exec_globals)
 
         sys.stdout, sys.stderr = old_stdout, old_stderr
@@ -263,7 +339,7 @@ def execute_code(code: str) -> str:
         if not result.strip():
             result = "Code executed successfully (no output)."
 
-        after_files = _artifact_files_mtime_snapshot()
+        after_files = _working_dir_files_mtime_snapshot()
         touched = _touched_artifact_paths(before_files, after_files)
         artifact_rels = [
             r
@@ -299,7 +375,8 @@ def write_file(filepath: str, content: str = "") -> str:
     Never call without content. Both filepath and content are required in a single call.
 
     Args:
-        filepath: Absolute path or path relative to WORKING_DIR.
+        filepath: Absolute path or path relative to WORKING_DIR. Use the real file extension
+            (e.g. '.docx' for Word, '.md' for Markdown). Do not save report bodies as '.js'.
         content: The text content to write. REQUIRED - must not be omitted. Must include full file content.
 
     Returns:
@@ -319,8 +396,10 @@ def write_file(filepath: str, content: str = "") -> str:
         with open(full_path, "w", encoding="utf-8") as f:
             f.write(content)
 
+        rel = os.path.relpath(full_path, WORKING_DIR)
         result_msg = f"File saved: {filepath}"
-        return result_msg
+        payload = {"output": result_msg, "path": _paths_for_ui([rel])}
+        return json.dumps(payload, ensure_ascii=False)
     except Exception as e:
         return f"Failed to save file: {str(e)}"
 
@@ -355,7 +434,11 @@ def upload_file_to_s3(filepath: str) -> str:
         The download URL, or an error message.
     """
     logger.info(f"###### upload_file_to_s3: {filepath} ######")
-    try:        
+    try:
+        import boto3
+        from urllib import parse as url_parse
+
+        s3_bucket = config.get("s3_bucket")
         if not s3_bucket:
             return "S3 bucket is not configured."
 
@@ -372,129 +455,17 @@ def upload_file_to_s3(filepath: str) -> str:
         if sharing_url:
             url = f"{sharing_url}/{url_parse.quote(filepath)}"
             return f"Upload complete: {url}"
-        return f"Upload complete: {s3_uri_to_console_url(f"s3://{s3_bucket}/{filepath}", config.get("region", "us-west-2"))}"
+        return f"Upload complete: {chat.s3_uri_to_console_url(f"s3://{s3_bucket}/{filepath}", config.get("region", "us-west-2"))}"
 
     except Exception as e:
         return f"Upload failed: {str(e)}"
-
-@tool
-def memory_search(query: str, max_results: int = 5, min_score: float = 0.0) -> str:
-    """Search across memory files (MEMORY.md and memory/*.md) for relevant information.
-
-    Performs keyword-based search over all memory files and returns matching snippets
-    ranked by relevance score.
-
-    Args:
-        query: Search query string.
-        max_results: Maximum number of results to return (default: 5).
-        min_score: Minimum relevance score threshold 0.0-1.0 (default: 0.0).
-
-    Returns:
-        JSON array of matching snippets with text, path, from (line), lines, and score.
-    """
-    import re as _re
-    logger.info(f"###### memory_search: {query} ######")
-
-    memory_root = Path(WORKING_DIR)
-    memory_dir = memory_root / "memory"
-
-    target_files = []
-    memory_md = memory_root / "MEMORY.md"
-    if memory_md.exists():
-        target_files.append(memory_md)
-    if memory_dir.exists():
-        target_files.extend(sorted(memory_dir.glob("*.md"), reverse=True))
-
-    if not target_files:
-        return json.dumps([], ensure_ascii=False)
-
-    query_lower = query.lower()
-    query_tokens = [t for t in _re.split(r'\s+', query_lower) if len(t) >= 2]
-
-    results = []
-    for fpath in target_files:
-        try:
-            content = fpath.read_text(encoding="utf-8")
-        except Exception:
-            continue
-
-        lines = content.split("\n")
-        content_lower = content.lower()
-
-        if not any(tok in content_lower for tok in query_tokens):
-            continue
-
-        window_size = 5
-        for i in range(0, len(lines), window_size):
-            chunk_lines = lines[i:i + window_size]
-            chunk_text = "\n".join(chunk_lines)
-            chunk_lower = chunk_text.lower()
-
-            matched_tokens = sum(1 for tok in query_tokens if tok in chunk_lower)
-            if matched_tokens == 0:
-                continue
-
-            score = matched_tokens / len(query_tokens) if query_tokens else 0.0
-
-            if score >= min_score:
-                rel_path = str(fpath.relative_to(memory_root))
-                results.append({
-                    "text": chunk_text.strip(),
-                    "path": rel_path,
-                    "from": i + 1,
-                    "lines": len(chunk_lines),
-                    "score": round(score, 3),
-                })
-
-    results.sort(key=lambda x: x["score"], reverse=True)
-    results = results[:max_results]
-
-    return json.dumps(results, indent=2, ensure_ascii=False)
-
-
-@tool
-def memory_get(path: str, from_line: int = 0, lines: int = 0) -> str:
-    """Read a specific memory file (MEMORY.md or memory/*.md).
-
-    Use after memory_search to get full context, or when you know the exact file path.
-
-    Args:
-        path: Workspace-relative path (e.g. "MEMORY.md", "memory/2026-03-02.md").
-        from_line: Starting line number, 1-indexed (0 = read from beginning).
-        lines: Number of lines to read (0 = read entire file).
-
-    Returns:
-        JSON with 'text' (file content) and 'path'. Returns empty text if file doesn't exist.
-    """
-    logger.info(f"###### memory_get: {path} ######")
-
-    full_path = Path(WORKING_DIR) / path
-
-    if not full_path.exists():
-        return json.dumps({"text": "", "path": path}, ensure_ascii=False)
-
-    try:
-        content = full_path.read_text(encoding="utf-8")
-
-        if from_line > 0 or lines > 0:
-            all_lines = content.split("\n")
-            start = max(0, from_line - 1)
-            if lines > 0:
-                end = start + lines
-                content = "\n".join(all_lines[start:end])
-            else:
-                content = "\n".join(all_lines[start:])
-
-        return json.dumps({"text": content, "path": path}, ensure_ascii=False)
-
-    except Exception as e:
-        return json.dumps({"text": f"Error reading file: {e}", "path": path}, ensure_ascii=False)
 
 @tool
 def bash(command: str) -> str:
     """Execute a bash command and return the result"""
     logger.info(f"###### bash: {command} ######")
     _ensure_cli_scripts_on_path()
+    _ensure_node_path()
     result = subprocess.run(
         command, shell=True, capture_output=True, text=True,
         cwd=WORKING_DIR, timeout=300,
@@ -509,181 +480,72 @@ def bash(command: str) -> str:
         parts.append(f"Return code: {result.returncode}")
     return "\n".join(parts) if parts else "(no output)"
 
-_wiki_graph_executor = concurrent.futures.ThreadPoolExecutor(
-    max_workers=1, thread_name_prefix="wiki-graph",
-)
-
-_TEXT_EXTS = frozenset({
-    ".md", ".txt", ".py", ".js", ".ts", ".jsx", ".tsx", ".html", ".css",
-    ".json", ".yaml", ".yml", ".csv", ".xml", ".toml", ".ini", ".cfg",
-    ".go", ".rs", ".java", ".rb", ".sh", ".sql", ".r", ".c", ".cpp", ".h",
-})
-
-
-def _update_wiki_graph(
-    filepath: Path,
-    filename: str,
-    node_id: str,
-    label: str,
-    captured_at: str,
-    text_content: str,
-    graphify_out: Path,
-    graph_json: Path,
-    source_path: str = "",
-) -> None:
-    """Background worker: build/merge node into graphify knowledge graph."""
-    try:
-        from graphify.build import build_from_json
-        from graphify.cluster import cluster
-        from graphify.export import to_json
-    except ImportError:
-        logger.warning("[wiki-graph] graphify not installed — skipping graph update")
-        return
-
-    try:
-        is_code = filepath.suffix.lower() in (_TEXT_EXTS - {".md", ".txt", ".csv", ".xml"})
-        file_type = "code" if is_code else "document"
-
-        extraction = {
-            "nodes": [{
-                "id": node_id,
-                "label": label,
-                "file_type": file_type,
-                "source_file": f"raw/{filename}",
-                "source_location": source_path or None,
-                "source_url": None,
-                "captured_at": captured_at,
-                "author": None,
-                "contributor": "add_wiki",
-            }],
-            "edges": [],
-            "hyperedges": [],
-            "input_tokens": 0,
-            "output_tokens": 0,
-        }
-
-        if graph_json.exists():
-            from networkx.readwrite import json_graph
-
-            existing_data = json.loads(graph_json.read_text())
-            G = json_graph.node_link_graph(existing_data, edges="links")
-
-            G_new = build_from_json(extraction)
-            G.update(G_new)
-
-            matched_edges = 0
-            if text_content:
-                content_lower = text_content.lower()
-                for nid, ndata in G.nodes(data=True):
-                    if nid == node_id:
-                        continue
-                    node_label = ndata.get("label", "")
-                    if not node_label:
-                        continue
-                    node_label_lower = node_label.lower()
-                    if len(node_label_lower) >= 4 and node_label_lower in content_lower:
-                        score = min(0.6 + 0.05 * len(node_label_lower.split()), 0.85)
-                        G.add_edge(node_id, nid,
-                            relation="conceptually_related_to",
-                            confidence="INFERRED",
-                            confidence_score=round(score, 2),
-                            source_file=f"raw/{filename}",
-                            source_location=None,
-                            weight=1.0,
-                        )
-                        matched_edges += 1
-
-            communities = cluster(G)
-            to_json(G, communities, str(graph_json))
-            logger.info(
-                f"[wiki-graph] Updated: node='{label}', "
-                f"edges={matched_edges}, total={G.number_of_nodes()} nodes / {G.number_of_edges()} edges"
-            )
-        else:
-            G = build_from_json(extraction)
-            communities = cluster(G)
-            to_json(G, communities, str(graph_json))
-            logger.info(f"[wiki-graph] Created new graph: node='{label}'")
-
-        (graphify_out / ".needs_update").write_text(str(filepath))
-
-    except Exception:
-        logger.error(f"[wiki-graph] Background update failed:\n{traceback.format_exc()}")
-
-
-def add_to_wiki(source: str) -> str:
-    """Core logic: add content or a file to the wiki knowledge graph.
-
-    Auto-detects whether *source* is a file path (copied to wiki/raw/) or
-    raw text content (saved as a new .md file).  Graph update is submitted
-    to the background thread pool and returns immediately.
-    """
-    wiki_dir = Path.home() / "Documents" / "wiki"
-    raw_dir = wiki_dir / "raw"
-    graphify_out = wiki_dir / "graphify-out"
-    graph_json = graphify_out / "graph.json"
-
-    raw_dir.mkdir(parents=True, exist_ok=True)
-    graphify_out.mkdir(parents=True, exist_ok=True)
-
-    now = datetime.datetime.now()
-    ts = now.strftime("%Y%m%d_%H%M%S_") + f"{now.microsecond // 1000:03d}"
-    captured_at = now.strftime("%Y-%m-%d")
-    source_path_str = ""
-
-    src = Path(source)
-    if src.is_file():
-        ext = src.suffix or ".bin"
-        filename = f"knowledge_{ts}{ext}"
-        filepath = raw_dir / filename
-        _shutil.copy2(str(src), str(filepath))
-        source_path_str = str(src)
-
-        label = src.stem
-        text_content = ""
-        if ext.lower() in _TEXT_EXTS:
-            try:
-                text_content = filepath.read_text(encoding="utf-8")
-            except Exception:
-                pass
-    else:
-        filename = f"knowledge_{ts}.md"
-        filepath = raw_dir / filename
-        filepath.write_text(source, encoding="utf-8")
-        text_content = source
-
-        label = filename
-        for line in source.strip().split("\n"):
-            stripped = line.strip()
-            if stripped.startswith("#"):
-                label = stripped.lstrip("#").strip()
-                break
-            elif stripped:
-                label = stripped[:80]
-                break
-
-    node_id = f"raw_{filename.replace('.', '_').replace('-', '_')}"
-
-    _wiki_graph_executor.submit(
-        _update_wiki_graph,
-        filepath, filename, node_id, label, captured_at,
-        text_content, graphify_out, graph_json, source_path_str,
-    )
-
-    logger.info(f"[add_to_wiki] queued: {filepath} (source={source_path_str or 'content'})")
-    return (
-        f"Knowledge saved — graph update in progress.\n"
-        f"- File: {filepath}\n"
-        f"- Node: '{label}'"
-    )
-
-
 def get_builtin_tools() -> list:
     """Return the list of built-in tools for the skill-aware agent."""
+
     if sharing_url:
         return [execute_code, write_file, read_file, bash, upload_file_to_s3, get_current_time]
     else:
         return [execute_code, write_file, read_file, bash, get_current_time]
+
+def _assistant_text_content(msg: AIMessage) -> str:
+    content = msg.content
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for block in content:
+            if isinstance(block, dict) and block.get("type") == "text":
+                parts.append(str(block.get("text", "")))
+        return "".join(parts)
+    return str(content) if content else ""
+
+
+def sanitize_messages_for_bedrock(messages: list) -> list:
+    """Bedrock requires every assistant tool_use to be followed by tool_result for each id.
+
+    Checkpoint/history can contain AIMessage(tool_calls) without matching ToolMessage
+    (e.g. interrupted turn). Strip broken tool rounds and drop orphan tool results.
+    """
+    msgs = list(messages)
+    out: list = []
+    i = 0
+    n = len(msgs)
+    while i < n:
+        msg = msgs[i]
+        if isinstance(msg, ToolMessage):
+            logger.warning(
+                "Bedrock compatibility: dropping orphan ToolMessage (no preceding tool_use)"
+            )
+            i += 1
+            continue
+        if isinstance(msg, AIMessage) and getattr(msg, "tool_calls", None):
+            needed = {tc["id"] for tc in msg.tool_calls}
+            tool_msgs: list = []
+            j = i + 1
+            while j < n and isinstance(msgs[j], ToolMessage):
+                tool_msgs.append(msgs[j])
+                j += 1
+            got = {tm.tool_call_id for tm in tool_msgs}
+            if needed <= got:
+                out.append(msg)
+                out.extend(tool_msgs)
+                i = j
+                continue
+            logger.warning(
+                "Bedrock compatibility: stripping tool_calls (expected ids %s, got %s)",
+                needed,
+                got,
+            )
+            text = _assistant_text_content(msg)
+            if text.strip():
+                out.append(AIMessage(content=text))
+            i = j
+            continue
+        out.append(msg)
+        i += 1
+    return out
+
 
 def message_chunk_to_message(chunk: BaseMessage) -> BaseMessage:
     """Convert a message chunk to a `Message`.
@@ -704,9 +566,6 @@ def message_chunk_to_message(chunk: BaseMessage) -> BaseMessage:
         **{k: v for k, v in chunk.__dict__.items() if k not in ignore_keys}
     )
 
-# ═══════════════════════════════════════════════════════════════════
-#  Agent State & System Prompt
-# ═══════════════════════════════════════════════════════════════════
 class State(TypedDict):
     messages: Annotated[list, add_messages]
     artifacts: list
@@ -715,39 +574,46 @@ BASE_SYSTEM_PROMPT = (
     "당신의 이름은 서연이고, 질문에 친근한 방식으로 대답하도록 설계된 대화형 AI입니다.\n"
     "상황에 맞는 구체적인 세부 정보를 충분히 제공합니다.\n"
     "모르는 질문을 받으면 솔직히 모른다고 말합니다.\n"
-    "한국어로 답변하세요."
+    "한국어로 답변하세요.\n"
 )
 
-MEMORY_SYSTEM_PROMPT = (
-    "## 메모리 관리\n"
-    "사용자에 대한 정보를 기억하거나, 과거 대화/결정/선호를 찾을 때는 반드시 메모리 도구를 사용하세요:\n"
-    "- memory_search: 메모리 파일(MEMORY.md, memory/*.md)에서 키워드 검색\n"
-    "- memory_get: 특정 메모리 파일 읽기 (예: memory_get(path='MEMORY.md'))\n"
-    "- write_file: filepath와 content를 반드시 함께 전달. content 생략 시 실패. 절대 content 없이 호출하지 말 것\n\n"
-    "정보를 기억해달라는 요청 시:\n"
-    "1. memory_get으로 MEMORY.md와 오늘의 일일 로그를 읽는다\n"
-    "2. write_file로 MEMORY.md(장기 메모리)와 memory/YYYY-MM-DD.md(일일 로그) 모두에 저장한다\n"
-    "3. execute_code로 파일을 직접 쓰지 말고, 반드시 write_file 도구를 사용한다\n\n"
-    "과거 정보를 질문받을 때:\n"
-    "1. 먼저 memory_search로 관련 정보를 검색한다\n"
-    "2. memory_get으로 상세 내용을 확인한 뒤 답변한다\n"
-)
-
-def build_system_prompt(custom_prompt: Optional[str] = None, plugin_name: Optional[str] = None) -> str:
-    """Assemble the full system prompt with available skills metadata."""
-    if custom_prompt:
-        base = custom_prompt
-    elif plugin_name:
-        base = skill.build_skill_prompt(plugin_name)
-    else:
-        base = BASE_SYSTEM_PROMPT
-
-    return base
-
-# ═══════════════════════════════════════════════════════════════════
-#  LangGraph Nodes
-# ═══════════════════════════════════════════════════════════════════
 MAX_CONTEXT_TURNS = 5
+
+# Bedrock Anthropic/Nova prompt caching (ephemeral, 5m TTL).
+PROMPT_CACHE_CONTROL = {"type": "ephemeral", "ttl": "5m"}
+
+
+def _supports_prompt_caching(model_type: str | None) -> bool:
+    return model_type in ("claude", "nova")
+
+
+def _system_message_with_cache(system: str) -> SystemMessage:
+    """Build a SystemMessage with an Anthropic-style cache breakpoint."""
+    return SystemMessage(
+        content=[
+            {
+                "type": "text",
+                "text": system,
+                "cache_control": {"type": "ephemeral"},
+            }
+        ]
+    )
+
+
+def _log_prompt_cache_usage(response: AIMessage) -> None:
+    """Log cache_read / cache_creation from usage_metadata when present."""
+    usage = getattr(response, "usage_metadata", None) or {}
+    details = usage.get("input_token_details") if isinstance(usage, dict) else None
+    if not isinstance(details, dict):
+        return
+    cache_read = details.get("cache_read") or 0
+    cache_creation = details.get("cache_creation") or 0
+    if cache_read or cache_creation:
+        logger.info(
+            "prompt cache usage: cache_read=%s cache_creation=%s",
+            cache_read,
+            cache_creation,
+        )
 
 
 def trim_messages_by_human_turns(messages: list, max_turns: int) -> list:
@@ -765,25 +631,39 @@ def trim_messages_by_human_turns(messages: list, max_turns: int) -> list:
 async def call_model(state: State, config):
     logger.info(f"###### call_model ######")
 
-    artifacts = state.get('artifacts', [])
+    last_message = state['messages'][-1]
+    logger.info(f"last message: {last_message}")
+    
+    artifacts = state['artifacts'] if 'artifacts' in state else []
 
-    tools = config.get("configurable", {}).get("tools")
-    system = config.get("configurable", {}).get("system_prompt")
+    cfg = config.get("configurable") or {}
+    tools = cfg.get("tools") 
+    system = cfg.get("system_prompt") 
+    if system is None:
+        system = BASE_SYSTEM_PROMPT
 
-    reasoning_mode = getattr(chat, 'reasoning_mode', 'Disable')
-    chatModel = chat.get_chat(extended_thinking=reasoning_mode)
+    # Capture model id before concurrent requests mutate the shared chat module.
+    active_model_id = chat.model_id
+    active_model_type = chat.model_type
+    chatModel = chat.get_chat()
 
-    model = chatModel.bind_tools(tools)
+    model = chatModel.bind_tools(tools) if tools else chatModel
+    use_prompt_cache = _supports_prompt_caching(active_model_type)
+    if use_prompt_cache:
+        # ChatBedrock: marks last message; ChatBedrockConverse: system+tools+last.
+        model = model.bind(cache_control=PROMPT_CACHE_CONTROL)
 
     try:
+        raw = state["messages"]
         messages = []
-        for msg in state["messages"]:
+        for msg in sanitize_messages_for_bedrock(raw):
             if isinstance(msg, ToolMessage):
                 content = msg.content
                 if isinstance(content, list):
                     text_parts = []
                     for item in content:
                         if isinstance(item, dict):
+                            # Remove 'id' field if present, but keep other fields
                             item_clean = {k: v for k, v in item.items() if k != 'id'}
                             if 'text' in item_clean:
                                 text_parts.append(item_clean['text'])
@@ -794,7 +674,8 @@ async def call_model(state: State, config):
                     content = '\n'.join(text_parts) if text_parts else str(content)
                 elif not isinstance(content, str):
                     content = str(content)
-
+                
+                # Create ToolMessage without 'name' field (Bedrock doesn't accept it)
                 tool_msg = ToolMessage(
                     content=content,
                     tool_call_id=msg.tool_call_id
@@ -816,18 +697,22 @@ async def call_model(state: State, config):
             )
             messages = trimmed
 
-        if chat.uses_adaptive_thinking():
-            messages = chat.sanitize_messages_for_bedrock(messages)
+        # Strip thinking/reasoning blocks before Bedrock Claude/Nova (GPT history
+        # leaves type='reasoning'; which Bedrock rejects with ValidationException).
+        if active_model_type in ("claude", "nova") or chat.uses_adaptive_thinking(
+            active_model_id
+        ):
+            messages = chat.sanitize_adaptive_thinking_messages(messages)
 
-        prompt = ChatPromptTemplate.from_messages([
-            ("system", system),
-            MessagesPlaceholder(variable_name="messages"),
-        ])
-        chain = prompt | model
+        if use_prompt_cache:
+            system_msg = _system_message_with_cache(system)
+        else:
+            system_msg = SystemMessage(content=system)
+        model_messages = [system_msg, *messages]
 
         # Stream tokens/chunks to the graph via astream (use with stream_mode="messages")
         accumulated: AIMessageChunk | None = None
-        async for chunk in chain.astream({"messages": messages}):
+        async for chunk in model.astream(model_messages):
             if accumulated is None:
                 accumulated = chunk
             else:
@@ -840,25 +725,27 @@ async def call_model(state: State, config):
             response = merged if isinstance(merged, AIMessage) else AIMessage(
                 content=getattr(merged, "content", str(merged))
             )
-        if chat.uses_adaptive_thinking():
-            response = chat.sanitize_messages_for_bedrock([response])[0]
+        if active_model_type in ("claude", "nova") or chat.uses_adaptive_thinking(
+            active_model_id
+        ):
+            response = chat.sanitize_adaptive_thinking_messages([response])[0]
         logger.info(f"response of call_model: {response}")
+        _log_prompt_cache_usage(response)
 
     except Exception:
         response = AIMessage(content="답변을 찾지 못하였습니다.")
+
         err_msg = traceback.format_exc()
         logger.info(f"error message: {err_msg}")
 
     return {"messages": [response], "artifacts": artifacts}
 
-
 async def should_continue(state: State, config) -> Literal["continue", "end"]:
     logger.info(f"###### should_continue ######")
 
-    messages = state["messages"]
+    messages = state["messages"]    
     last_message = messages[-1]
-    notification_queue = config.get("configurable", {}).get("notification_queue", None)
-
+    
     if isinstance(last_message, AIMessage) and last_message.tool_calls:
         tool_name = last_message.tool_calls[-1]['name']
         logger.info(f"--- CONTINUE: {tool_name} ---")
@@ -870,108 +757,33 @@ async def should_continue(state: State, config) -> Literal["continue", "end"]:
 
         logger.info(f"tool_name: {tool_name}, tool_args: {tool_args}")
 
-        # OpenAI Responses API may not stream Claude-style tool_use chunks;
-        # ensure tool name/args still appear in the UI notification.
-        if notification_queue is not None and chat.debug_mode == "Enable":
-            for tc in last_message.tool_calls:
-                tid = tc.get("id", "")
-                tname = tc.get("name", "")
-                targs = tc.get("args", {})
-                if tid and tname and not notification_queue.get_tool_name(tid):
-                    notification_queue.register_tool(tid, tname)
-                    notification_queue.tool_update(tid, f"Tool: {tname}, Input: {targs}")
-
         return "continue"
     else:
         logger.info(f"--- END ---")
         return "end"
 
-async def plan_node(state: State, config):
-    logger.info(f"###### plan_node ######")
-    notification_queue = config.get("configurable", {}).get("notification_queue", None)
-    system = (
-        "For the given objective, come up with a simple step by step plan."
-        "This plan should involve individual tasks, that if executed correctly will yield the correct answer."
-        "Do not add any superfluous steps."
-        "The result of the final step should be the final answer. Make sure that each step has all the information needed."
-        "The plan should be returned in <plan> tag."
-    )
-
-    chatModel = chat.get_chat(extended_thinking="Disable")
-
-    try:
-        prompt = ChatPromptTemplate.from_messages([
-            ("system", system),
-            MessagesPlaceholder(variable_name="messages"),
-        ])
-        chain = prompt | chatModel
-
-        plan_messages = state["messages"]
-        if chat.uses_adaptive_thinking():
-            plan_messages = chat.sanitize_messages_for_bedrock(plan_messages)
-        result = await chain.ainvoke({"messages": plan_messages})
-
-        plan = result.content[result.content.find('<plan>')+6:result.content.find('</plan>')]
-        logger.info(f"plan: {plan}")
-
-        plan = plan.strip()
-        response = HumanMessage(content="다음의 plan을 참고하여 답변하세요.\n" + plan)
-
-        if notification_queue is not None:
-            chat.add_notification(notification_queue, '계획:\n' + plan)
-
-    except Exception:
-        response = HumanMessage(content="")
-        err_msg = traceback.format_exc()
-        logger.info(f"error message: {err_msg}")
-
-    return {"messages": [response]}
-
-
-# ═══════════════════════════════════════════════════════════════════
-#  Agent Builders
-# ═══════════════════════════════════════════════════════════════════
-
 def buildChatAgent(tools):
-    tool_node = ToolNode(tools, handle_tool_errors=True)
-
-    workflow = StateGraph(State)
-
-    workflow.add_node("agent", call_model)
-    workflow.add_node("action", tool_node)
-    workflow.add_edge(START, "agent")
-    workflow.add_conditional_edges(
-        "agent",
-        should_continue,
-        {"continue": "action", "end": END},
-    )
-    workflow.add_edge("action", "agent")
-
-    return workflow.compile()
-
-
-def buildChatAgentWithPlan(tools):
     tool_node = ToolNode(tools)
 
     workflow = StateGraph(State)
 
-    workflow.add_node("plan", plan_node)
     workflow.add_node("agent", call_model)
     workflow.add_node("action", tool_node)
-    workflow.add_edge(START, "plan")
-    workflow.add_edge("plan", "agent")
+    workflow.add_edge(START, "agent")
     workflow.add_conditional_edges(
         "agent",
         should_continue,
-        {"continue": "action", "end": END},
+        {
+            "continue": "action",
+            "end": END,
+        },
     )
     workflow.add_edge("action", "agent")
 
-    return workflow.compile()
-
+    return workflow.compile() 
 
 def buildChatAgentWithHistory(tools):
-    tool_node = ToolNode(tools, handle_tool_errors=True)
+    tool_node = ToolNode(tools)
 
     workflow = StateGraph(State)
 
@@ -981,392 +793,43 @@ def buildChatAgentWithHistory(tools):
     workflow.add_conditional_edges(
         "agent",
         should_continue,
-        {"continue": "action", "end": END},
+        {
+            "continue": "action",
+            "end": END,
+        },
     )
     workflow.add_edge("action", "agent")
 
-    return workflow.compile(
-        checkpointer=chat.checkpointer,
-        store=chat.memorystore
-    )
+    return workflow.compile(checkpointer=chat.checkpointer)
 
-# ═══════════════════════════════════════════════════════════════════
-#  MCP Server Utilities
-# ═══════════════════════════════════════════════════════════════════
 def load_multiple_mcp_server_parameters(mcp_json: dict):
     mcpServers = mcp_json.get("mcpServers")
-
+  
     server_info = {}
     if mcpServers is not None:
-        for server_name, cfg in mcpServers.items():
-            if cfg.get("type") in ("streamable_http", "http"):
+        for server_name, config in mcpServers.items():
+            if config.get("type") in ("streamable_http", "http"):
                 connection = {
                     "transport": "streamable_http",
-                    "url": cfg.get("url"),
-                    "headers": cfg.get("headers", {})
+                    "url": config.get("url"),
+                    "headers": config.get("headers", {})
                 }
-                if cfg.get("auth_type") == "aws_sigv4":
+                if config.get("auth_type") == "aws_sigv4":
                     connection["auth"] = agentcore_sigv4_auth.AgentCoreSigV4Auth(
-                        region=cfg.get("auth_region", "us-east-1"),
-                        service=cfg.get("auth_service", "bedrock-agentcore"),
+                        region=config.get("auth_region", "us-east-1"),
+                        service=config.get("auth_service", "bedrock-agentcore"),
                     )
                 server_info[server_name] = connection
             else:
+                command = config.get("command", "")
+                args = config.get("args", [])
+                env = config.get("env", {})
+                
                 server_info[server_name] = {
                     "transport": "stdio",
-                    "command": cfg.get("command", ""),
-                    "args": cfg.get("args", []),
-                    "env": cfg.get("env", {})
+                    "command": command,
+                    "args": args,
+                    "env": env                    
                 }
     return server_info
 
-async def create_agent(mcp_servers: list, skill_list: list, history_mode: str="Disable") -> tuple[str, list]:
-    # builtin tools
-    tools = get_builtin_tools()
-    logger.info(f"builtin_tools count: {len(tools)}")
-        
-    # mcp
-    mcp_json = mcp_config.load_selected_config(mcp_servers)
-    # logger.info(f"mcp_json: {mcp_json}")
-
-    server_params = load_multiple_mcp_server_parameters(mcp_json)
-    # logger.info(f"server_params: {server_params}")
-
-    # Pass current user_id to memory MCP via process env (no shared mcp.env file)
-    memory_params = server_params.get("memory")
-    if memory_params and memory_params.get("transport") == "stdio":
-        env = dict(memory_params.get("env") or {})
-        env["AGENTCORE_USER_ID"] = chat.user_id
-        memory_params["env"] = env
-        logger.info(f"memory MCP AGENTCORE_USER_ID={chat.user_id}")
-
-    try:
-        client = MultiServerMCPClient(server_params)
-        logger.info(f"MCP client is initialized successfully")
-        
-        mcp_tools = await client.get_tools()        # add MCP tools
-        # logger.info(f"mcp_tools: {mcp_tools}")        
-        for tool in mcp_tools:
-            logger.info(f"mcp_tool: {tool.name}")
-            if tool.name not in tools:
-                tools.append(tool)
-            else:
-                logger.info(f"mcp_tool of {tool.name} already in tools")
-
-    except Exception as e:
-        logger.error(f"Error creating MCP client or getting tools: {e}")
-        logger.info(f"Falling back to builtin tools only (count: {len(tools)})")
-        
-    system_prompt = None
-    if chat.skill_mode == "Enable":        
-        tools.extend(skill.get_skill_tools())
-
-        skill_info = skill.get_skill_info(skill_list)
-        logger.info(f"skill_info: {skill_info}")
-
-        system_prompt = skill.build_skill_prompt(skill_info)
-
-    else:
-        system_prompt = BASE_SYSTEM_PROMPT
-
-    if chat.memory_mode == "Enable":
-        tools.extend([memory_search, memory_get])
-        system_prompt = f"{system_prompt}\n\n{MEMORY_SYSTEM_PROMPT}"
-        logger.info("memory_mode enabled: memory_search, memory_get added")
-        
-    tool_list = [tool.name for tool in tools] if tools else []
-    logger.info(f"tool_list: {tool_list}")
-
-    if not tools:
-        logger.warning("No tools available, using general conversation mode")
-        return None, None
-    
-    if history_mode == "Enable":
-        app = buildChatAgentWithHistory(tools)
-        config = {
-            "recursion_limit": 500,
-            "configurable": {"thread_id": chat.user_id},
-            "tools": tools,
-            "system_prompt": system_prompt,
-            "max_turns": MAX_CONTEXT_TURNS,
-        }
-    else:
-        app = buildChatAgent(tools)
-        config = {
-            "recursion_limit": 500,
-            "configurable": {"thread_id": chat.user_id},
-            "tools": tools,
-            "system_prompt": system_prompt,
-            "max_turns": MAX_CONTEXT_TURNS,
-        }        
-    
-    return app, config
-
-app = config = None
-active_mcp_servers = []
-active_skills = []
-active_skill_mode = None
-active_memory_mode = None
-current_id = None
-
-def _sanitize_reference_text(text: str, max_len: int) -> str:
-    """Collapse whitespace/newlines and strip markdown that breaks list links."""
-    if not text:
-        return ""
-    cleaned = " ".join(str(text).replace("\r", "\n").split())
-    cleaned = cleaned.replace("```", "`").replace("[", "\\[").replace("]", "\\]")
-    if len(cleaned) > max_len:
-        cleaned = cleaned[: max_len - 3].rstrip(" .") + "..."
-    return cleaned
-
-
-def _merge_streaming_tool_args(prev: str, new: str) -> str:
-    """Merge streamed tool-argument fragments (delta or cumulative snapshot)."""
-    if not new:
-        return prev or ""
-    if not prev:
-        return new
-    if new.startswith(prev):
-        return new  # cumulative snapshot
-    if prev.startswith(new):
-        return prev  # older/shorter snapshot
-    return prev + new  # delta
-
-
-def _format_references_markdown(references: list) -> str:
-    """Build a Reference section safe for markdown list rendering."""
-    lines = ["\n\n### Reference"]
-    for i, reference in enumerate(references, start=1):
-        title = _sanitize_reference_text(reference.get("title") or "Untitled", 120)
-        content = _sanitize_reference_text(reference.get("content") or "", 100)
-        url = (reference.get("url") or "").strip()
-        page = reference.get("page")
-        page_suffix = f" , {page} page" if page is not None else ""
-        if url:
-            lines.append(
-                f"{i}. [{title}]({url}){page_suffix} — {content}" if content
-                else f"{i}. [{title}]({url}){page_suffix}"
-            )
-        else:
-            lines.append(
-                f"{i}. {title}{page_suffix} — {content}" if content
-                else f"{i}. {title}{page_suffix}"
-            )
-    return "\n".join(lines) + "\n"
-
-
-async def run_langgraph_agent(query: str, mcp_servers: list, skill_list: list, history_mode: str="Disable", notification_queue: NotificationQueue =None) -> tuple[str, list]:
-    global app, config, active_mcp_servers, active_skills, active_skill_mode, active_memory_mode, current_id
-    
-    queue = notification_queue if notification_queue else None
-    if queue:
-        queue.reset()
-
-    artifacts = []
-    artifact_paths = []
-    references = []
-
-    if (app is None
-        or active_mcp_servers != mcp_servers
-        or active_skills != skill_list
-        or active_skill_mode != chat.skill_mode
-        or active_memory_mode != chat.memory_mode
-        or current_id != chat.user_id):
-        active_mcp_servers = mcp_servers
-        active_skills = skill_list
-        active_skill_mode = chat.skill_mode
-        active_memory_mode = chat.memory_mode
-        current_id = chat.user_id
-
-        app, config = await create_agent(mcp_servers, skill_list, history_mode)
-    
-    if app is None:
-        logger.error("Failed to create agent - app is None")
-        return "에이전트를 생성할 수 없습니다. MCP 서버 설정 또는 도구 구성을 확인해주세요.", []
-    
-    inputs = {
-        "messages": [HumanMessage(content=query)]
-    }
-            
-    result = ""
-    tool_used = False  # Track if tool was used
-    tool_name = toolUseId = ""
-    chat.tool_input_list.clear()
-    async for stream in app.astream(inputs, config, stream_mode="messages"):
-        if isinstance(stream[0], AIMessageChunk):
-            message = stream[0]    
-            input = {}
-            # Bedrock puts the same JSON delta in content.partial_json AND
-            # tool_call_chunks.args — only accumulate from one path per chunk.
-            handled_tool_input = False
-            if isinstance(message.content, list):
-                for content_item in message.content:
-                    if isinstance(content_item, dict):
-                        if content_item.get('type') == 'text':
-                            text_content = content_item.get('text', '')
-                            # logger.info(f"text_content: {text_content}")
-                            
-                            # If tool was used, start fresh result
-                            if tool_used:
-                                result = text_content
-                                tool_used = False
-                            else:
-                                result += text_content
-                                
-                            # logger.info(f"result: {result}")                
-                            if chat.debug_mode == "Enable" and queue:
-                                chat.update_streaming_result(notification_queue, result, "markdown")
-
-                        elif content_item.get('type') == 'tool_use':
-                            # logger.info(f"content_item: {content_item}")      
-                            if 'id' in content_item and 'name' in content_item:
-                                toolUseId = content_item.get('id', '')
-                                tool_name = content_item.get('name', '')
-                                logger.info(f"tool_name: {tool_name}, toolUseId: {toolUseId}")
-                                if queue:
-                                    queue.register_tool(toolUseId, tool_name)
-                                                                    
-                            if 'partial_json' in content_item:
-                                partial_json = content_item.get('partial_json', '')
-                                prev = chat.tool_input_list.get(toolUseId, "")
-                                chat.tool_input_list[toolUseId] = _merge_streaming_tool_args(
-                                    prev, partial_json
-                                )
-                                input = chat.tool_input_list[toolUseId]
-                                if partial_json:
-                                    handled_tool_input = True
-
-                                if queue:
-                                    queue.tool_update(toolUseId, f"Tool: {tool_name}, Input: {input}")
-
-                        elif content_item.get('type') == 'function_call':
-                            # OpenAI Responses API: function_call blocks instead of tool_use
-                            call_id = content_item.get('call_id') or content_item.get('id', '')
-                            name = content_item.get('name', '')
-                            if call_id and name:
-                                toolUseId = call_id
-                                tool_name = name
-                                logger.info(f"tool_name: {tool_name}, toolUseId: {toolUseId}")
-                                if queue:
-                                    queue.register_tool(toolUseId, tool_name)
-
-                            if 'arguments' in content_item and toolUseId:
-                                arguments = content_item.get('arguments', '')
-                                if not isinstance(arguments, str):
-                                    arguments = str(arguments)
-                                prev = chat.tool_input_list.get(toolUseId, "")
-                                chat.tool_input_list[toolUseId] = _merge_streaming_tool_args(
-                                    prev, arguments
-                                )
-                                input = chat.tool_input_list[toolUseId]
-                                # Empty arguments on early chunks must not block tool_call_chunks.
-                                if arguments:
-                                    handled_tool_input = True
-                                if queue:
-                                    queue.tool_update(toolUseId, f"Tool: {tool_name}, Input: {input}")
-
-            # OpenAI / providers that only stream via tool_call_chunks
-            tool_call_chunks = getattr(message, "tool_call_chunks", None) or []
-            for tc in tool_call_chunks:
-                tid = tc.get("id") or toolUseId
-                tname = tc.get("name") or tool_name
-                if tid and tname:
-                    toolUseId = tid
-                    tool_name = tname
-                    logger.info(f"tool_name: {tool_name}, toolUseId: {toolUseId}")
-                    if queue:
-                        queue.register_tool(toolUseId, tool_name)
-                if handled_tool_input:
-                    continue
-                args_delta = tc.get("args")
-                if args_delta is not None and toolUseId:
-                    if not isinstance(args_delta, str):
-                        args_delta = str(args_delta) if args_delta else ""
-                    prev = chat.tool_input_list.get(toolUseId, "")
-                    chat.tool_input_list[toolUseId] = _merge_streaming_tool_args(
-                        prev, args_delta
-                    )
-                    if queue:
-                        queue.tool_update(
-                            toolUseId,
-                            f"Tool: {tool_name}, Input: {chat.tool_input_list[toolUseId]}",
-                        )
-
-            # Prefer completed tool_calls when present (authoritative final args)
-            if getattr(message, "tool_calls", None):
-                for tc in message.tool_calls:
-                    tid = tc.get("id", "")
-                    tname = tc.get("name", "")
-                    targs = tc.get("args", {})
-                    if not (tid and tname and targs):
-                        continue
-                    if isinstance(targs, dict):
-                        chat.tool_input_list[tid] = json.dumps(targs, ensure_ascii=False)
-                    else:
-                        chat.tool_input_list[tid] = str(targs)
-                    if queue:
-                        queue.register_tool(tid, tname)
-                        queue.tool_update(
-                            tid,
-                            f"Tool: {tname}, Input: {chat.tool_input_list[tid]}",
-                        )
-                        
-        elif isinstance(stream[0], ToolMessage):
-            message = stream[0]
-            logger.info(f"ToolMessage: {message.name}, {message.content}")
-            tool_name = message.name
-            toolResult = message.content
-            toolUseId = message.tool_call_id
-            logger.info(f"toolResult: {toolResult}, toolUseId: {toolUseId}")
-            if chat.debug_mode == "Enable":
-                chat.add_notification(notification_queue, f"Tool Result: {toolResult}")
-            tool_used = True
-            
-            tool_content, tool_urls, refs = chat.get_tool_info(tool_name, toolResult)
-            if refs:
-                for r in refs:
-                    references.append(r)
-                logger.info(f"refs: {refs}")
-            if tool_urls:
-                for url in tool_urls:
-                    artifacts.append(url)
-                logger.info(f"tool_urls: {tool_urls}")
-
-            if isinstance(toolResult, str):
-                if "[artifacts]" in toolResult:
-                    for line in toolResult.split("[artifacts]")[-1].strip().split("\n"):
-                        line = line.strip()
-                        if line and os.path.isfile(line):
-                            artifact_paths.append(line)
-                    logger.info(f"artifact_paths from text: {artifact_paths}")
-
-                if tool_name == "write_file" and toolResult.startswith("File saved:"):
-                    saved = toolResult.split("File saved:", 1)[1].strip()
-                    if not os.path.isabs(saved):
-                        saved = os.path.join(WORKING_DIR, saved)
-                    if os.path.isfile(saved) and os.path.abspath(saved).startswith(os.path.abspath(ARTIFACTS_DIR)):
-                        artifact_paths.append(saved)
-                        logger.info(f"artifact_paths from write_file: {saved}")
-
-            if tool_content:
-                logger.info(f"content: {tool_content}")        
-    
-    if not result:
-        result = "답변을 찾지 못하였습니다."        
-    logger.info(f"result: {result}")
-
-    if references:
-        result += _format_references_markdown(references)
-    
-    if notification_queue is not None and chat.debug_mode == "Enable":
-        chat.update_final_result(notification_queue, result)
-
-    wiki_targets = list(dict.fromkeys(artifacts + artifact_paths))
-    for fpath in wiki_targets:
-        if os.path.isfile(fpath):
-            try:
-                add_to_wiki(fpath)
-            except Exception as e:
-                logger.warning(f"[wiki-push] Failed for {fpath}: {e}")
-
-    return result, artifacts

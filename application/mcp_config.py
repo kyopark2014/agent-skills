@@ -81,8 +81,17 @@ def get_agentcore_gateway_mcp_url(gateway_name: str, gateway_region: str) -> str
     return None
     
 def load_config(mcp_type):
+    # Display-name aliases (aligned with agentic-work mcp.list)
     if mcp_type == "knowledge base":
-        mcp_type = "kb-retriever"    
+        mcp_type = "kb-retriever"
+    elif mcp_type == "aws documentation":
+        mcp_type = "aws_documentation"
+    elif mcp_type == "trade info":
+        mcp_type = "trade_info"
+    elif mcp_type == "image generation":
+        mcp_type = "image_generation"
+    elif mcp_type == "weather":
+        mcp_type = "korea_weather"
     elif mcp_type == "AWS Sentral (Employee)":
         mcp_type = "aws_sentral"
     elif mcp_type == "AWS Outlook (Employee)":
@@ -293,7 +302,7 @@ def load_config(mcp_type):
         if not slack_token:
             logger.info(
                 "Slack MCP skipped: SLACK_BOT_TOKEN not set. "
-                "Configure AWS Secrets Manager secret slackapikey-<projectName> "
+                "Configure AWS Secrets Manager secret slackapikey "
                 "or set SLACK_BOT_TOKEN in the environment."
             )
             return {}

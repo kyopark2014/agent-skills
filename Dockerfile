@@ -37,9 +37,10 @@ RUN npx -y mcp-server-fetch-typescript --version 2>/dev/null || true && \
     npx playwright install --with-deps chromium
 
 # Install Python packages
-RUN pip install streamlit streamlit-chat streamlit_paste_button
-RUN pip install "boto3>=1.43.32" "botocore>=1.43.32" langchain_aws langchain langchain_community langchain-openai "openai>=2.41.0" "langgraph>=1.2.5" "langgraph-supervisor>=0.0.31" "langgraph-swarm>=0.1.0" langchain-text-splitters
-RUN pip install mcp "langchain-mcp-adapters>=0.3.0"
+RUN pip install fastapi python-multipart "uvicorn[standard]"
+RUN pip install bedrock-agentcore aws-bedrock-token-generator
+RUN pip install "boto3>=1.43.32" "botocore>=1.43.32" langchain_aws langchain langchain_community langchain-openai "openai>=2.41.0" "langgraph>=1.2.5" langgraph-checkpoint-sqlite "langgraph-supervisor>=0.0.31" "langgraph-swarm>=0.1.0" langchain-text-splitters
+RUN pip install mcp "langchain-mcp-adapters>=0.3.0" httpx aiosqlite
 RUN pip install pandas numpy
 RUN pip install tavily-python pytz
 RUN pip install beautifulsoup4==4.12.3 plotly_express==0.4.1 matplotlib==3.10.0 
@@ -54,9 +55,6 @@ RUN pip install reportlab pypdf pdfplumber PyYAML
 # Skills: browser automation
 RUN pip install "browser-use[cli]"
 
-RUN mkdir -p /root/.streamlit
-COPY config.toml /root/.streamlit/
-
 COPY . .
 
 COPY docker-entrypoint.sh /docker-entrypoint.sh
@@ -64,6 +62,7 @@ RUN chmod +x /docker-entrypoint.sh
 
 EXPOSE 8501
 
-HEALTHCHECK CMD curl --fail http://localhost:8501/_stcore/health
+HEALTHCHECK CMD curl --fail http://localhost:8501/api/health
 
 ENTRYPOINT ["/docker-entrypoint.sh"]
+CMD ["uvicorn", "application.server:app", "--host", "0.0.0.0", "--port", "8501"]

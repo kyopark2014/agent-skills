@@ -23,20 +23,24 @@ CONFIG_KEY = "fable_data_retention_opt_in"
 def _get_account_id() -> str:
     import utils
 
-    account_id = utils.config.get("accountId")
+    config = utils.load_config()
+    account_id = config.get("accountId")
     if account_id:
         return str(account_id)
 
     sts = boto3.client("sts")
     account_id = sts.get_caller_identity()["Account"]
-    utils.config["accountId"] = account_id
+    config["accountId"] = account_id
+    with open(utils.config_path, "w", encoding="utf-8") as config_file:
+        json.dump(config, config_file, indent=2, ensure_ascii=False)
     return str(account_id)
 
 
 def _is_fable_opt_in_recorded(account_id: str) -> bool:
     import utils
 
-    recorded = utils.config.get(CONFIG_KEY)
+    config = utils.load_config()
+    recorded = config.get(CONFIG_KEY)
     if isinstance(recorded, dict):
         return (
             recorded.get("completed") is True
@@ -48,13 +52,14 @@ def _is_fable_opt_in_recorded(account_id: str) -> bool:
 def _record_fable_opt_in(account_id: str) -> None:
     import utils
 
-    utils.config[CONFIG_KEY] = {
+    config = utils.load_config()
+    config[CONFIG_KEY] = {
         "completed": True,
         "account_id": account_id,
     }
     try:
         with open(utils.config_path, "w", encoding="utf-8") as config_file:
-            json.dump(utils.config, config_file, indent=2, ensure_ascii=False)
+            json.dump(config, config_file, indent=2, ensure_ascii=False)
         logger.info(
             "Recorded Fable data retention opt-in in config.json for account %s",
             account_id,

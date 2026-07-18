@@ -115,7 +115,7 @@ https://search.naver.com/search.naver?query={encoded}&where=news&ie=UTF-8
   - `prompt`를 생략하면 기본은 “텍스트 추출 + `<result>`”(**OCR**에 가깝다).  
   - NAVER **보안 확인(퀴즈)**에는 **반드시 `prompt`를 넘긴다** — [권장 패턴](#권장-prompt-패턴) 참고.
 
-- **Streamlit 등에서 이미지 업로드 → `chat.summarize_image(image_content, prompt, st)`** ([`app.py`](../../../../app.py) 등)  
+- **이미지 업로드 → `chat.summarize_image(image_content, prompt)`** ([`app.py`](../../../../app.py) 등)  
   - 내부에서 `text = extract_text(img_base64)` 후 **`image_summary = summary_image(img_base64, prompt)`** ([`chat.py` `summarize_image` / `summary_image`](../../../../chat.py)).  
   - `summary_image`는 `instruction`(= 사용자 `prompt`)이 있을 때  
     `f"{instruction}. <result> tag를 붙여주세요. 한국어로 답변하세요."`  
@@ -244,5 +244,5 @@ def naver_search_url(query: str, where: str | None = None) -> str:
 
 - [interaction-scrolling](../../interaction-skills/scrolling.md) — 홈/피드 무한 스크롤
 - [screenshots](../../interaction-skills/screenshots.md) — 메인·SERP 시각 확인
-- 코드: [`application/mcp_server_text_extraction.py`](../../../../mcp_server_text_extraction.py) (`extract_text_from_image`) · [`application/chat.py`](../../../../chat.py) (`summarize_image`, `summary_image`, `extract_text`) · [`application/app.py`](../../../../app.py) (이미지 분석 시 `summarize_image` 호출)
+- 코드: [`application/mcp_server_text_extraction.py`](../../../../mcp_server_text_extraction.py) (`extract_text_from_image`) · [`application/chat.py`](../../../../chat.py) (`summarize_image`, `summary_image`, `extract_text`)
 - 상위: [Naver.com](https://www.naver.com/) · 통합검색 [search.naver.com](https://search.naver.com/) (PC 기준; 모바일은 `m` 호스트)

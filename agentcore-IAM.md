@@ -262,7 +262,7 @@ elif mcp_type == "websearch":
     }
 ```
 
-[app.py](./application/app.py)에서 `websearch`를 MCP 선택 목록에 포함하면 위 설정이 LangGraph agent에 전달됩니다. agent는 `tools/list`로 `WebSearch` tool을 발견하고, `tools/call`로 웹 검색을 수행합니다.
+Web UI Task 설정에서 `websearch`를 MCP 선택 목록에 포함하면 위 설정이 LangGraph agent에 전달됩니다. agent는 `tools/list`로 `WebSearch` tool을 발견하고, `tools/call`로 웹 검색을 수행합니다.
 
 ### 4. 삭제
 

@@ -16,11 +16,7 @@ logger = logging.getLogger("mcp_server_trade_info")
 
 try:
     mcp = FastMCP(
-        name = "trade_info",
-        instructions=(
-            "You are a helpful assistant that can provide stock information. "
-            "You can use tools to get stock information and provide the answer."
-        ),
+        name = "trade_info"
     )
     logger.info("MCP server initialized successfully")
 except Exception as e:
@@ -35,10 +31,11 @@ stocks = {}
 @mcp.tool()
 def retrieve_stock_trend(company_name: str = "네이버", period: int = 30) -> str:
     """
-    Returns the last ~period days price trend of the given company name as a JSON string.
-    company_name: the company name to get stock price trend
-    period: the period to get stock trend
-    return: the file name of the saved JSON file
+    Retrieve stock price trend. Returns the last ~period days of stock price history
+    for the given company as a JSON string.
+    company_name: company name to look up stock prices for
+    period: number of days of stock price history to retrieve
+    return: JSON string containing stock price trend data
     """
     logger.info(f"get_stock_trend --> company_name: {company_name}, period: {period}")
 
@@ -51,9 +48,11 @@ def retrieve_stock_trend(company_name: str = "네이버", period: int = 30) -> s
 @mcp.tool()
 def draw_stock_trend(company_name: str = "네이버", period: int = 30) -> Dict[str, List[str]]:
     """
-    Draw a graph of the given trend.
-    trend: the trend of the given company name as a JSON string (the result from get_stock_trend)
-    return: dictionary with 'path' key containing a list of image file paths
+    Draw a stock price trend chart. Renders a graph image of the given company's
+    stock price history (use the same company_name and period as retrieve_stock_trend).
+    company_name: company name to chart stock prices for
+    period: number of days of stock price history to chart
+    return: dictionary with a 'path' key containing a list of stock chart image file paths
     """
     logger.info(f"draw_stock_trend --> company_name: {company_name}, period: {period}")
 

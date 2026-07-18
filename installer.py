@@ -422,7 +422,7 @@ def create_secrets() -> Dict[str, str]:
     
     secrets = {
         "weather": {
-            "name": f"openweathermap-{project_name}",
+            "name": "openweathermap",
             "description": "secret for weather api key",
             "secret_value": {
                 "project_name": project_name,
@@ -430,7 +430,7 @@ def create_secrets() -> Dict[str, str]:
             }
         },
         "tavily": {
-            "name": f"tavilyapikey-{project_name}",
+            "name": "tavilyapikey",
             "description": "secret for tavily api key",
             "secret_value": {
                 "project_name": project_name,
@@ -439,7 +439,7 @@ def create_secrets() -> Dict[str, str]:
             }
         },
         "notion": {
-            "name": f"notionapikey-{project_name}",
+            "name": "notionapikey",
             "description": "secret for notion api key",
             "secret_value": {
                 "project_name": project_name,
@@ -447,7 +447,7 @@ def create_secrets() -> Dict[str, str]:
             }
         },
         "telegram": {
-            "name": f"telegramapikey-{project_name}",
+            "name": "telegramapikey",
             "description": "secret for telegram api key",
             "secret_value": {
                 "project_name": project_name,
@@ -455,7 +455,7 @@ def create_secrets() -> Dict[str, str]:
             }
         },
         "discord": {
-            "name": f"discordapikey-{project_name}",
+            "name": "discordapikey",
             "description": "secret for discord bot token",
             "secret_value": {
                 "project_name": project_name,
@@ -463,7 +463,7 @@ def create_secrets() -> Dict[str, str]:
             }
         },
         "slack": {
-            "name": f"slackapikey-{project_name}",
+            "name": "slackapikey",
             "description": "secret for slack api key",
             "secret_value": {
                 "project_name": project_name,
@@ -1877,7 +1877,7 @@ def main():
         logger.info(f"  AgentCore Memory Role: {agentcore_memory_role_arn}")
         logger.info(f"  Memory ID: {memory_id}")
         logger.info(f"Total deployment time: {elapsed_time / 60:.2f} minutes")
-        logger.info("Run locally: streamlit run application/app.py")
+        logger.info("Run locally: ./run_local.sh  (or uvicorn application.server:app --port 8501)")
         logger.info("=" * 60)
     except Exception as e:
         elapsed_time = time.time() - start_time

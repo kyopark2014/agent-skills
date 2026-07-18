@@ -5,7 +5,7 @@ import sys
 import uuid
 import time
 
-from typing import Dict, Optional, Required
+from typing import Dict, Optional
 from bedrock_agentcore.memory import MemoryClient
 from datetime import datetime, timezone
 
@@ -71,7 +71,7 @@ def load_memory_variables(user_id: str):
         session_id = uuid.uuid4().hex
     if namespace is None:
         namespace = f"/users/{actor_id}"
-    
+
     # Prefer installer-written memory_id from config.json
     if memory_id is None:
         memory_id = config.get("memory_id")
@@ -90,7 +90,7 @@ def load_memory_variables(user_id: str):
             update_memory_variables(user_id, memory_id=memory_id, actor_id=actor_id, session_id=session_id, namespace=namespace)
     else:
         update_memory_variables(user_id, memory_id=memory_id, actor_id=actor_id, session_id=session_id, namespace=namespace)
-    
+
     return memory_id, actor_id, session_id, namespace
 
 def update_memory_variables(

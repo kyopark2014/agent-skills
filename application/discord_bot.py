@@ -6,7 +6,6 @@ from typing import Optional
 os.environ["DEV"] = "true"
 
 import chat
-import langgraph_agent
 import utils
 
 import discord
@@ -25,10 +24,10 @@ DISCORD_BOT_TOKEN = (
 )
 
 DEFAULT_MODEL = "Claude 5.0 Sonnet"
-DEFAULT_MCP_SERVERS = ["web_fetch", "slack", "notion", "tavily", "aws_documentation"]
+DEFAULT_MCP_SERVERS = ["web_fetch", "slack", "notion", "tavily", "aws documentation"]
 DEFAULT_SKILL_LIST = ["skill-creator", "graphify", "myslide"]
 
-chat.update(DEFAULT_MODEL, "Enable", "Disable", "Enable")
+chat.update(modelName=DEFAULT_MODEL, debugMode="Enable", memoryEnabled=True)
 
 # Discord 메시지 본문 제한(일반 전송 기준)
 MAX_MSG_LEN = 2000
@@ -77,7 +76,7 @@ async def model_cmd(interaction: discord.Interaction, model_name: Optional[str] 
 
     name = model_name.strip()
     try:
-        chat.update(name, "Enable", "Disable", "Enable")
+        chat.update(modelName=name, debugMode="Enable")
         await interaction.response.send_message(f"모델이 변경되었습니다: {name}")
     except Exception as e:
         logger.error(f"Model change failed: {e}")
@@ -105,12 +104,15 @@ async def on_message(message: discord.Message):
 
     async with channel.typing():
         try:
-            response, image_url = await langgraph_agent.run_langgraph_agent(
+            chat.update(
+                userId=str(message.author.id),
+                modelName=chat.model_name,
+                debugMode="Enable",
+            )
+            response, image_url = await chat.run_langgraph_agent(
                 query=user_message,
                 mcp_servers=DEFAULT_MCP_SERVERS,
                 skill_list=DEFAULT_SKILL_LIST,
-                history_mode="Enable",
-                notification_queue=None,
             )
             logger.info(f"[{channel.id}] response length: {len(response)}")
 
@@ -133,7 +135,7 @@ def main():
     if not DISCORD_BOT_TOKEN:
         logger.error(
             "DISCORD_BOT_TOKEN is not set. "
-            "Use env or register discord_bot_token in AWS Secrets Manager (discordapikey-{project})."
+            "Use env or register discord_bot_token in AWS Secrets Manager (discordapikey)."
         )
         sys.exit(1)
 

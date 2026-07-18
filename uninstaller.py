@@ -507,31 +507,41 @@ def delete_agentcore_websearch_gateway(skip_confirmation: bool = False) -> bool:
         return False
 
 
-def delete_secrets():
-    """Delete Secrets Manager secrets created by installer."""
+# Shared across projects (no project_name suffix)
+SHARED_API_SECRETS = [
+    "openweathermap",
+    "tavilyapikey",
+    "notionapikey",
+    "telegramapikey",
+    "discordapikey",
+    "slackapikey",
+]
+
+
+def delete_secrets(delete_shared: bool = False):
+    """Delete Secrets Manager secrets.
+
+    Shared API secrets (tavily/notion/...) are only deleted when delete_shared is True.
+    """
     logger.info("[4/6] Deleting secrets")
 
-    secret_names = [
-        f"openweathermap-{project_name}",
-        f"tavilyapikey-{project_name}",
-        f"notionapikey-{project_name}",
-        f"telegramapikey-{project_name}",
-        f"discordapikey-{project_name}",
-        f"slackapikey-{project_name}",
-    ]
+    if delete_shared:
+        for secret_name in SHARED_API_SECRETS:
+            try:
+                secrets_client.delete_secret(
+                    SecretId=secret_name,
+                    ForceDeleteWithoutRecovery=True,
+                )
+                logger.info(f"  ✓ Deleted shared secret: {secret_name}")
+            except ClientError as e:
+                if e.response["Error"]["Code"] != "ResourceNotFoundException":
+                    logger.warning(f"  Could not delete secret {secret_name}: {e}")
+    else:
+        logger.info(
+            "  Keeping shared API secrets: " + ", ".join(SHARED_API_SECRETS)
+        )
 
-    for secret_name in secret_names:
-        try:
-            secrets_client.delete_secret(
-                SecretId=secret_name,
-                ForceDeleteWithoutRecovery=True,
-            )
-            logger.info(f"  ✓ Deleted secret: {secret_name}")
-        except ClientError as e:
-            if e.response["Error"]["Code"] != "ResourceNotFoundException":
-                logger.warning(f"  Could not delete secret {secret_name}: {e}")
-
-    logger.info("✓ Secrets deleted")
+    logger.info("✓ Secrets step completed")
 
 
 def delete_iam_roles(
@@ -653,6 +663,11 @@ def main():
     parser.add_argument("--delete-cloudfront", action="store_true")
     parser.add_argument("--delete-opensearch", action="store_true")
     parser.add_argument("--delete-knowledge-base", action="store_true")
+    parser.add_argument(
+        "--delete-shared-secrets",
+        action="store_true",
+        help="Also delete shared API secrets (tavilyapikey, notionapikey, ...)",
+    )
     args = parser.parse_args()
 
     if not args.yes:
@@ -661,8 +676,10 @@ def main():
         print("=" * 60)
         print(f"  Project:  {project_name}")
         print(f"  Region:   {region}")
-        print("  Always removed: Secrets, project IAM roles (agent, agentcore memory)")
+        print("  Always removed: project IAM roles (agent, agentcore memory)")
         print("  AgentCore gateway: prompted separately (default: keep)")
+        print("  Shared API secrets: prompted separately (default: keep)")
+        print(f"    ({', '.join(SHARED_API_SECRETS)})")
         print("=" * 60)
         print("Shared resources (prompted separately, default: keep):")
         print(f"  S3 bucket:        {bucket_name}")
@@ -686,6 +703,10 @@ def main():
     delete_cloudfront = resolve(args.delete_cloudfront, f"Delete shared CloudFront distribution ({cloudfront_comment})?")
     delete_opensearch = resolve(args.delete_opensearch, f"Delete shared OpenSearch collection ({vector_index_name})?")
     delete_knowledge_base = resolve(args.delete_knowledge_base, f"Delete shared Knowledge Base ({knowledge_base_name})?")
+    delete_shared_secrets = resolve(
+        args.delete_shared_secrets,
+        "Delete shared API secrets (openweathermap, tavilyapikey, notionapikey, telegramapikey, discordapikey, slackapikey)?",
+    )
 
     start_time = time.time()
     try:
@@ -702,7 +723,7 @@ def main():
         agentcore_gateway_deleted = delete_agentcore_websearch_gateway(
             skip_confirmation=args.delete_agentcore_gateway
         )
-        delete_secrets()
+        delete_secrets(delete_shared=delete_shared_secrets)
         delete_iam_roles(
             delete_agentcore_gateway_role=agentcore_gateway_deleted,
             delete_knowledge_base_role=delete_knowledge_base,

@@ -1,3 +1,4 @@
+
 __pycache__
 
 # configuration
@@ -9,3 +10,7 @@ graphify-out/
 package-lock.json
 *.py[cod]
 .session_storage/
+
+# local task / user session data
+data/
+user_*.json

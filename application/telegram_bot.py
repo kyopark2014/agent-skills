@@ -6,7 +6,6 @@ import os
 os.environ["DEV"] = "true"
 
 import chat
-import langgraph_agent
 import utils
 
 from telegram import Update
@@ -23,10 +22,10 @@ logger = logging.getLogger("telegram_bot")
 TELEGRAM_BOT_TOKEN = utils.telegram_api_key
 
 DEFAULT_MODEL = "Claude 5.0 Sonnet"
-DEFAULT_MCP_SERVERS = ["web_fetch", "slack", "notion", "tavily", "aws_documentation"]
+DEFAULT_MCP_SERVERS = ["web_fetch", "slack", "notion", "tavily", "aws documentation"]
 DEFAULT_SKILL_LIST = ["skill-creator", "graphify", "myslide"]
 
-chat.update(DEFAULT_MODEL, "Enable", "Disable", "Enable")
+chat.update(modelName=DEFAULT_MODEL, debugMode="Enable", memoryEnabled=True)
 
 MAX_MSG_LEN = 4096
 
@@ -66,7 +65,7 @@ async def model_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     model_name = " ".join(context.args)
     try:
-        chat.update(model_name, "Enable", "Disable", "Enable")
+        chat.update(modelName=model_name, debugMode="Enable")
         await update.message.reply_text(f"모델이 변경되었습니다: {model_name}")
     except Exception as e:
         logger.error(f"Model change failed: {e}")
@@ -86,12 +85,11 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
 
     try:
-        response, image_url = await langgraph_agent.run_langgraph_agent(
+        chat.update(userId=str(chat_id), modelName=chat.model_name, debugMode="Enable")
+        response, image_url = await chat.run_langgraph_agent(
             query=user_message,
             mcp_servers=DEFAULT_MCP_SERVERS,
             skill_list=DEFAULT_SKILL_LIST,
-            history_mode="Enable",
-            notification_queue=None,
         )
         logger.info(f"[chat_id={chat_id}] response length: {len(response)}")
 
