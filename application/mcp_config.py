@@ -362,7 +362,9 @@ def load_config(mcp_type):
             "mcpServers": {
                 "korea-weather": {
                     "command": "python",
-                    "args": [f"{workingDir}/mcp_server_korea_weather.py"]
+                    "args": [f"{workingDir}/mcp_server_korea_weather.py"],
+                    # AGENTCORE_USER_ID is injected at runtime in chat.create_agent()
+                    # so home-address fallback via memory can use the same user namespace.
                 }
             }
         }

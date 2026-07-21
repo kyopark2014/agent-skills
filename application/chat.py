@@ -1990,13 +1990,14 @@ async def create_agent(
 
     server_params = langgraph_agent.load_multiple_mcp_server_parameters(mcp_json)
 
-    # Pass current user_id to memory MCP via process env (no shared mcp.env file)
-    memory_params = server_params.get("memory")
-    if memory_params and memory_params.get("transport") == "stdio":
-        env = dict(memory_params.get("env") or {})
-        env["AGENTCORE_USER_ID"] = user_id
-        memory_params["env"] = env
-        logger.info(f"memory MCP AGENTCORE_USER_ID={user_id}")
+    # Pass current user_id to memory / korea-weather MCP via process env
+    for server_name in ("memory", "korea-weather"):
+        params = server_params.get(server_name)
+        if params and params.get("transport") == "stdio":
+            env = dict(params.get("env") or {})
+            env["AGENTCORE_USER_ID"] = user_id
+            params["env"] = env
+            logger.info(f"{server_name} MCP AGENTCORE_USER_ID={user_id}")
 
     for server_name, params in server_params.items():
         try:
