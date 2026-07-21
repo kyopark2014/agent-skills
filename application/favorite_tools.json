@@ -1,0 +1,11 @@
+{
+  "MCP": [
+    "web_fetch",
+    "websearch",
+    "aws documentation",
+    "korea_weather"
+  ],
+  "SKILL": [
+    "skill-creator"
+  ]
+}

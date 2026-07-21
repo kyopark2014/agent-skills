@@ -22,8 +22,11 @@ logger = logging.getLogger("telegram_bot")
 TELEGRAM_BOT_TOKEN = utils.telegram_api_key
 
 DEFAULT_MODEL = "Claude 5.0 Sonnet"
-DEFAULT_MCP_SERVERS = ["web_fetch", "slack", "notion", "tavily", "aws documentation"]
-DEFAULT_SKILL_LIST = ["skill-creator", "graphify", "myslide"]
+
+
+def get_default_tool_selection() -> tuple[list[str], list[str]]:
+    skill_list, mcp_servers = utils.get_initial_tool_defaults()
+    return mcp_servers, skill_list
 
 chat.update(modelName=DEFAULT_MODEL, debugMode="Enable", memoryEnabled=True)
 
@@ -73,7 +76,8 @@ async def model_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def mcp_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    servers = "\n".join(f"  - {s}" for s in DEFAULT_MCP_SERVERS)
+    default_mcp_servers, _ = get_default_tool_selection()
+    servers = "\n".join(f"  - {s}" for s in default_mcp_servers)
     await update.message.reply_text(f"현재 MCP 서버:\n{servers}")
 
 
@@ -86,10 +90,11 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         chat.update(userId=str(chat_id), modelName=chat.model_name, debugMode="Enable")
+        default_mcp_servers, default_skill_list = get_default_tool_selection()
         response, image_url = await chat.run_langgraph_agent(
             query=user_message,
-            mcp_servers=DEFAULT_MCP_SERVERS,
-            skill_list=DEFAULT_SKILL_LIST,
+            mcp_servers=default_mcp_servers,
+            skill_list=default_skill_list,
         )
         logger.info(f"[chat_id={chat_id}] response length: {len(response)}")
 
