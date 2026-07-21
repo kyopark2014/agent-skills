@@ -212,22 +212,24 @@ _sqlite_checkpointer_cm = None
 _active_checkpoint_session = None
 _current_checkpoint_session_id: str | None = None
 _checkpointer_loop_id = None
-_checkpointer_init_lock = threading.Lock()
 SQLITE_BUSY_TIMEOUT_MS = 5000
 _SETUP_MAX_ATTEMPTS = 5
 _SETUP_RETRY_BASE_SEC = 0.25
 
 # AsyncSqliteSaver binds asyncio.Lock to its creating loop. asyncio.run() per
 # request creates a new loop and breaks that lock — keep one process-wide loop.
+# Serialize agent runs on that loop so a shared aiosqlite connection is never
+# closed/recreated while another graph is still checkpointing.
 _agent_loop: asyncio.AbstractEventLoop | None = None
 _agent_loop_thread: threading.Thread | None = None
 _agent_loop_ready = threading.Event()
 _agent_loop_lock = threading.Lock()
+_agent_run_lock: asyncio.Lock | None = None
 
 
 def _ensure_agent_loop() -> asyncio.AbstractEventLoop:
     """Return a long-lived event loop dedicated to LangGraph agent runs."""
-    global _agent_loop, _agent_loop_thread
+    global _agent_loop, _agent_loop_thread, _agent_run_lock
 
     with _agent_loop_lock:
         if _agent_loop is not None and _agent_loop.is_running():
@@ -254,8 +256,18 @@ def _ensure_agent_loop() -> asyncio.AbstractEventLoop:
 
         _agent_loop = loop_holder["loop"]
         _agent_loop_thread = thread
+        # asyncio.Lock is loop-bound; drop any lock from a previous loop.
+        _agent_run_lock = None
         logger.info("Started dedicated agent event loop (id=%s)", id(_agent_loop))
         return _agent_loop
+
+
+def _get_agent_run_lock() -> asyncio.Lock:
+    """Return the asyncio.Lock used to serialize agent runs (agent loop only)."""
+    global _agent_run_lock
+    if _agent_run_lock is None:
+        _agent_run_lock = asyncio.Lock()
+    return _agent_run_lock
 
 
 def _run_on_agent_loop(coro):
@@ -287,9 +299,10 @@ def _checkpoint_session_id() -> str | None:
     return _runtime_session_id()
 
 
-def get_checkpoint_db_path() -> str:
+def get_checkpoint_db_path(session_id: str | None = None) -> str:
     """Working SQLite path on local disk (avoids session-storage locking during runtime)."""
-    session_id = _checkpoint_session_id()
+    if not session_id:
+        session_id = _checkpoint_session_id()
     if session_id:
         local_dir = os.path.join("/tmp", "langgraph-checkpoints", session_id)
         os.makedirs(local_dir, exist_ok=True)
@@ -297,9 +310,10 @@ def get_checkpoint_db_path() -> str:
     return LEGACY_CHECKPOINT_DB
 
 
-def get_persistent_checkpoint_db_path() -> str:
+def get_persistent_checkpoint_db_path(session_id: str | None = None) -> str:
     """Durable checkpoint path on AgentCore session storage (/mnt/workspace), per task."""
-    session_id = _checkpoint_session_id()
+    if not session_id:
+        session_id = _checkpoint_session_id()
     if session_id:
         checkpoint_dir = os.path.join(SESSION_STORAGE_DIR, "checkpoints", session_id)
         os.makedirs(checkpoint_dir, exist_ok=True)
@@ -307,9 +321,9 @@ def get_persistent_checkpoint_db_path() -> str:
     return LEGACY_CHECKPOINT_DB
 
 
-def _restore_from_session_storage(working_db: str) -> None:
+def _restore_from_session_storage(working_db: str, session_id: str | None = None) -> None:
     """Copy durable checkpoint from session storage into the local working DB."""
-    persistent = get_persistent_checkpoint_db_path()
+    persistent = get_persistent_checkpoint_db_path(session_id)
     if working_db == persistent:
         return
 
@@ -352,14 +366,20 @@ def _restore_from_session_storage(working_db: str) -> None:
     logger.info(f"Restored checkpoint DB from session storage: {persistent} -> {working_db}")
 
 
-async def persist_checkpoint_to_session_storage() -> None:
+async def persist_checkpoint_to_session_storage(session_id: str | None = None) -> None:
     """Flush working checkpoint to session storage so history survives microVM stop/resume."""
     if _sqlite_checkpointer is None:
         return
 
-    working_db = get_checkpoint_db_path()
-    persistent = get_persistent_checkpoint_db_path()
+    if not session_id:
+        session_id = _checkpoint_session_id()
+    working_db = get_checkpoint_db_path(session_id)
+    persistent = get_persistent_checkpoint_db_path(session_id)
     if working_db == persistent or not _checkpoint_db_ready(working_db):
+        return
+
+    if not await _sqlite_conn_is_alive(_sqlite_checkpointer):
+        logger.warning("Skip checkpoint persist: sqlite connection is closed")
         return
 
     os.makedirs(SESSION_STORAGE_DIR, exist_ok=True)
@@ -393,6 +413,23 @@ def _is_sqlite_locked_error(exc: BaseException) -> bool:
 
 def _checkpoint_db_ready(checkpoint_db: str) -> bool:
     return os.path.isfile(checkpoint_db) and os.path.getsize(checkpoint_db) > 0
+
+
+async def _sqlite_conn_is_alive(saver) -> bool:
+    """Return True if the AsyncSqliteSaver still has a usable aiosqlite connection."""
+    conn = getattr(saver, "conn", None)
+    if conn is None:
+        return False
+    if getattr(conn, "_connection", None) is None:
+        return False
+    if not getattr(conn, "_running", False):
+        return False
+    try:
+        await conn.execute("SELECT 1")
+        return True
+    except Exception as exc:
+        logger.warning("SQLite checkpointer connection unhealthy: %s", exc)
+        return False
 
 
 async def _configure_sqlite_connection(conn) -> None:
@@ -495,23 +532,29 @@ async def _close_sqlite_checkpointer() -> None:
         logger.warning(f"Failed to close sqlite checkpointer connection: {exc}")
 
 
-async def ensure_checkpointer():
+async def ensure_checkpointer(session_id: str | None = None):
     """Initialize AsyncSqliteSaver on local disk (per task runtime_session_id).
 
-    Agent runs share one dedicated event loop (_ensure_agent_loop). Still recreate
-    the saver if that loop is replaced or the checkpoint session changes.
+    Agent runs are serialized on the dedicated event loop (_get_agent_run_lock).
+    Still recreate the saver if that loop is replaced, the session changes, or the
+    underlying aiosqlite connection is dead.
     """
     global checkpointer, _sqlite_checkpointer, _sqlite_checkpointer_cm
     global _active_checkpoint_session, _checkpointer_loop_id, app
 
-    session_id = _checkpoint_session_id()
-    checkpoint_db = get_checkpoint_db_path()
+    if session_id:
+        set_checkpoint_session_id(session_id)
+    else:
+        session_id = _checkpoint_session_id()
+
+    checkpoint_db = get_checkpoint_db_path(session_id)
     loop_id = id(asyncio.get_running_loop())
 
     if (
         _sqlite_checkpointer is not None
         and _active_checkpoint_session == session_id
         and _checkpointer_loop_id == loop_id
+        and await _sqlite_conn_is_alive(_sqlite_checkpointer)
     ):
         checkpointer = _sqlite_checkpointer
         return checkpointer
@@ -521,61 +564,61 @@ async def ensure_checkpointer():
         checkpointer = MemorySaver()
         return checkpointer
 
-    # threading.Lock: module-level asyncio.Lock is itself loop-bound and unsafe here.
-    with _checkpointer_init_lock:
-        if (
-            _sqlite_checkpointer is not None
-            and _active_checkpoint_session == session_id
-            and _checkpointer_loop_id == loop_id
-        ):
-            checkpointer = _sqlite_checkpointer
-            return checkpointer
-
-        if _sqlite_checkpointer is not None:
-            if _checkpointer_loop_id != loop_id:
-                logger.info(
-                    "Recreating checkpointer for new event loop (session=%s)",
-                    session_id,
-                )
-            elif _active_checkpoint_session != session_id:
-                logger.info(
-                    "Switching checkpointer session: %s -> %s",
-                    _active_checkpoint_session,
-                    session_id,
-                )
-            # Compiled graphs keep the old checkpointer reference.
-            app = None
-
-        await _close_sqlite_checkpointer()
-        _active_checkpoint_session = session_id
-
-        try:
-            _restore_from_session_storage(checkpoint_db)
-            if _checkpoint_db_ready(checkpoint_db):
-                _sqlite_checkpointer = await _open_existing_sqlite_checkpointer(checkpoint_db)
-                logger.info(
-                    "SQLite checkpointer opened (existing): session=%s path=%s",
-                    session_id,
-                    checkpoint_db,
-                )
-            else:
-                _sqlite_checkpointer = await _create_sqlite_checkpointer(checkpoint_db)
-                logger.info(
-                    "SQLite checkpointer initialized: session=%s path=%s",
-                    session_id,
-                    checkpoint_db,
-                )
-        except Exception as exc:
-            logger.error(
-                f"SQLite checkpointer unavailable ({exc}); falling back to MemorySaver"
+    if (
+        _sqlite_checkpointer is not None
+        and _active_checkpoint_session == session_id
+        and _checkpointer_loop_id == loop_id
+    ):
+        logger.warning(
+            "Recreating checkpointer: connection closed (session=%s)",
+            session_id,
+        )
+    elif _sqlite_checkpointer is not None:
+        if _checkpointer_loop_id != loop_id:
+            logger.info(
+                "Recreating checkpointer for new event loop (session=%s)",
+                session_id,
             )
-            checkpointer = MemorySaver()
-            _checkpointer_loop_id = loop_id
-            return checkpointer
+        elif _active_checkpoint_session != session_id:
+            logger.info(
+                "Switching checkpointer session: %s -> %s",
+                _active_checkpoint_session,
+                session_id,
+            )
 
+    # Compiled graphs keep a reference to the previous checkpointer instance.
+    app = None
+    await _close_sqlite_checkpointer()
+    _active_checkpoint_session = session_id
+
+    try:
+        _restore_from_session_storage(checkpoint_db, session_id)
+        if _checkpoint_db_ready(checkpoint_db):
+            _sqlite_checkpointer = await _open_existing_sqlite_checkpointer(checkpoint_db)
+            logger.info(
+                "SQLite checkpointer opened (existing): session=%s path=%s",
+                session_id,
+                checkpoint_db,
+            )
+        else:
+            _sqlite_checkpointer = await _create_sqlite_checkpointer(checkpoint_db)
+            logger.info(
+                "SQLite checkpointer initialized: session=%s path=%s",
+                session_id,
+                checkpoint_db,
+            )
+    except Exception as exc:
+        logger.error(
+            f"SQLite checkpointer unavailable ({exc}); falling back to MemorySaver"
+        )
+        checkpointer = MemorySaver()
         _checkpointer_loop_id = loop_id
-        checkpointer = _sqlite_checkpointer
+        app = None
         return checkpointer
+
+    _checkpointer_loop_id = loop_id
+    checkpointer = _sqlite_checkpointer
+    return checkpointer
 
 
 def _thread_scope(runtime_session_id: str | None) -> str:
@@ -1935,7 +1978,7 @@ async def create_agent(
     set_checkpoint_session_id(session_id)
     thread_scope = _thread_scope(session_id)
 
-    await ensure_checkpointer()
+    await ensure_checkpointer(session_id)
 
     # builtin tools
     tools = langgraph_agent.get_builtin_tools()
@@ -2079,16 +2122,37 @@ async def run_langgraph_agent(
     notification_queue=None,
     human_message: HumanMessage | None = None,
 ):
+    """Run LangGraph on the dedicated agent loop (serialized against other runs)."""
+    async with _get_agent_run_lock():
+        return await _run_langgraph_agent_impl(
+            query=query,
+            mcp_servers=mcp_servers,
+            skill_list=skill_list,
+            runtime_session_id=runtime_session_id,
+            notification_queue=notification_queue,
+            human_message=human_message,
+        )
+
+
+async def _run_langgraph_agent_impl(
+    query: str,
+    mcp_servers: list,
+    skill_list: list,
+    runtime_session_id: str | None = None,
+    notification_queue=None,
+    human_message: HumanMessage | None = None,
+):
     global app, agent_config, active_mcp_servers, active_skills, current_id, active_session_id
 
     artifacts = []
     references = []
-    session_id = runtime_session_id or _checkpoint_session_id()
+    # Prefer the explicit request session; avoid reading a racy module global first.
+    session_id = runtime_session_id or _runtime_session_id()
     if session_id:
         set_checkpoint_session_id(session_id)
 
     # Refresh checkpointer on the dedicated agent loop (same loop across requests).
-    await ensure_checkpointer()
+    await ensure_checkpointer(session_id)
 
     if (
         app is None
@@ -2261,7 +2325,7 @@ async def run_langgraph_agent(
         save_to_memory(query, result)
 
     try:
-        await persist_checkpoint_to_session_storage()
+        await persist_checkpoint_to_session_storage(session_id)
     except Exception as e:
         logger.warning(f"checkpoint persist skipped: {e}")
 
