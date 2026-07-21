@@ -252,6 +252,7 @@ Web UI에서:
 
 ```bash
 sudo yum install python3 python3-pip git docker -y   # EC2 예
+pip install boto3
 git clone https://github.com/kyopark2014/agent-skills
 cd agent-skills && python3 installer.py
 ```
