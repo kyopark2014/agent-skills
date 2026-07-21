@@ -1,7 +1,13 @@
-import { useEffect, useRef, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, type ReactNode } from "react";
 import type { Message, ToolEvent } from "../types";
 import { MessageBubble, MessageFromRecord } from "./MessageBubble";
 import { MenuIcon } from "./SidebarIcons";
+
+const SCROLL_THRESHOLD_PX = 64;
+
+function isNearBottom(el: HTMLElement): boolean {
+  return el.scrollHeight - el.scrollTop - el.clientHeight <= SCROLL_THRESHOLD_PX;
+}
 
 interface Props {
   messages: Message[];
@@ -23,10 +29,35 @@ export function ChatThread({
   footer,
 }: Props) {
   const bottomRef = useRef<HTMLDivElement>(null);
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const shouldAutoScrollRef = useRef(true);
+
+  const updateAutoScroll = useCallback(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    shouldAutoScrollRef.current = isNearBottom(el);
+  }, []);
+
+  const taskId = messages[0]?.task_id ?? null;
 
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages, streamText, streamEvents]);
+    const el = scrollRef.current;
+    if (!el) return;
+    el.addEventListener("scroll", updateAutoScroll, { passive: true });
+    return () => el.removeEventListener("scroll", updateAutoScroll);
+  }, [updateAutoScroll]);
+
+  useEffect(() => {
+    shouldAutoScrollRef.current = true;
+    bottomRef.current?.scrollIntoView({ behavior: "auto" });
+  }, [taskId]);
+
+  useEffect(() => {
+    if (!shouldAutoScrollRef.current) return;
+    bottomRef.current?.scrollIntoView({
+      behavior: streaming ? "auto" : "smooth",
+    });
+  }, [messages, streamText, streamEvents, streaming]);
 
   return (
     <>
@@ -41,7 +72,7 @@ export function ChatThread({
         </button>
         <span className="main-header-title">{taskTitle}</span>
       </header>
-      <div className="chat-scroll">
+      <div className="chat-scroll" ref={scrollRef}>
         <div className="chat-thread">
           {messages.length === 0 && !streaming && (
             <div className="empty-state">
