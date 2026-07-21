@@ -306,7 +306,7 @@ def chat_stream(task_id: str, body: ChatRequest, request: Request):
             "skill_list": task["skills"],
             "guardrail_enabled": task["guardrail_enabled"],
             "memory_enabled": task["memory_enabled"],
-            "runtime_session_id": task["runtime_session_id"],
+            "runtime_session_id": task.get("runtime_session_id") or task_id,
             "files": files,
             "message_queue": message_queue,
             "result_holder": result_holder,

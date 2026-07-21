@@ -701,7 +701,10 @@ select {
 .tool-card pre {
   margin: 0;
   padding: 8px 12px 12px;
-  overflow-x: auto;
+  overflow-x: hidden;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  white-space: pre-wrap;
   color: var(--text-muted);
 }
 

@@ -85,7 +85,8 @@ def _row_to_task(row: sqlite3.Row) -> dict[str, Any]:
         "id": row["id"],
         "user_id": row["user_id"],
         "title": row["title"] or "New task",
-        "runtime_session_id": row["runtime_session_id"],
+        # Checkpoints must be isolated per task; use task id as the stable fallback.
+        "runtime_session_id": row["runtime_session_id"] or row["id"],
         "model_name": row["model_name"] or DEFAULT_MODEL,
         "skills": json.loads(row["skills_json"] or "[]"),
         "mcp_servers": json.loads(row["mcp_servers_json"] or "[]"),
@@ -163,7 +164,8 @@ def create_task(
     title: str = "New task",
 ) -> dict[str, Any]:
     task_id = str(uuid.uuid4())
-    runtime_session_id = str(uuid.uuid4())
+    # Keep the checkpoint namespace aligned with the task identity.
+    runtime_session_id = task_id
     now = _now_iso()
     with _connect() as conn:
         conn.execute(

@@ -17,6 +17,33 @@ function formatToolInput(input: unknown): string {
   return JSON.stringify(input, null, 2);
 }
 
+/** Make tool result / info payloads readable across multiple lines. */
+function formatToolPayload(data: string | undefined): string {
+  if (!data) return "";
+
+  try {
+    const parsed = JSON.parse(data) as unknown;
+    if (Array.isArray(parsed)) {
+      const texts = parsed
+        .filter(
+          (block): block is { type: string; text: string } =>
+            !!block &&
+            typeof block === "object" &&
+            (block as { type?: unknown }).type === "text" &&
+            typeof (block as { text?: unknown }).text === "string",
+        )
+        .map((block) => block.text);
+      if (texts.length > 0) {
+        return texts.join("\n\n");
+      }
+    }
+    return JSON.stringify(parsed, null, 2);
+  } catch {
+    // Python-style repr often embeds literal \n / \t escape sequences.
+    return data.replace(/\\n/g, "\n").replace(/\\t/g, "\t");
+  }
+}
+
 export function ToolCallCard({ event }: Props) {
   if (event.type === "tool") {
     return (
@@ -31,14 +58,14 @@ export function ToolCallCard({ event }: Props) {
     return (
       <details className="tool-card">
         <summary>{label}</summary>
-        <pre>{event.data}</pre>
+        <pre>{formatToolPayload(event.data)}</pre>
       </details>
     );
   }
   return (
     <details className="tool-card">
       <summary>Info</summary>
-      <pre>{event.data}</pre>
+      <pre>{formatToolPayload(event.data)}</pre>
     </details>
   );
 }
