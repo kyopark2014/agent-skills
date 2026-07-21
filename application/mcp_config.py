@@ -193,47 +193,28 @@ def load_config(mcp_type):
         }    
     
     elif mcp_type == "aws_documentation":
-        # Prefer a preinstalled binary (uv tool install / pip) over uvx@latest
-        # so each agent init does not re-resolve and install 40+ packages.
+        # Prefer preinstalled binary (pip / uv tool install) over uvx so
+        # each agent init does not re-resolve and install 40+ packages.
         env = {"FASTMCP_LOG_LEVEL": "ERROR"}
-        installed = shutil.which("awslabs.aws-documentation-mcp-server")
-        if installed:
-            return {
-                "mcpServers": {
-                    "awslabs.aws-documentation-mcp-server": {
-                        "command": installed,
-                        "args": [],
-                        "env": env,
-                    }
-                }
-            }
-        try:
-            import awslabs.aws_documentation_mcp_server  # noqa: F401
-
-            return {
-                "mcpServers": {
-                    "awslabs.aws-documentation-mcp-server": {
-                        "command": sys.executable,
-                        "args": ["-m", "awslabs.aws_documentation_mcp_server.server"],
-                        "env": env,
-                    }
-                }
-            }
-        except ImportError:
+        command = shutil.which("awslabs.aws-documentation-mcp-server")
+        args: list[str] = []
+        if not command:
             logger.warning(
                 "awslabs.aws-documentation-mcp-server is not preinstalled; "
                 "falling back to uvx (install once with: "
                 "uv tool install awslabs.aws-documentation-mcp-server)"
             )
-            return {
-                "mcpServers": {
-                    "awslabs.aws-documentation-mcp-server": {
-                        "command": "uvx",
-                        "args": ["awslabs.aws-documentation-mcp-server"],
-                        "env": env,
-                    }
+            command = "uvx"
+            args = ["awslabs.aws-documentation-mcp-server"]
+        return {
+            "mcpServers": {
+                "awslabs.aws-documentation-mcp-server": {
+                    "command": command,
+                    "args": args,
+                    "env": env,
                 }
             }
+        }
 
     elif mcp_type == "trade_info":
         return {
