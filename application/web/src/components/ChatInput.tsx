@@ -1,5 +1,6 @@
 import {
   ClipboardEvent,
+  DragEvent,
   FormEvent,
   KeyboardEvent,
   useEffect,
@@ -22,7 +23,9 @@ interface Props {
   onRagUploadComplete?: (message: string) => void;
 }
 
-const RAG_ACCEPT = ".pdf,.txt,.md,.csv,.doc,.docx,.ppt,.pptx,.xls,.xlsx,.html,.htm,.json,.py,.js";
+const RAG_ACCEPT =
+  ".pdf,.txt,.md,.csv,.doc,.docx,.ppt,.pptx,.xls,.xlsx,.html,.htm,.json,.py,.js";
+const IMAGE_ACCEPT = "image/png,image/jpeg,image/webp,image/gif,.png,.jpg,.jpeg,.webp,.gif";
 const MIN_INPUT_HEIGHT = 24;
 const MAX_INPUT_HEIGHT = 160;
 
@@ -31,6 +34,50 @@ function extensionFromMime(mime: string): string {
   if (mime === "image/webp") return ".webp";
   if (mime === "image/gif") return ".gif";
   return ".png";
+}
+
+function isImageFile(file: File): boolean {
+  if (file.type.startsWith("image/")) return true;
+  return /\.(png|jpe?g|gif|webp)$/i.test(file.name);
+}
+
+function normalizeImageFile(file: File, fallbackName = "pasted_screenshot"): File {
+  if (!isImageFile(file)) return file;
+  const mime = file.type || "image/png";
+  const ext = extensionFromMime(mime);
+  const hasUsefulName =
+    file.name &&
+    file.name !== "image.png" &&
+    file.name !== "image.jpg" &&
+    file.name !== "blob";
+  if (hasUsefulName) return file;
+  return new File([file], `${fallbackName}${ext}`, { type: mime });
+}
+
+function collectClipboardImages(clipboardData: DataTransfer | null): File[] {
+  if (!clipboardData) return [];
+
+  const files: File[] = [];
+  const seen = new Set<string>();
+
+  const pushUnique = (file: File) => {
+    const key = `${file.name}:${file.size}:${file.type}:${file.lastModified}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    files.push(normalizeImageFile(file));
+  };
+
+  for (const item of Array.from(clipboardData.items ?? [])) {
+    if (!item.type.startsWith("image/")) continue;
+    const blob = item.getAsFile();
+    if (blob) pushUnique(blob);
+  }
+
+  for (const file of Array.from(clipboardData.files ?? [])) {
+    if (isImageFile(file)) pushUnique(file);
+  }
+
+  return files;
 }
 
 export function ChatInput({ disabled, onSend, onRagUploadComplete }: Props) {
@@ -44,15 +91,26 @@ export function ChatInput({ disabled, onSend, onRagUploadComplete }: Props) {
   const [uploading, setUploading] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [attachments, setAttachments] = useState<AttachedImage[]>([]);
+  const [dragOver, setDragOver] = useState(false);
   const attachmentsRef = useRef<AttachedImage[]>([]);
+  const uploadingRef = useRef(false);
+  const dragDepthRef = useRef(0);
   const addWrapRef = useRef<HTMLDivElement>(null);
   const menuPortalRef = useRef<HTMLDivElement>(null);
   const addBtnRef = useRef<HTMLButtonElement>(null);
   const inputWrapRef = useRef<HTMLFormElement>(null);
-  const fileInputRef = useRef<HTMLInputElement>(null);
+  const ragInputRef = useRef<HTMLInputElement>(null);
+  const imageInputRef = useRef<HTMLInputElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   attachmentsRef.current = attachments;
+  uploadingRef.current = uploading;
+
+  useEffect(() => {
+    if (!uploadError) return;
+    const timer = window.setTimeout(() => setUploadError(null), 5000);
+    return () => window.clearTimeout(timer);
+  }, [uploadError]);
 
   function adjustInputHeight() {
     const el = textareaRef.current;
@@ -170,31 +228,54 @@ export function ChatInput({ disabled, onSend, onRagUploadComplete }: Props) {
     }
   }
 
-  async function onPaste(e: ClipboardEvent<HTMLTextAreaElement>) {
-    const items = e.clipboardData?.items;
-    if (!items || disabled || uploading) return;
-
-    const imageFiles: File[] = [];
-    for (const item of Array.from(items)) {
-      if (!item.type.startsWith("image/")) continue;
-      const blob = item.getAsFile();
-      if (!blob) continue;
-      const ext = extensionFromMime(item.type || blob.type);
-      const named =
-        blob.name && blob.name !== "image.png"
-          ? blob
-          : new File([blob], `pasted_screenshot${ext}`, {
-              type: item.type || blob.type || "image/png",
-            });
-      imageFiles.push(named);
+  async function uploadImageFiles(files: File[]) {
+    if (files.length === 0 || disabled || uploadingRef.current) return;
+    for (const file of files) {
+      await uploadImageFile(normalizeImageFile(file, "uploaded_image"));
     }
+  }
 
+  async function onPaste(e: ClipboardEvent<HTMLTextAreaElement>) {
+    if (disabled || uploadingRef.current) return;
+    const imageFiles = collectClipboardImages(e.clipboardData);
     if (imageFiles.length === 0) return;
 
     e.preventDefault();
-    for (const file of imageFiles) {
-      await uploadImageFile(file);
+    await uploadImageFiles(imageFiles);
+  }
+
+  function onDragEnter(e: DragEvent<HTMLFormElement>) {
+    if (disabled || uploading) return;
+    if (![...e.dataTransfer.types].includes("Files")) return;
+    e.preventDefault();
+    dragDepthRef.current += 1;
+    setDragOver(true);
+  }
+
+  function onDragOver(e: DragEvent<HTMLFormElement>) {
+    if (disabled || uploading) return;
+    if (![...e.dataTransfer.types].includes("Files")) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "copy";
+  }
+
+  function onDragLeave(e: DragEvent<HTMLFormElement>) {
+    if (![...e.dataTransfer.types].includes("Files") && dragDepthRef.current === 0) {
+      return;
     }
+    e.preventDefault();
+    dragDepthRef.current = Math.max(0, dragDepthRef.current - 1);
+    if (dragDepthRef.current === 0) setDragOver(false);
+  }
+
+  async function onDrop(e: DragEvent<HTMLFormElement>) {
+    e.preventDefault();
+    dragDepthRef.current = 0;
+    setDragOver(false);
+    if (disabled || uploadingRef.current) return;
+
+    const imageFiles = Array.from(e.dataTransfer.files ?? []).filter(isImageFile);
+    await uploadImageFiles(imageFiles);
   }
 
   function removeAttachment(url: string) {
@@ -213,13 +294,25 @@ export function ChatInput({ disabled, onSend, onRagUploadComplete }: Props) {
     });
   }
 
+  function openImageUpload() {
+    setMenuOpen(false);
+    setUploadError(null);
+    imageInputRef.current?.click();
+  }
+
   function openRagUpload() {
     setMenuOpen(false);
     setUploadError(null);
-    fileInputRef.current?.click();
+    ragInputRef.current?.click();
   }
 
-  async function onFileSelected(e: React.ChangeEvent<HTMLInputElement>) {
+  async function onImageSelected(e: React.ChangeEvent<HTMLInputElement>) {
+    const files = Array.from(e.target.files ?? []).filter(isImageFile);
+    e.target.value = "";
+    await uploadImageFiles(files);
+  }
+
+  async function onRagFileSelected(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
     e.target.value = "";
     if (!file || disabled || uploading) return;
@@ -253,6 +346,42 @@ export function ChatInput({ disabled, onSend, onRagUploadComplete }: Props) {
               width: menuPosition.width,
             }}
           >
+            <button
+              type="button"
+              className="chat-add-menu-item"
+              role="menuitem"
+              onClick={openImageUpload}
+            >
+              <span className="chat-add-menu-icon" aria-hidden="true">
+                <svg width="16" height="16" viewBox="0 0 16 16">
+                  <rect
+                    x="2.5"
+                    y="3.5"
+                    width="11"
+                    height="9"
+                    rx="1.5"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="1.2"
+                  />
+                  <circle cx="6" cy="7" r="1.2" fill="currentColor" />
+                  <path
+                    d="M4.5 11.5 7 9l2 1.5 2.5-3 2 4"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="1.2"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  />
+                </svg>
+              </span>
+              <span className="chat-add-menu-text">
+                <span className="chat-add-menu-label">사진 첨부</span>
+                <span className="chat-add-menu-desc">
+                  이미지를 첨부하거나 Ctrl/⌘+V로 붙여넣기
+                </span>
+              </span>
+            </button>
             <button
               type="button"
               className="chat-add-menu-item"
@@ -299,13 +428,31 @@ export function ChatInput({ disabled, onSend, onRagUploadComplete }: Props) {
           업로드 중...
         </div>
       )}
-      <form className="chat-input-wrap" ref={inputWrapRef} onSubmit={onSubmit}>
+      <form
+        className={`chat-input-wrap${dragOver ? " is-dragover" : ""}`}
+        ref={inputWrapRef}
+        onSubmit={onSubmit}
+        onDragEnter={onDragEnter}
+        onDragOver={onDragOver}
+        onDragLeave={onDragLeave}
+        onDrop={onDrop}
+      >
         <input
-          ref={fileInputRef}
+          ref={imageInputRef}
+          type="file"
+          className="chat-file-input"
+          accept={IMAGE_ACCEPT}
+          multiple
+          onChange={onImageSelected}
+          tabIndex={-1}
+          aria-hidden="true"
+        />
+        <input
+          ref={ragInputRef}
           type="file"
           className="chat-file-input"
           accept={RAG_ACCEPT}
-          onChange={onFileSelected}
+          onChange={onRagFileSelected}
           tabIndex={-1}
           aria-hidden="true"
         />

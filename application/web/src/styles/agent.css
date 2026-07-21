@@ -793,6 +793,12 @@ select {
   border-radius: 16px;
   padding: 12px 14px 10px;
   position: relative;
+  transition: border-color 0.15s ease, background-color 0.15s ease;
+}
+
+.chat-input-wrap.is-dragover {
+  border-color: #6b9fff;
+  background: rgba(107, 159, 255, 0.08);
 }
 
 .chat-input-toolbar {
