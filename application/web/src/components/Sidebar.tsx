@@ -1,9 +1,20 @@
-import { useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { formatBrandTitle } from "../formatBrandTitle";
 import type { AppConfig, Task } from "../types";
 import { ConfigDrawer } from "./ConfigDrawer";
+import { LlmGatewayModal } from "./LlmGatewayModal";
 import { TaskListItem } from "./TaskListItem";
-import { GuardrailIcon, LogoutIcon, McpIcon, MemoryIcon, ModelIcon, NewTaskIcon, SkillIcon, CloseIcon } from "./SidebarIcons";
+import {
+  GuardrailIcon,
+  LlmGatewayIcon,
+  LogoutIcon,
+  McpIcon,
+  MemoryIcon,
+  ModelIcon,
+  NewTaskIcon,
+  SkillIcon,
+  CloseIcon,
+} from "./SidebarIcons";
 
 type DrawerKind = "skill" | "mcp" | "model" | null;
 
@@ -22,6 +33,7 @@ interface Props {
   onPatchTask: (taskId: string, patch: Partial<Task>) => void;
   onDeleteTask: (taskId: string) => void;
   onLogout: () => void;
+  onRefreshConfig?: () => Promise<AppConfig | void> | AppConfig | void;
 }
 
 export function Sidebar({
@@ -39,16 +51,39 @@ export function Sidebar({
   onPatchTask,
   onDeleteTask,
   onLogout,
+  onRefreshConfig,
 }: Props) {
   const skillBtnRef = useRef<HTMLButtonElement>(null);
   const mcpBtnRef = useRef<HTMLButtonElement>(null);
   const modelBtnRef = useRef<HTMLButtonElement>(null);
+  const [llmGatewayOpen, setLlmGatewayOpen] = useState(false);
   const skills = activeTask?.skills ?? config?.default_skills ?? [];
   const mcpServers = activeTask?.mcp_servers ?? config?.default_mcp_servers ?? [];
   const modelName = activeTask?.model_name ?? config?.default_model ?? "";
   const brandTitle = formatBrandTitle(config?.projectName ?? "agent", userId);
   const pinnedTasks = tasks.filter((task) => task.pinned);
   const regularTasks = tasks.filter((task) => !task.pinned);
+  const llmGatewayEnabled = activeTask?.llm_gateway_enabled ?? false;
+  const gatewayModels = config?.gateway_models ?? [];
+  const modelOptions =
+    llmGatewayEnabled && gatewayModels.length > 0 ? gatewayModels : (config?.models ?? []);
+
+  useEffect(() => {
+    if (!activeTask || !llmGatewayEnabled || gatewayModels.length === 0) return;
+    if (gatewayModels.includes(modelName)) return;
+    const next =
+      config?.default_gateway_model && gatewayModels.includes(config.default_gateway_model)
+        ? config.default_gateway_model
+        : gatewayModels[0];
+    onPatchTask(activeTask.id, { model_name: next });
+  }, [
+    activeTask,
+    llmGatewayEnabled,
+    gatewayModels,
+    modelName,
+    config?.default_gateway_model,
+    onPatchTask,
+  ]);
 
   function renderTask(task: Task, hidePinBadge = false) {
     return (
@@ -186,6 +221,17 @@ export function Sidebar({
               }
             />
           </label>
+          <button
+            type="button"
+            className={`sidebar-menu-btn${llmGatewayEnabled ? " is-active" : ""}`}
+            disabled={!activeTask}
+            onClick={() => setLlmGatewayOpen(true)}
+          >
+            <LlmGatewayIcon className="sidebar-icon" />
+            <span>
+              LLM Gateway{llmGatewayEnabled ? " (On)" : ""}
+            </span>
+          </button>
         </div>
       </aside>
 
@@ -211,8 +257,8 @@ export function Sidebar({
       )}
       {drawer === "model" && config && activeTask && (
         <ConfigDrawer
-          title="Model"
-          options={config.models}
+          title={llmGatewayEnabled ? "Model (LLM Gateway)" : "Model"}
+          options={modelOptions}
           selected={modelName ? [modelName] : []}
           mode="single"
           anchorEl={modelBtnRef.current}
@@ -220,6 +266,37 @@ export function Sidebar({
             activeTask && next[0] && onPatchTask(activeTask.id, { model_name: next[0] })
           }
           onClose={onCloseDrawer}
+        />
+      )}
+
+      {llmGatewayOpen && activeTask && (
+        <LlmGatewayModal
+          enabled={llmGatewayEnabled}
+          onConfirmEnable={async (uiModels) => {
+            const refreshed = await onRefreshConfig?.();
+            const gatewayList =
+              uiModels && uiModels.length > 0
+                ? uiModels
+                : refreshed && "gateway_models" in refreshed
+                  ? (refreshed.gateway_models ?? [])
+                  : (config?.gateway_models ?? []);
+            const defaultGw =
+              refreshed && "default_gateway_model" in refreshed
+                ? refreshed.default_gateway_model
+                : config?.default_gateway_model;
+            const patch: Partial<Task> = { llm_gateway_enabled: true };
+            if (gatewayList.length > 0 && !gatewayList.includes(modelName)) {
+              patch.model_name =
+                defaultGw && gatewayList.includes(defaultGw)
+                  ? defaultGw
+                  : gatewayList[0];
+            }
+            onPatchTask(activeTask.id, patch);
+          }}
+          onDisable={() =>
+            onPatchTask(activeTask.id, { llm_gateway_enabled: false })
+          }
+          onClose={() => setLlmGatewayOpen(false)}
         />
       )}
     </>

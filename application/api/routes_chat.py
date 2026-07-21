@@ -238,6 +238,7 @@ def _run_agent_thread(
     model_name: str,
     skill_list: list[str],
     guardrail_enabled: bool,
+    llm_gateway_enabled: bool,
     memory_enabled: bool,
     runtime_session_id: str,
     files: list[str],
@@ -257,6 +258,7 @@ def _run_agent_thread(
             notification_queue=sink,
             skill_list=skill_list,
             guardrail_enabled=guardrail_enabled,
+            llm_gateway_enabled=llm_gateway_enabled,
             memory_enabled=memory_enabled,
             files=files,
         )
@@ -288,6 +290,7 @@ def chat_stream(task_id: str, body: ChatRequest, request: Request):
         modelName=task["model_name"],
         debugMode="Enable",
         guardrailEnabled=task["guardrail_enabled"],
+        llmGatewayEnabled=task.get("llm_gateway_enabled", False),
         memoryEnabled=task["memory_enabled"],
     )
 
@@ -305,6 +308,7 @@ def chat_stream(task_id: str, body: ChatRequest, request: Request):
             "model_name": task["model_name"],
             "skill_list": task["skills"],
             "guardrail_enabled": task["guardrail_enabled"],
+            "llm_gateway_enabled": task.get("llm_gateway_enabled", False),
             "memory_enabled": task["memory_enabled"],
             "runtime_session_id": task.get("runtime_session_id") or task_id,
             "files": files,

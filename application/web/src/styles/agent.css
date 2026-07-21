@@ -1012,8 +1012,21 @@ select {
 
 .modal-error {
   margin: 0 0 12px;
-  color: #f87171;
+  color: #ef4444;
   font-size: 13px;
+}
+
+.modal p.modal-error {
+  margin: 0 0 12px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  border: 1px solid rgba(239, 68, 68, 0.45);
+  background: rgba(239, 68, 68, 0.12);
+  color: #ef4444;
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.45;
+  word-break: break-word;
 }
 
 .modal {
@@ -1049,6 +1062,61 @@ select {
   display: flex;
   justify-content: flex-end;
   gap: 8px;
+}
+
+.modal-btn-secondary {
+  padding: 8px 14px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-primary);
+  cursor: pointer;
+  font-size: 14px;
+}
+
+.modal-btn-secondary:hover:not(:disabled) {
+  background: var(--bg-tertiary);
+}
+
+.modal-btn-secondary:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.llm-gateway-modal {
+  width: min(480px, 92vw);
+}
+
+.llm-gateway-fields {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.llm-gateway-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.llm-gateway-field input {
+  margin-bottom: 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 12px;
+}
+
+.llm-gateway-muted {
+  color: var(--text-secondary);
+  font-size: 13px;
+}
+
+.llm-gateway-success {
+  margin: 0 0 12px;
+  color: #4ade80;
+  font-size: 13px;
 }
 
 .config-popover {

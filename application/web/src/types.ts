@@ -7,6 +7,7 @@ export interface Task {
   skills: string[];
   mcp_servers: string[];
   guardrail_enabled: boolean;
+  llm_gateway_enabled: boolean;
   memory_enabled: boolean;
   pinned: boolean;
   created_at: string;
@@ -36,9 +37,13 @@ export interface AppConfig {
   skills: string[];
   mcp_servers: string[];
   models: string[];
+  /** UI model names available on the configured LLM Gateway (/v1/models). */
+  gateway_models?: string[];
   default_model: string;
+  default_gateway_model?: string;
   default_skills: string[];
   default_mcp_servers: string[];
+  llm_gateway_configured?: boolean;
 }
 
 export interface StreamEvent {

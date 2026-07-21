@@ -1,6 +1,7 @@
 import asyncio
 import shutil
 import sqlite3
+import threading
 import traceback
 import boto3
 import os
@@ -15,6 +16,11 @@ import langgraph_agent
 import mcp_config
 import skill
 
+try:
+    from application.llm_gateway_models import LLM_GATEWAY_MODEL_MAP
+except ImportError:
+    from llm_gateway_models import LLM_GATEWAY_MODEL_MAP
+
 from langchain_core.documents import Document
 from urllib import parse
 from io import BytesIO
@@ -22,6 +28,7 @@ from PIL import Image
 from langchain_aws import ChatBedrock
 from langchain_aws import ChatBedrockConverse
 from langchain_openai import ChatOpenAI
+from langchain_anthropic import ChatAnthropic
 from botocore.config import Config
 from botocore.exceptions import ClientError
 from langchain_core.prompts import MessagesPlaceholder, ChatPromptTemplate
@@ -79,12 +86,23 @@ model_type = models[0]["model_type"]
 debug_mode = "Enable"
 user_id = "agent"
 guardrail_enabled = True
+llm_gateway_enabled = False
 memory_enabled = False
 memory_id = None
 actor_id = None
 session_id = None
 
-def update(userId=None, modelName=None, debugMode=None, guardrailEnabled=None, memoryEnabled=None):
+
+def _llm_gateway_settings() -> tuple[str, str] | None:
+    """Load LLM Gateway URL/key from config.json. Returns None if incomplete."""
+    runtime_config = utils.load_config()
+    url = (runtime_config.get("llm_gateway_url") or "").strip().rstrip("/")
+    key = (runtime_config.get("llm_gateway_key") or "").strip()
+    if not url or not key:
+        return None
+    return url, key
+
+def update(userId=None, modelName=None, debugMode=None, guardrailEnabled=None, llmGatewayEnabled=None, memoryEnabled=None):
     """Update agent/UI session settings.
 
     Compatible with:
@@ -92,7 +110,7 @@ def update(userId=None, modelName=None, debugMode=None, guardrailEnabled=None, m
     - Agent runtime: update(userId=..., modelName=..., debugMode=..., ...)
     """
     global model_name, model_id, model_type, debug_mode, reasoning_mode
-    global models, user_id, guardrail_enabled, memory_enabled
+    global models, user_id, guardrail_enabled, llm_gateway_enabled, memory_enabled
 
     # UI shorthand: update("Claude 4.6 Sonnet")
     if (
@@ -124,6 +142,10 @@ def update(userId=None, modelName=None, debugMode=None, guardrailEnabled=None, m
     if guardrailEnabled is not None and guardrail_enabled != guardrailEnabled:
         guardrail_enabled = guardrailEnabled
         logger.info(f"guardrail_enabled: {guardrail_enabled}")
+
+    if llmGatewayEnabled is not None and llm_gateway_enabled != llmGatewayEnabled:
+        llm_gateway_enabled = llmGatewayEnabled
+        logger.info(f"llm_gateway_enabled: {llm_gateway_enabled}")
 
     if memoryEnabled is not None and memory_enabled != memoryEnabled:
         memory_enabled = memoryEnabled
@@ -189,10 +211,58 @@ _sqlite_checkpointer = None
 _sqlite_checkpointer_cm = None
 _active_checkpoint_session = None
 _current_checkpoint_session_id: str | None = None
-_checkpointer_init_lock = asyncio.Lock()
+_checkpointer_loop_id = None
+_checkpointer_init_lock = threading.Lock()
 SQLITE_BUSY_TIMEOUT_MS = 5000
 _SETUP_MAX_ATTEMPTS = 5
 _SETUP_RETRY_BASE_SEC = 0.25
+
+# AsyncSqliteSaver binds asyncio.Lock to its creating loop. asyncio.run() per
+# request creates a new loop and breaks that lock — keep one process-wide loop.
+_agent_loop: asyncio.AbstractEventLoop | None = None
+_agent_loop_thread: threading.Thread | None = None
+_agent_loop_ready = threading.Event()
+_agent_loop_lock = threading.Lock()
+
+
+def _ensure_agent_loop() -> asyncio.AbstractEventLoop:
+    """Return a long-lived event loop dedicated to LangGraph agent runs."""
+    global _agent_loop, _agent_loop_thread
+
+    with _agent_loop_lock:
+        if _agent_loop is not None and _agent_loop.is_running():
+            return _agent_loop
+
+        _agent_loop_ready.clear()
+        loop_holder: dict[str, asyncio.AbstractEventLoop] = {}
+
+        def _runner() -> None:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            loop_holder["loop"] = loop
+            _agent_loop_ready.set()
+            loop.run_forever()
+
+        thread = threading.Thread(
+            target=_runner,
+            name="agent-asyncio-loop",
+            daemon=True,
+        )
+        thread.start()
+        if not _agent_loop_ready.wait(timeout=5):
+            raise RuntimeError("Agent event loop failed to start")
+
+        _agent_loop = loop_holder["loop"]
+        _agent_loop_thread = thread
+        logger.info("Started dedicated agent event loop (id=%s)", id(_agent_loop))
+        return _agent_loop
+
+
+def _run_on_agent_loop(coro):
+    """Run a coroutine on the dedicated agent loop and wait for the result."""
+    loop = _ensure_agent_loop()
+    future = asyncio.run_coroutine_threadsafe(coro, loop)
+    return future.result()
 
 
 def _runtime_session_id() -> str | None:
@@ -389,30 +459,60 @@ async def _create_sqlite_checkpointer(checkpoint_db: str):
 
 
 async def _close_sqlite_checkpointer() -> None:
-    global _sqlite_checkpointer, _sqlite_checkpointer_cm
+    global _sqlite_checkpointer, _sqlite_checkpointer_cm, _checkpointer_loop_id
 
-    if _sqlite_checkpointer is None:
-        return
-
-    conn = getattr(_sqlite_checkpointer, "conn", None)
-    if conn is not None:
-        try:
-            await conn.close()
-        except Exception as exc:
-            logger.warning(f"Failed to close sqlite checkpointer connection: {exc}")
-
+    saver = _sqlite_checkpointer
+    old_loop_id = _checkpointer_loop_id
     _sqlite_checkpointer = None
     _sqlite_checkpointer_cm = None
+    _checkpointer_loop_id = None
+    if saver is None:
+        return
+
+    conn = getattr(saver, "conn", None)
+    if conn is None:
+        return
+
+    # aiosqlite / AsyncSqliteSaver locks are bound to the creating event loop.
+    # Skip awaiting close when that loop is already gone or different.
+    try:
+        current_loop_id = id(asyncio.get_running_loop())
+    except RuntimeError:
+        current_loop_id = None
+
+    if old_loop_id is not None and current_loop_id != old_loop_id:
+        logger.warning(
+            "Dropping sqlite checkpointer bound to a different event loop "
+            "(old=%s current=%s)",
+            old_loop_id,
+            current_loop_id,
+        )
+        return
+
+    try:
+        await conn.close()
+    except Exception as exc:
+        logger.warning(f"Failed to close sqlite checkpointer connection: {exc}")
 
 
 async def ensure_checkpointer():
-    """Initialize AsyncSqliteSaver on local disk (per task runtime_session_id)."""
-    global checkpointer, _sqlite_checkpointer, _sqlite_checkpointer_cm, _active_checkpoint_session
+    """Initialize AsyncSqliteSaver on local disk (per task runtime_session_id).
+
+    Agent runs share one dedicated event loop (_ensure_agent_loop). Still recreate
+    the saver if that loop is replaced or the checkpoint session changes.
+    """
+    global checkpointer, _sqlite_checkpointer, _sqlite_checkpointer_cm
+    global _active_checkpoint_session, _checkpointer_loop_id, app
 
     session_id = _checkpoint_session_id()
     checkpoint_db = get_checkpoint_db_path()
+    loop_id = id(asyncio.get_running_loop())
 
-    if _sqlite_checkpointer is not None and _active_checkpoint_session == session_id:
+    if (
+        _sqlite_checkpointer is not None
+        and _active_checkpoint_session == session_id
+        and _checkpointer_loop_id == loop_id
+    ):
         checkpointer = _sqlite_checkpointer
         return checkpointer
 
@@ -421,19 +521,32 @@ async def ensure_checkpointer():
         checkpointer = MemorySaver()
         return checkpointer
 
-    async with _checkpointer_init_lock:
-        if _sqlite_checkpointer is not None and _active_checkpoint_session == session_id:
+    # threading.Lock: module-level asyncio.Lock is itself loop-bound and unsafe here.
+    with _checkpointer_init_lock:
+        if (
+            _sqlite_checkpointer is not None
+            and _active_checkpoint_session == session_id
+            and _checkpointer_loop_id == loop_id
+        ):
             checkpointer = _sqlite_checkpointer
             return checkpointer
 
-        if _sqlite_checkpointer is not None and _active_checkpoint_session != session_id:
-            logger.info(
-                "Switching checkpointer session: %s -> %s",
-                _active_checkpoint_session,
-                session_id,
-            )
-            await _close_sqlite_checkpointer()
+        if _sqlite_checkpointer is not None:
+            if _checkpointer_loop_id != loop_id:
+                logger.info(
+                    "Recreating checkpointer for new event loop (session=%s)",
+                    session_id,
+                )
+            elif _active_checkpoint_session != session_id:
+                logger.info(
+                    "Switching checkpointer session: %s -> %s",
+                    _active_checkpoint_session,
+                    session_id,
+                )
+            # Compiled graphs keep the old checkpointer reference.
+            app = None
 
+        await _close_sqlite_checkpointer()
         _active_checkpoint_session = session_id
 
         try:
@@ -457,8 +570,10 @@ async def ensure_checkpointer():
                 f"SQLite checkpointer unavailable ({exc}); falling back to MemorySaver"
             )
             checkpointer = MemorySaver()
+            _checkpointer_loop_id = loop_id
             return checkpointer
 
+        _checkpointer_loop_id = loop_id
         checkpointer = _sqlite_checkpointer
         return checkpointer
 
@@ -603,6 +718,58 @@ def _build_openai_chat(profile: dict, max_output_tokens: int):
     chat.streaming = False
     return chat
 
+
+def _build_llm_gateway_chat(profile: dict, max_output_tokens: int):
+    """Build chat model via LiteLLM gateway (ChatAnthropic / ChatOpenAI)."""
+    settings = _llm_gateway_settings()
+    if not settings:
+        logger.warning(
+            "LLM Gateway enabled but llm_gateway_url/llm_gateway_key missing in config.json; "
+            "falling back to Bedrock"
+        )
+        return None
+    gateway_url, gateway_key = settings
+
+    gw_model = LLM_GATEWAY_MODEL_MAP.get(model_name)
+    if not gw_model:
+        logger.warning(
+            "LLM Gateway enabled but no model mapping for %s; falling back to Bedrock",
+            model_name,
+        )
+        return None
+
+    model_kind = profile.get("model_type")
+    logger.info(
+        "Using LLM Gateway: url=%s model=%s type=%s",
+        gateway_url,
+        gw_model,
+        model_kind,
+    )
+
+    if model_kind == "openai":
+        return ChatOpenAI(
+            model=gw_model,
+            api_key=gateway_key,
+            base_url=f"{gateway_url}/v1",
+            max_tokens=max_output_tokens,
+        )
+
+    if model_kind == "claude":
+        # Do not pass temperature: newer Claude models (e.g. Opus 4.8) reject it via LiteLLM.
+        return ChatAnthropic(
+            model=gw_model,
+            api_key=gateway_key,
+            base_url=gateway_url,
+            max_tokens=max_output_tokens,
+        )
+
+    logger.warning(
+        "LLM Gateway does not support model_type=%s for %s; falling back to Bedrock",
+        model_kind,
+        model_name,
+    )
+    return None
+
 def get_chat():
     global model_type
 
@@ -618,6 +785,11 @@ def get_chat():
         maxOutputTokens = 5120 # 5k
 
     logger.info(f"modelId: {modelId}, model_type: {model_type}, bedrock_region: {bedrock_region}")
+
+    if llm_gateway_enabled:
+        gateway_chat = _build_llm_gateway_chat(profile, maxOutputTokens)
+        if gateway_chat is not None:
+            return gateway_chat
 
     if is_fable_model(modelId):
         bedrock_data_retention.ensure_fable_data_retention(
@@ -1861,17 +2033,17 @@ def run_agent(
     notification_queue=None,
     skill_list=None,
     guardrail_enabled=None,
+    llm_gateway_enabled=None,
     memory_enabled=None,
     files=None,
 ):
     """Sync entry used by FastAPI routes: update session then run LangGraph."""
-    import asyncio
-
     update(
         userId=user_id,
         modelName=model_name,
         debugMode="Enable",
         guardrailEnabled=guardrail_enabled,
+        llmGatewayEnabled=llm_gateway_enabled,
         memoryEnabled=memory_enabled,
     )
     if runtime_session_id:
@@ -1886,7 +2058,8 @@ def run_agent(
     if memory_enabled and "memory" not in mcp_servers:
         mcp_servers = mcp_servers + ["memory"]
 
-    return asyncio.run(
+    # Must not use asyncio.run(): AsyncSqliteSaver locks are loop-bound.
+    return _run_on_agent_loop(
         run_langgraph_agent(
             query=prompt or "",
             mcp_servers=mcp_servers,
@@ -1911,6 +2084,11 @@ async def run_langgraph_agent(
     artifacts = []
     references = []
     session_id = runtime_session_id or _checkpoint_session_id()
+    if session_id:
+        set_checkpoint_session_id(session_id)
+
+    # Refresh checkpointer on the dedicated agent loop (same loop across requests).
+    await ensure_checkpointer()
 
     if (
         app is None

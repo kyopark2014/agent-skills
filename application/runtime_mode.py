@@ -23,6 +23,7 @@ def run_agent(
     notification_queue=None,
     skill_list=None,
     guardrail_enabled=None,
+    llm_gateway_enabled=None,
     memory_enabled=None,
     files=None,
 ):
@@ -38,6 +39,7 @@ def run_agent(
         notification_queue=notification_queue,
         skill_list=skill_list,
         guardrail_enabled=guardrail_enabled,
+        llm_gateway_enabled=llm_gateway_enabled,
         memory_enabled=memory_enabled,
         files=files,
     )

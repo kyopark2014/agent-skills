@@ -21,6 +21,19 @@ export interface FileUploadResult {
   content_type?: string;
 }
 
+export interface LlmGatewayConfig {
+  url: string;
+  key: string;
+  configured: boolean;
+}
+
+export interface LlmGatewayVerifyResult {
+  ok: boolean;
+  message: string;
+  models: string[];
+  ui_models?: string[];
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const method = init?.method ?? "GET";
   uiLog(`api:${method} ${path}`);
@@ -60,6 +73,13 @@ export const api = {
     }),
   clearSession: () => request<void>("/api/session", { method: "DELETE" }),
   getConfig: () => request<AppConfig>("/api/config"),
+  getLlmGateway: () =>
+    request<LlmGatewayConfig>("/api/config/llm-gateway"),
+  verifyLlmGateway: (body: { url: string; key: string }) =>
+    request<LlmGatewayVerifyResult>("/api/config/llm-gateway/verify", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
   patchDefaults: (body: {
     default_skills?: string[];
     default_mcp_servers?: string[];

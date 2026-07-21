@@ -1,7 +1,10 @@
 import logging
 import sys
 import traceback
-import chat
+try:
+    from application import chat
+except ImportError:  # script-style runs with application/ on sys.path
+    import chat
 import utils
 import agentcore_sigv4_auth
 import sys
@@ -584,6 +587,9 @@ PROMPT_CACHE_CONTROL = {"type": "ephemeral", "ttl": "5m"}
 
 
 def _supports_prompt_caching(model_type: str | None) -> bool:
+    # Bedrock-specific cache_control; skip when routing via LiteLLM gateway.
+    if getattr(chat, "llm_gateway_enabled", False):
+        return False
     return model_type in ("claude", "nova")
 
 

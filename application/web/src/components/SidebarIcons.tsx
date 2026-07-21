@@ -73,6 +73,29 @@ export function GuardrailIcon({ className }: IconProps) {
   );
 }
 
+export function LlmGatewayIcon({ className }: IconProps) {
+  return (
+    <svg
+      className={className}
+      viewBox="0 0 16 16"
+      aria-hidden="true"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.15"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <rect x="2.5" y="5.5" width="4" height="5" rx="0.75" />
+      <rect x="9.5" y="5.5" width="4" height="5" rx="0.75" />
+      <path d="M6.5 8h3" />
+      <path d="M4.5 3.5v2" />
+      <path d="M11.5 3.5v2" />
+      <path d="M4.5 10.5v2" />
+      <path d="M11.5 10.5v2" />
+    </svg>
+  );
+}
+
 export function MemoryIcon({ className }: IconProps) {
   return (
     <svg
