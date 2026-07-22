@@ -55,19 +55,8 @@ def sanitize_memory_actor_id(user_id: str) -> str:
 
 
 def resolve_memory_actor_id(user_id: str) -> str:
-    """
-    Map application user_id → AgentCore Memory actor_id.
-
-    Optional config.json:
-      "memory_actor_aliases": {"kyopark2014@gmail.com": "ksdyb"}
-    """
-    raw = (user_id or "").strip() or "default"
-    aliases = config.get("memory_actor_aliases") or {}
-    if isinstance(aliases, dict) and raw in aliases and aliases[raw]:
-        mapped = str(aliases[raw]).strip()
-        logger.info(f"memory actor alias: {raw!r} -> {mapped!r}")
-        raw = mapped
-    actor_id = sanitize_memory_actor_id(raw)
+    """Map application user_id → API-safe AgentCore Memory actor_id."""
+    actor_id = sanitize_memory_actor_id(user_id)
     if actor_id != (user_id or "").strip():
         logger.info(f"memory actor_id sanitized: {user_id!r} -> {actor_id!r}")
     return actor_id
@@ -78,7 +67,7 @@ def load_memory_variables(user_id: str):
     Resolve AgentCore memory identifiers for a user.
 
     memory_id comes from config.json (installer) or is retrieved/created.
-    actor_id / namespace are derived from user_id (alias + sanitize).
+    actor_id / namespace are derived from sanitized user_id.
     session_id is ephemeral — no per-user JSON cache file.
     """
     actor_id = resolve_memory_actor_id(user_id)
