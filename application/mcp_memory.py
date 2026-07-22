@@ -58,6 +58,20 @@ def _format_namespace(namespace_template: str, actor_id: str, session_id: str = 
     except (KeyError, ValueError, IndexError):
         return namespace_template
 
+def _namespace_belongs_to_actor(namespace: str, actor_id: str) -> bool:
+    """
+    Return True only if the namespace is scoped to the current actor.
+    Prevents cross-user leakage when strategies store literal /users/<other> paths.
+    """
+    if not namespace or not actor_id:
+        return False
+    if namespace == f"/users/{actor_id}":
+        return True
+    # Allow nested paths that include this actor as a path segment
+    # e.g. /users/{actorId}/preferences after formatting
+    parts = [p for p in namespace.split("/") if p]
+    return actor_id in parts
+
 def get_search_namespaces(
     memory_id: str,
     actor_id: str,
@@ -65,13 +79,18 @@ def get_search_namespaces(
     default_namespace: str,
 ) -> List[str]:
     """
-    Build namespaces to search, always including the user profile namespace.
-    Also resolves namespaces from configured memory strategies.
+    Build namespaces to search for the current actor only.
+    Always includes the user profile namespace; strategy namespaces are included
+    only when they resolve to this actor (literal /users/<other> are skipped).
     """
     namespaces: Set[str] = set()
 
-    if default_namespace:
+    if default_namespace and _namespace_belongs_to_actor(default_namespace, actor_id):
         namespaces.add(default_namespace)
+    elif default_namespace:
+        logger.warning(
+            f"Ignoring default_namespace not owned by actor {actor_id}: {default_namespace}"
+        )
 
     # Always include user profile preference namespace
     user_profile_namespace = f"/users/{actor_id}"
@@ -83,13 +102,19 @@ def get_search_namespaces(
             strategy_id = strategy.get("strategyId") or strategy.get("id") or ""
             for ns_template in strategy.get("namespaces") or []:
                 formatted = _format_namespace(ns_template, actor_id, session_id, strategy_id)
-                if formatted:
-                    namespaces.add(formatted)
+                if not formatted:
+                    continue
+                if not _namespace_belongs_to_actor(formatted, actor_id):
+                    logger.info(
+                        f"Skipping strategy namespace not owned by actor {actor_id}: {formatted}"
+                    )
+                    continue
+                namespaces.add(formatted)
     except Exception as e:
         logger.warning(f"Failed to load strategy namespaces, using defaults only: {e}")
 
     namespace_list = sorted(namespaces)
-    logger.info(f"search namespaces (including user profile): {namespace_list}")
+    logger.info(f"search namespaces for actor {actor_id}: {namespace_list}")
     return namespace_list
 
 def retrieve_memory_records(
