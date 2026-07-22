@@ -65,6 +65,8 @@ def _namespace_belongs_to_actor(namespace: str, actor_id: str) -> bool:
     """
     if not namespace or not actor_id:
         return False
+    if namespace == f"/users/{actor_id}/preferences":
+        return True
     if namespace == f"/users/{actor_id}":
         return True
     # Allow nested paths that include this actor as a path segment
@@ -93,7 +95,7 @@ def get_search_namespaces(
         )
 
     # Always include user profile preference namespace
-    user_profile_namespace = f"/users/{actor_id}"
+    user_profile_namespace = f"/users/{actor_id}/preferences"
     namespaces.add(user_profile_namespace)
 
     try:
