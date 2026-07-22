@@ -228,7 +228,8 @@ Builtin tools 예: `execute_code`, `write_file`, `read_file`, `bash`, `upload_fi
 - [Tavily](https://github.com/kyopark2014/mcp/blob/main/mcp-tavily.md) — 웹 검색
 - [RAG / knowledge base](https://github.com/kyopark2014/mcp/blob/main/mcp-rag.md) — Bedrock Knowledge Base
 - [web_fetch](https://github.com/kyopark2014/mcp/blob/main/mcp-web-fetch.md) — URL → markdown
-- [Notion](https://github.com/kyopark2014/mcp/blob/main/mcp-notion.md) / Slack / drawio / korea_weather / memory 등
+- [Notion](https://github.com/kyopark2014/mcp/blob/main/mcp-notion.md) / Slack / drawio / memory 등
+- Skill: korea-weather (기상청 동네예보)
 
 Gateway 기반 웹검색은 [websearch.md](./websearch.md)를 참조하세요.
 

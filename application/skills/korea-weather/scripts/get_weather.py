@@ -1,13 +1,17 @@
+#!/usr/bin/env python3
 """
-MCP server for Korean weather from KMA Weather Nuri (weather.go.kr) and AirKorea.
-Provides dong-level digital forecast, current weather, and AirKorea air quality.
-No API key required.
+Korean weather CLI (KMA Weather Nuri + AirKorea).
+
+Dong-level digital forecast, current weather, and air quality. No API key required.
 
 Location resolution when location is empty / "current location":
 1) Home address from AgentCore memory (if available)
 2) Approximate city via public IP geolocation
 3) Ask the user if both fail
 """
+from __future__ import annotations
+
+import argparse
 import logging
 import os
 import re
@@ -16,14 +20,18 @@ import urllib.parse
 
 import requests
 from bs4 import BeautifulSoup
-from mcp.server.fastmcp import FastMCP
+
+# Optional: application/ for mcp_memory (home-address fallback)
+_APP_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
+if _APP_DIR not in sys.path:
+    sys.path.insert(0, _APP_DIR)
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(filename)s:%(lineno)d | %(message)s",
     handlers=[logging.StreamHandler(sys.stderr)],
 )
-logger = logging.getLogger("mcp-server-korea-weather")
+logger = logging.getLogger("korea-weather")
 
 BASE_URL = "https://www.weather.go.kr"
 PLACE_SEARCH_URL = f"{BASE_URL}/w/renew2021/rest/main/place-search.do"
@@ -321,115 +329,35 @@ def resolve_location_from_ip() -> dict | None:
     return None
 
 
-def _memory_contents_to_text(contents) -> str:
-    """Flatten recall_memory contents into searchable text."""
-    chunks: list[str] = []
-    if not contents:
-        return ""
-    if isinstance(contents, dict):
-        contents = contents.get("text") or contents.get("content") or [contents]
-    if not isinstance(contents, list):
-        contents = [contents]
-    for item in contents:
-        if isinstance(item, dict):
-            # Common shapes: {"text": "..."} or preference JSON
-            if "text" in item and isinstance(item["text"], str):
-                chunks.append(item["text"])
-            else:
-                for k, v in item.items():
-                    if isinstance(v, str) and v.strip():
-                        chunks.append(f"{k}: {v}")
-                    elif isinstance(v, (list, dict)):
-                        chunks.append(str(v))
-        elif isinstance(item, str):
-            chunks.append(item)
-        else:
-            chunks.append(str(item))
-    return "\n".join(chunks)
-
-
-def _extract_address_candidates(text: str) -> list[str]:
-    """Pull Korean address-like phrases from memory text."""
-    if not text:
-        return []
-    candidates: list[str] = []
-
-    # Full-ish address: 서울특별시 서초구 반포동 / 서울 강남구 ...
-    for m in re.finditer(
-        r"((?:서울|부산|대구|인천|광주|대전|울산|세종|제주)[^\n,]{0,4}"
-        r"(?:특별시|광역시|특별자치시|특별자치도|시)?\s*"
-        r"[가-힣0-9]+(?:시|군|구)\s*[가-힣0-9]+(?:동|읍|면|로|길)?)",
-        text,
-    ):
-        candidates.append(re.sub(r"\s+", " ", m.group(1)).strip())
-
-    # Shorter: OO구 OO동
-    for m in re.finditer(r"([가-힣]+구\s*[가-힣0-9]+동)", text):
-        candidates.append(re.sub(r"\s+", " ", m.group(1)).strip())
-
-    # Labeled fields
-    for m in re.finditer(
-        r"(?:집|자택|거주|주소|home|address)\s*[:：]?\s*([가-힣A-Za-z0-9\s]+)",
-        text,
-        re.I,
-    ):
-        val = re.sub(r"\s+", " ", m.group(1)).strip(" .")
-        if 2 <= len(val) <= 40:
-            candidates.append(val)
-
-    # Dedupe preserving order
-    seen = set()
-    out = []
-    for c in candidates:
-        if c not in seen:
-            seen.add(c)
-            out.append(c)
-    return out
-
-
 def resolve_location_from_memory() -> dict | None:
     """
-    Look up home/residence address via AgentCore memory (mcp_memory).
+    Look up home/residence address via recall_home_location.py (AgentCore memory).
     Returns search_location()-compatible dict, or None.
     """
     try:
-        import mcp_memory  # local module; uses AGENTCORE_USER_ID
+        from recall_home_location import recall_home_location
     except Exception as e:
-        logger.warning(f"mcp_memory import failed: {e}")
+        logger.warning(f"recall_home_location import failed: {e}")
         return None
 
-    try:
-        result = mcp_memory.recall_memory(
-            action="retrieve",
-            query="집 주소 자택 거주 지역 동네 홈 주소 home address residence",
-            max_results=10,
-        )
-    except Exception as e:
-        logger.warning(f"memory recall failed: {e}")
+    result = recall_home_location()
+    if result.get("status") != "ok":
+        if result.get("error"):
+            logger.warning(result["error"])
+        else:
+            logger.info("memory recall returned no usable location")
         return None
 
-    text = _memory_contents_to_text(result)
-    if not text.strip():
-        logger.info("memory recall returned no usable text")
-        return None
+    candidates = result.get("candidates") or []
+    if result.get("location") and result["location"] not in candidates:
+        candidates = [result["location"], *candidates]
 
-    logger.info(f"memory text for location (truncated): {text[:300]}")
-    for candidate in _extract_address_candidates(text):
+    for candidate in candidates:
         loc = search_location(candidate)
         if loc:
             loc["resolved_via"] = "memory"
             loc["resolved_query"] = candidate
             return loc
-
-    # Last resort: try place-search on first Korean place-like line
-    for line in text.splitlines():
-        line = line.strip()
-        if any(k in line for k in ("시", "구", "동", "군")) and len(line) <= 40:
-            loc = search_location(line)
-            if loc:
-                loc["resolved_via"] = "memory"
-                loc["resolved_query"] = line
-                return loc
 
     return None
 
@@ -1120,63 +1048,12 @@ def _guess_stnid(location: str) -> int | None:
     return 109  # default: Seoul metro
 
 
-try:
-    mcp = FastMCP(
-        name="korea-weather",
-        instructions=(
-            "Look up Korean weather from KMA Weather Nuri digital forecast and AirKorea. "
-            "Provide a natural-language summary of current, daily, and hourly conditions "
-            "for an administrative dong, plus compact tables and page links. "
-            "Do not provide graphs or images. "
-            "CRITICAL: If the user asks for weather without naming a place "
-            "(e.g. '날씨 알려줘', '오늘 날씨'), call get_korea_weather with an empty "
-            "location string immediately. Do NOT call recall_memory yourself first, "
-            "and do NOT ask the user for a region before calling this tool. "
-            "This tool already resolves location in order: "
-            "1) home address from memory, 2) public IP approximate city, "
-            "3) LOCATION_NEEDED. Only if the tool returns LOCATION_NEEDED, ask the user. "
-            "Do NOT invent a city. "
-            "Important: when answering the user, never wrap temperatures, probabilities, "
-            "or humidity in markdown bold (**) or italics (*). Asterisks must not appear "
-            "literally on screen. Write plain text with units, e.g. high 30C, rain chance 60%."
-        ),
-    )
-    logger.info("Korea Weather MCP server initialized successfully")
-except Exception as e:
-    logger.error(f"Error: {e}")
-
-
-@mcp.tool()
-def get_korea_weather(location: str = "") -> str:
-    """
-    Look up detailed weather for a location in Korea.
-
-    When the user asks about weather without naming a place
-    (e.g. "날씨 알려줘", "오늘 날씨", "우산 필요해?"), call this tool with
-    location="" (empty). Do NOT call recall_memory first and do NOT ask the
-    user for a region before calling — this tool already tries memory, then IP.
-
-    location: Place name (e.g. Seoul, Busan, Banpo 3-dong).
-        Empty / "현재위치" / "여기" / "current location":
-        resolve order = memory home address → IP approximate location → LOCATION_NEEDED.
-    return: Prose weather summary + tables + links, or LOCATION_NEEDED message.
-
-    Only if the result starts with LOCATION_NEEDED, ask the user which area to use.
-    Do not invent a location. Do not wrap temps/probabilities in markdown bold (**).
-    """
-    logger.info(f"get_korea_weather --> location: {location or '(current/auto)'}")
-    return get_korea_weather_info(location)
-
-
-@mcp.tool()
 def get_korea_weather_by_stnid(stnid: int) -> str:
     """
     Look up dong-level weather for the representative city of a forecast-office stnId.
     stnid: 108/109=Seoul·Incheon·Gyeonggi, 105=Gangwon, 131=Chungbuk,
            133=Daejeon·Sejong·Chungnam, 146=Jeonbuk, 156=Gwangju·Jeonnam,
            143=Daegu·Gyeongbuk, 159=Busan·Ulsan·Gyeongnam, 184=Jeju
-    return: prose weather summary string.
-    Do not wrap numeric values in markdown bold (**) when answering the user.
     """
     logger.info(f"get_korea_weather_by_stnid --> stnid: {stnid}")
     location = STNID_TO_LOCATION.get(stnid)
@@ -1188,5 +1065,43 @@ def get_korea_weather_by_stnid(stnid: int) -> str:
     return get_korea_weather_info(location)
 
 
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        description=(
+            "Look up Korean weather (dong-level digital forecast, current, air quality). "
+            "Omit location to auto-resolve: memory home address → IP city → LOCATION_NEEDED."
+        )
+    )
+    parser.add_argument(
+        "location",
+        nargs="?",
+        default="",
+        help='Place name (e.g. "서울 서초구", "부산"). Empty / "현재위치" = auto.',
+    )
+    parser.add_argument(
+        "--stnid",
+        type=int,
+        default=None,
+        help=(
+            "Forecast-office stnId instead of location name. "
+            "109=서울·인천·경기, 159=부산·울산·경남, 184=제주, ..."
+        ),
+    )
+    args = parser.parse_args()
+
+    if args.stnid is not None:
+        if args.stnid not in STNID_TO_LOCATION:
+            print(
+                f"지원하지 않는 stnId입니다: {args.stnid}. "
+                "예: 109(서울·인천·경기), 159(부산·울산·경남), 184(제주)",
+                file=sys.stderr,
+            )
+            return 1
+        print(get_korea_weather_by_stnid(args.stnid))
+    else:
+        print(get_korea_weather_info(args.location or ""))
+    return 0
+
+
 if __name__ == "__main__":
-    mcp.run(transport="stdio")
+    raise SystemExit(main())

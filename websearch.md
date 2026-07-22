@@ -214,7 +214,7 @@ mcp_options = [
     "notion",
     # ...
 ]
-default_selections = ["web_fetch", "slack", "notion", "korea_weather", "websearch"]
+default_selections = ["web_fetch", "slack", "notion", "websearch"]
 ```
 
 [telegram_bot.py](./application/telegram_bot.py)도 Agent 모드에서 동일한 MCP 설정을 사용할 수 있습니다.

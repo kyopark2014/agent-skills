@@ -1990,8 +1990,8 @@ async def create_agent(
 
     server_params = langgraph_agent.load_multiple_mcp_server_parameters(mcp_json)
 
-    # Pass current user_id to memory / korea-weather MCP via process env
-    for server_name in ("memory", "korea-weather"):
+    # Pass current user_id to memory MCP via process env
+    for server_name in ("memory",):
         params = server_params.get(server_name)
         if params and params.get("transport") == "stdio":
             env = dict(params.get("env") or {})
@@ -2369,13 +2369,6 @@ def initiate_memory():
         memory_id=memory_id,
         namespace=namespace,
         strategy_name=effective_user_id,
-    )
-    agentcore_memory.update_memory_variables(
-        user_id=effective_user_id,
-        memory_id=memory_id,
-        actor_id=actor_id,
-        session_id=session_id,
-        namespace=namespace,
     )
 
 
