@@ -7,6 +7,7 @@ import time
 
 from bedrock_agentcore.memory import MemoryClient
 from datetime import datetime, timezone
+import re
 
 logging.basicConfig(
     level=logging.INFO,  # Default to INFO level
@@ -34,17 +35,53 @@ bedrock_region = config.get('region')
 projectName = config.get('projectName')
 agentcore_memory_role = config.get('agentcore_memory_role')
 
-memory_client = MemoryClient(region_name=bedrock_region)    
+memory_client = MemoryClient(region_name=bedrock_region)
+
+# AgentCore Memory namespace pattern rejects emails (@, .):
+# [a-zA-Z0-9/*][a-zA-Z0-9-_/*]*(?::[a-zA-Z0-9-_/*]+)*[a-zA-Z0-9-_/*]*
+_INVALID_ACTOR_CHARS = re.compile(r"[^a-zA-Z0-9_-]+")
+
+
+def sanitize_memory_actor_id(user_id: str) -> str:
+    """Make a user id safe for AgentCore Memory actor_id / namespace / strategy name."""
+    raw = (user_id or "").strip() or "default"
+    cleaned = _INVALID_ACTOR_CHARS.sub("_", raw).strip("_")
+    cleaned = re.sub(r"_+", "_", cleaned)
+    if not cleaned:
+        cleaned = "default"
+    if not re.match(r"^[a-zA-Z0-9]", cleaned):
+        cleaned = f"u_{cleaned}"
+    return cleaned[:128]
+
+
+def resolve_memory_actor_id(user_id: str) -> str:
+    """
+    Map application user_id → AgentCore Memory actor_id.
+
+    Optional config.json:
+      "memory_actor_aliases": {"kyopark2014@gmail.com": "ksdyb"}
+    """
+    raw = (user_id or "").strip() or "default"
+    aliases = config.get("memory_actor_aliases") or {}
+    if isinstance(aliases, dict) and raw in aliases and aliases[raw]:
+        mapped = str(aliases[raw]).strip()
+        logger.info(f"memory actor alias: {raw!r} -> {mapped!r}")
+        raw = mapped
+    actor_id = sanitize_memory_actor_id(raw)
+    if actor_id != (user_id or "").strip():
+        logger.info(f"memory actor_id sanitized: {user_id!r} -> {actor_id!r}")
+    return actor_id
+
 
 def load_memory_variables(user_id: str):
     """
     Resolve AgentCore memory identifiers for a user.
 
     memory_id comes from config.json (installer) or is retrieved/created.
-    actor_id / namespace are derived from user_id. session_id is ephemeral
-    (new UUID per process load) — no per-user JSON cache file.
+    actor_id / namespace are derived from user_id (alias + sanitize).
+    session_id is ephemeral — no per-user JSON cache file.
     """
-    actor_id = user_id if user_id and str(user_id).strip() else "default"
+    actor_id = resolve_memory_actor_id(user_id)
     session_id = uuid.uuid4().hex
     namespace = f"/users/{actor_id}"
 

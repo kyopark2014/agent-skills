@@ -2349,8 +2349,7 @@ def initiate_memory():
     memory_id, actor_id, session_id, namespace = agentcore_memory.load_memory_variables(
         effective_user_id
     )
-    # actor_id must always equal user_id
-    actor_id = effective_user_id
+    # actor_id is the sanitized/aliased memory identity (not raw email)
     if not namespace:
         namespace = f"/users/{actor_id}"
     logger.info(
@@ -2362,13 +2361,13 @@ def initiate_memory():
         memory_id = agentcore_memory.retrieve_memory_id()
         if memory_id is None:
             logger.info("Memory will be created...")
-            memory_id = agentcore_memory.create_memory(namespace, effective_user_id)
+            memory_id = agentcore_memory.create_memory(namespace, actor_id)
             logger.info(f"Memory was created... {memory_id}")
 
     agentcore_memory.create_strategy_if_not_exists(
         memory_id=memory_id,
         namespace=namespace,
-        strategy_name=effective_user_id,
+        strategy_name=actor_id,
     )
 
 
@@ -2380,7 +2379,10 @@ def save_to_memory(query, result):
         return
 
     try:
-        if memory_id is None or actor_id != user_id:
+        expected_actor = agentcore_memory.resolve_memory_actor_id(
+            user_id if user_id and str(user_id).strip() else "default"
+        )
+        if memory_id is None or actor_id != expected_actor:
             initiate_memory()
 
         agentcore_memory.save_conversation_to_memory(
