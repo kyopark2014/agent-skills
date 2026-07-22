@@ -1128,10 +1128,14 @@ try:
             "Provide a natural-language summary of current, daily, and hourly conditions "
             "for an administrative dong, plus compact tables and page links. "
             "Do not provide graphs or images. "
-            "When location is empty or means current location (현재위치/여기), the tool "
-            "resolves via: 1) home address from memory, 2) public IP approximate city, "
-            "3) otherwise returns LOCATION_NEEDED — then ask the user for a place name. "
-            "If the tool returns LOCATION_NEEDED, do NOT invent a city; ask the user. "
+            "CRITICAL: If the user asks for weather without naming a place "
+            "(e.g. '날씨 알려줘', '오늘 날씨'), call get_korea_weather with an empty "
+            "location string immediately. Do NOT call recall_memory yourself first, "
+            "and do NOT ask the user for a region before calling this tool. "
+            "This tool already resolves location in order: "
+            "1) home address from memory, 2) public IP approximate city, "
+            "3) LOCATION_NEEDED. Only if the tool returns LOCATION_NEEDED, ask the user. "
+            "Do NOT invent a city. "
             "Important: when answering the user, never wrap temperatures, probabilities, "
             "or humidity in markdown bold (**) or italics (*). Asterisks must not appear "
             "literally on screen. Write plain text with units, e.g. high 30C, rain chance 60%."
@@ -1147,12 +1151,17 @@ def get_korea_weather(location: str = "") -> str:
     """
     Look up detailed weather for a location in Korea.
 
+    When the user asks about weather without naming a place
+    (e.g. "날씨 알려줘", "오늘 날씨", "우산 필요해?"), call this tool with
+    location="" (empty). Do NOT call recall_memory first and do NOT ask the
+    user for a region before calling — this tool already tries memory, then IP.
+
     location: Place name (e.g. Seoul, Busan, Banpo 3-dong).
         Empty / "현재위치" / "여기" / "current location":
-        resolve order = memory home address → IP approximate location → ask user.
+        resolve order = memory home address → IP approximate location → LOCATION_NEEDED.
     return: Prose weather summary + tables + links, or LOCATION_NEEDED message.
 
-    If the result starts with LOCATION_NEEDED, ask the user which area to use.
+    Only if the result starts with LOCATION_NEEDED, ask the user which area to use.
     Do not invent a location. Do not wrap temps/probabilities in markdown bold (**).
     """
     logger.info(f"get_korea_weather --> location: {location or '(current/auto)'}")
