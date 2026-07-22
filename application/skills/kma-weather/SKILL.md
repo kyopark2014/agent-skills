@@ -14,8 +14,11 @@ description: >
 ## 워크플로우
 
 1. 사용자 요청에서 **지역명**과 **조회 유형**(현재/예보/전체)을 파악
-2. `scripts/get_weather.py` 실행
-3. 결과를 자연스러운 한국어로 요약하여 답변
+2. **지역명이 없으면** 이 skill 스크립트를 쓰지 말고 MCP `get_korea_weather(location="")`를
+   바로 호출한다. (memory 집주소 → IP 대략 위치 → 없으면 사용자에게 질문)
+   `recall_memory`로 위치를 먼저 찾거나, 지역을 사용자에게 먼저 묻지 않는다.
+3. 지역명이 있으면 `scripts/get_weather.py` 실행 (또는 `get_korea_weather(지역명)`)
+4. 결과를 자연스러운 한국어로 요약하여 답변
 
 ## 스크립트 실행
 
@@ -65,7 +68,8 @@ python skills/kma-weather/scripts/get_weather.py --location "서울" --format js
 - 현재 날씨 질문 → `--type current` 실행 후 핵심 정보(기온, 날씨 상태, 습도, 바람) 요약
 - 예보 질문 → `--type forecast` 실행 후 해당 날짜 정보 강조
 - 우산/외출 관련 → 강수확률과 날씨 상태 기반으로 조언
-- 지역명이 불명확하면 사용자에게 확인 후 실행
+- 지역명이 없으면 `get_korea_weather("")`로 자동 위치 해석(memory→IP) 후,
+  LOCATION_NEEDED일 때만 사용자에게 확인
 
 ## API 참고
 

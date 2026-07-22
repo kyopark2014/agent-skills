@@ -3,7 +3,8 @@
     "web_fetch",
     "websearch",
     "aws documentation",
-    "korea_weather"
+    "korea_weather",
+    "memory"
   ],
   "SKILL": [
     "skill-creator"
