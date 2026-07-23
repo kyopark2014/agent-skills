@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, type MouseEvent } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import { copyTextToClipboard } from "../copyToClipboard";
 import type { Message, ToolEvent } from "../types";
 import { ToolCallCard } from "./ToolCallCard";
 
@@ -15,6 +16,7 @@ interface ContextMenuState {
   x: number;
   y: number;
   markdown: string;
+  selectedText: string;
 }
 
 function normalizeText(value: string): string {
@@ -63,22 +65,30 @@ function MarkdownText({ content }: { content: string }) {
   return <ReactMarkdown remarkPlugins={[remarkGfm]}>{content}</ReactMarkdown>;
 }
 
-async function copyMarkdownToClipboard(markdown: string): Promise<void> {
-  if (navigator.clipboard?.writeText) {
-    await navigator.clipboard.writeText(markdown);
-    return;
+const COPY_ICON = (
+  <svg viewBox="0 0 16 16" aria-hidden="true">
+    <path
+      fill="currentColor"
+      d="M5 2a2 2 0 0 0-2 2v7h1.5V4a.5.5 0 0 1 .5-.5h6V2H5Zm3 3a2 2 0 0 0-2 2v6a2 2 0 0 0 2 2h5a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2H8Zm0 1.5h5a.5.5 0 0 1 .5.5v6a.5.5 0 0 1-.5.5H8a.5.5 0 0 1-.5-.5V7a.5.5 0 0 1 .5-.5Z"
+    />
+  </svg>
+);
+
+function getSelectedTextInElement(element: HTMLElement): string {
+  const selection = window.getSelection();
+  if (!selection || selection.isCollapsed || selection.rangeCount === 0) {
+    return "";
   }
 
-  // Fallback for older browsers / non-secure contexts
-  const textarea = document.createElement("textarea");
-  textarea.value = markdown;
-  textarea.setAttribute("readonly", "");
-  textarea.style.position = "fixed";
-  textarea.style.left = "-9999px";
-  document.body.appendChild(textarea);
-  textarea.select();
-  document.execCommand("copy");
-  document.body.removeChild(textarea);
+  const range = selection.getRangeAt(0);
+  if (
+    !element.contains(range.commonAncestorContainer) &&
+    range.commonAncestorContainer !== element
+  ) {
+    return "";
+  }
+
+  return selection.toString();
 }
 
 function MarkdownContextMenu({
@@ -89,6 +99,7 @@ function MarkdownContextMenu({
   onClose: () => void;
 }) {
   const menuRef = useRef<HTMLDivElement>(null);
+  const hasSelection = menu.selectedText.length > 0;
 
   useEffect(() => {
     function onDocMouseDown(e: globalThis.MouseEvent) {
@@ -129,6 +140,11 @@ function MarkdownContextMenu({
     el.style.top = `${top}px`;
   }, [menu.x, menu.y]);
 
+  function handleCopy(text: string) {
+    copyTextToClipboard(text);
+    onClose();
+  }
+
   return (
     <div
       ref={menuRef}
@@ -136,41 +152,42 @@ function MarkdownContextMenu({
       role="menu"
       style={{ left: menu.x, top: menu.y }}
     >
-      <button
-        type="button"
-        role="menuitem"
-        onClick={async () => {
-          try {
-            await copyMarkdownToClipboard(menu.markdown);
-          } finally {
-            onClose();
-          }
-        }}
-      >
-        <svg viewBox="0 0 16 16" aria-hidden="true">
-          <path
-            fill="currentColor"
-            d="M5 2a2 2 0 0 0-2 2v7h1.5V4a.5.5 0 0 1 .5-.5h6V2H5Zm3 3a2 2 0 0 0-2 2v6a2 2 0 0 0 2 2h5a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2H8Zm0 1.5h5a.5.5 0 0 1 .5.5v6a.5.5 0 0 1-.5.5H8a.5.5 0 0 1-.5-.5V7a.5.5 0 0 1 .5-.5Z"
-          />
-        </svg>
-        Copy markdown contents
-      </button>
+      {hasSelection ? (
+        <button type="button" role="menuitem" onClick={() => handleCopy(menu.selectedText)}>
+          {COPY_ICON}
+          Copy
+        </button>
+      ) : (
+        <button type="button" role="menuitem" onClick={() => handleCopy(menu.markdown)}>
+          {COPY_ICON}
+          Copy markdown contents
+        </button>
+      )}
     </div>
   );
 }
 
 function MarkdownBubble({ content }: { content: string }) {
   const [menu, setMenu] = useState<ContextMenuState | null>(null);
+  const bubbleRef = useRef<HTMLDivElement>(null);
 
   function onContextMenu(e: MouseEvent<HTMLDivElement>) {
     if (!content.trim()) return;
     e.preventDefault();
-    setMenu({ x: e.clientX, y: e.clientY, markdown: content });
+    const selectedText = bubbleRef.current
+      ? getSelectedTextInElement(bubbleRef.current)
+      : "";
+    setMenu({
+      x: e.clientX,
+      y: e.clientY,
+      markdown: content,
+      selectedText,
+    });
   }
 
   return (
     <>
-      <div className="message-bubble" onContextMenu={onContextMenu}>
+      <div ref={bubbleRef} className="message-bubble" onContextMenu={onContextMenu}>
         <MarkdownText content={content} />
       </div>
       {menu && <MarkdownContextMenu menu={menu} onClose={() => setMenu(null)} />}
