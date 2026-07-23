@@ -109,7 +109,7 @@ select {
   width: 100%;
   padding: 8px 10px;
   border: none;
-  border-radius: 10px;
+  border-radius: 8px;
   background: transparent;
   color: var(--text-primary);
   cursor: pointer;
@@ -126,8 +126,8 @@ select {
   background: linear-gradient(
     90deg,
     rgba(255, 255, 255, 0.1) 0%,
-    rgba(255, 255, 255, 0.05) 55%,
-    rgba(255, 255, 255, 0) 100%
+    rgba(255, 255, 255, 0.06) 72%,
+    rgba(255, 255, 255, 0.02) 100%
   );
 }
 
@@ -140,8 +140,8 @@ select {
   background: linear-gradient(
     90deg,
     rgba(255, 255, 255, 0.14) 0%,
-    rgba(255, 255, 255, 0.07) 55%,
-    rgba(255, 255, 255, 0) 100%
+    rgba(255, 255, 255, 0.09) 72%,
+    rgba(255, 255, 255, 0.04) 100%
   );
 }
 
@@ -265,7 +265,7 @@ select {
   display: flex;
   align-items: center;
   gap: 2px;
-  border-radius: 10px;
+  border-radius: 8px;
   position: relative;
   min-width: 0;
 }
@@ -274,8 +274,8 @@ select {
   background: linear-gradient(
     90deg,
     rgba(255, 255, 255, 0.1) 0%,
-    rgba(255, 255, 255, 0.05) 55%,
-    rgba(255, 255, 255, 0) 100%
+    rgba(255, 255, 255, 0.06) 72%,
+    rgba(255, 255, 255, 0.02) 100%
   );
 }
 
@@ -283,8 +283,8 @@ select {
   background: linear-gradient(
     90deg,
     rgba(255, 255, 255, 0.14) 0%,
-    rgba(255, 255, 255, 0.07) 55%,
-    rgba(255, 255, 255, 0) 100%
+    rgba(255, 255, 255, 0.09) 72%,
+    rgba(255, 255, 255, 0.04) 100%
   );
 }
 
