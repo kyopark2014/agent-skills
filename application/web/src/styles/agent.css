@@ -48,7 +48,12 @@ select {
 .sidebar {
   width: var(--sidebar-width);
   min-width: var(--sidebar-width);
-  background: var(--bg-secondary);
+  background: linear-gradient(
+    180deg,
+    #2a2a2a 0%,
+    var(--bg-secondary) 28%,
+    #141414 100%
+  );
   border-right: 1px solid var(--border);
   display: flex;
   flex-direction: column;
@@ -104,7 +109,7 @@ select {
   width: 100%;
   padding: 8px 10px;
   border: none;
-  border-radius: 8px;
+  border-radius: 10px;
   background: transparent;
   color: var(--text-primary);
   cursor: pointer;
@@ -118,7 +123,12 @@ select {
 
 .new-task-btn:hover,
 .sidebar-menu-btn:hover:not(:disabled) {
-  background: var(--bg-hover);
+  background: linear-gradient(
+    90deg,
+    rgba(255, 255, 255, 0.1) 0%,
+    rgba(255, 255, 255, 0.05) 55%,
+    rgba(255, 255, 255, 0) 100%
+  );
 }
 
 .sidebar-menu-btn:disabled {
@@ -127,7 +137,12 @@ select {
 }
 
 .sidebar-menu-btn.is-active {
-  background: var(--bg-hover);
+  background: linear-gradient(
+    90deg,
+    rgba(255, 255, 255, 0.14) 0%,
+    rgba(255, 255, 255, 0.07) 55%,
+    rgba(255, 255, 255, 0) 100%
+  );
 }
 
 .sidebar-icon {
@@ -250,14 +265,27 @@ select {
   display: flex;
   align-items: center;
   gap: 2px;
-  border-radius: 8px;
+  border-radius: 10px;
   position: relative;
   min-width: 0;
 }
 
-.task-row:hover,
+.task-row:hover {
+  background: linear-gradient(
+    90deg,
+    rgba(255, 255, 255, 0.1) 0%,
+    rgba(255, 255, 255, 0.05) 55%,
+    rgba(255, 255, 255, 0) 100%
+  );
+}
+
 .task-row.active {
-  background: var(--bg-tertiary);
+  background: linear-gradient(
+    90deg,
+    rgba(255, 255, 255, 0.14) 0%,
+    rgba(255, 255, 255, 0.07) 55%,
+    rgba(255, 255, 255, 0) 100%
+  );
 }
 
 .task-item {
