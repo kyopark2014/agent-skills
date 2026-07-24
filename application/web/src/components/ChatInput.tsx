@@ -60,21 +60,26 @@ function collectClipboardImages(clipboardData: DataTransfer | null): File[] {
   const files: File[] = [];
   const seen = new Set<string>();
 
+  // Clipboard File objects for the same paste often differ in name/lastModified
+  // between items and files, so dedupe by size+type only.
   const pushUnique = (file: File) => {
-    const key = `${file.name}:${file.size}:${file.type}:${file.lastModified}`;
+    const key = `${file.size}:${file.type || "image/png"}`;
     if (seen.has(key)) return;
     seen.add(key);
     files.push(normalizeImageFile(file));
   };
 
+  // Prefer items; files usually mirrors the same image with different metadata.
   for (const item of Array.from(clipboardData.items ?? [])) {
     if (!item.type.startsWith("image/")) continue;
     const blob = item.getAsFile();
     if (blob) pushUnique(blob);
   }
 
-  for (const file of Array.from(clipboardData.files ?? [])) {
-    if (isImageFile(file)) pushUnique(file);
+  if (files.length === 0) {
+    for (const file of Array.from(clipboardData.files ?? [])) {
+      if (isImageFile(file)) pushUnique(file);
+    }
   }
 
   return files;
