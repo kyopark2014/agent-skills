@@ -1250,38 +1250,16 @@ def build_human_message_with_files(prompt: str, files: list | None = None) -> Hu
     return HumanMessage(content=content_blocks)
 
 
-def summarize_image(image_content, prompt):
+def summarize_image(image_content: bytes, prompt: str) -> str:
     img_base64, _mime = _prepare_image_base64(image_content)
 
-    logger.info("status: 이미지에서 텍스트를 추출합니다.")
-    text = extract_text(img_base64)
-    logger.info(f"extracted text: {text}")
+    logger.info("이미지의 내용을 분석합니다.")
+    result = summary_image(img_base64, prompt)
 
-    if text.find("<result>") != -1:
-        extracted_text = text[text.find("<result>") + 8 : text.find("</result>")]
-    else:
-        extracted_text = text
+    summary = result[result.find("<result>") + 8 : result.find("</result>")]
+    logger.info(f"image summary: {summary}")
 
-    logger.info(f"status: ### 추출된 텍스트\n\n{extracted_text}")
-    logger.info("status: 이미지의 내용을 분석합니다.")
-
-    image_summary = summary_image(img_base64, prompt)
-
-    if image_summary.find("<result>") != -1:
-        image_summary = image_summary[
-            image_summary.find("<result>") + 8 : image_summary.find("</result>")
-        ]
-    logger.info(f"image summary: {image_summary}")
-
-    if extracted_text and len(extracted_text.strip()) > 10 and "추출하지 못" not in extracted_text:
-        contents = (
-            f"## 이미지 분석\n\n{image_summary}\n\n"
-            f"## 추출된 텍스트\n\n{extracted_text}"
-        )
-    else:
-        contents = f"## 이미지 분석\n\n{image_summary}"
-    logger.info(f"image contents: {contents}")
-    return contents
+    return summary
 
 
 def _file_name_from_ref(file_ref: str) -> str:
@@ -1307,7 +1285,11 @@ def get_summary_of_uploaded_file(file_ref: str, prompt: str = "") -> str:
 
     if file_type in ("png", "jpeg", "jpg", "webp", "gif"):
         _name, image_content = _load_image_bytes_from_ref(file_ref)
-        return summarize_image(image_content, prompt or "")
+
+        image_summary_prompt = f"사용자의 요청을 참조하여 이미지의 내용을 분석한 후에 markdown 포맷으로 자세히 설명해주세요. 사용자 요청: <user_request>{prompt}</user_request>"
+        logger.info(f"image_summary_prompt: {image_summary_prompt}")
+
+        return summarize_image(image_content, image_summary_prompt)
 
     return f"지원하지 않는 파일 형식입니다: {file_type or '(unknown)'}"
 
