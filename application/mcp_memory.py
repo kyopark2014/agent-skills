@@ -47,16 +47,34 @@ bedrock_agent_core_client = boto3.client(
     region_name=bedrock_region
 )
 
-def _format_namespace(namespace_template: str, actor_id: str, session_id: str = "", strategy_id: str = "") -> str:
-    """Format a strategy namespace template with available identifiers."""
+def _format_namespace_for_search(
+    namespace_template: str,
+    actor_id: str,
+    strategy_id: str = "",
+) -> str:
+    """
+    Format a strategy namespace template for retrieve/list.
+
+    AgentCore Memory matches namespace as a prefix. Summary strategies store records
+    under /users/{actorId}/sessions/{sessionId}, but recall must not pin a single
+    (often ephemeral) sessionId — search /users/{actorId}/sessions so all sessions
+    for this actor are included.
+    """
+    template = (namespace_template or "").strip()
+    if not template:
+        return ""
+
+    # Session-scoped templates → actor-level sessions prefix (prefix match).
+    if "{sessionId}" in template:
+        return f"/users/{actor_id}/sessions"
+
     try:
-        return namespace_template.format(
+        return template.format(
             actorId=actor_id,
-            sessionId=session_id or actor_id,
             memoryStrategyId=strategy_id,
         )
     except (KeyError, ValueError, IndexError):
-        return namespace_template
+        return template
 
 def _namespace_belongs_to_actor(namespace: str, actor_id: str) -> bool:
     """
@@ -67,10 +85,16 @@ def _namespace_belongs_to_actor(namespace: str, actor_id: str) -> bool:
         return False
     if namespace == f"/users/{actor_id}/preferences":
         return True
+    if namespace == f"/users/{actor_id}/facts":
+        return True
+    if namespace == f"/users/{actor_id}/sessions":
+        return True
+    if namespace.startswith(f"/users/{actor_id}/sessions/"):
+        return True
     if namespace == f"/users/{actor_id}":
         return True
     # Allow nested paths that include this actor as a path segment
-    # e.g. /users/{actorId}/preferences after formatting
+    # e.g. /users/{actorId}/preferences|/facts|/sessions/... after formatting
     parts = [p for p in namespace.split("/") if p]
     return actor_id in parts
 
@@ -82,9 +106,13 @@ def get_search_namespaces(
 ) -> List[str]:
     """
     Build namespaces to search for the current actor only.
-    Always includes the user profile namespace; strategy namespaces are included
+    Always includes the user preference namespace; strategy namespaces are included
     only when they resolve to this actor (literal /users/<other> are skipped).
+
+    Summary uses /users/{actorId}/sessions (actor prefix), not a single sessionId.
+    session_id is unused for search (kept for call-site compatibility).
     """
+    _ = session_id  # intentionally ignored: do not bind Summary search to an ephemeral session
     namespaces: Set[str] = set()
 
     if default_namespace and _namespace_belongs_to_actor(default_namespace, actor_id):
@@ -94,16 +122,18 @@ def get_search_namespaces(
             f"Ignoring default_namespace not owned by actor {actor_id}: {default_namespace}"
         )
 
-    # Always include user profile preference namespace
+    # Leaf preference path — do NOT use bare /users/{actorId} (prefixes /facts and /sessions)
     user_profile_namespace = f"/users/{actor_id}/preferences"
     namespaces.add(user_profile_namespace)
+    # Summary prefix — all sessions for this actor (AgentCore namespace prefix match)
+    namespaces.add(f"/users/{actor_id}/sessions")
 
     try:
         strategies = agentcore_memory.load_memory_strategy(memory_id)
         for strategy in strategies or []:
             strategy_id = strategy.get("strategyId") or strategy.get("id") or ""
             for ns_template in strategy.get("namespaces") or []:
-                formatted = _format_namespace(ns_template, actor_id, session_id, strategy_id)
+                formatted = _format_namespace_for_search(ns_template, actor_id, strategy_id)
                 if not formatted:
                     continue
                 if not _namespace_belongs_to_actor(formatted, actor_id):
@@ -239,7 +269,7 @@ def recall_memory(
         # Execute the appropriate action
         action = (action or "retrieve").strip().lower()
         if action == "retrieve" and not (query or "").strip():
-            query = "집 회사 주소 통근 교통 선호 프로필 user preferences home office commute"
+            query = "집 회사 주소 통근 교통 선호 프로필 요약 사실 user preferences home office commute summary facts"
             logger.info(f"retrieve query was empty; using default profile query: {query}")
 
         logger.info(f"###### action: {action} ######")
@@ -247,6 +277,7 @@ def recall_memory(
             if action == "retrieve":
                 contents = []
                 seen = set()
+                errors = []
                 for ns in search_namespaces:
                     try:
                         response = retrieve_memory_records(
@@ -263,6 +294,19 @@ def recall_memory(
                                 contents.append(content)
                     except Exception as ns_error:
                         logger.warning(f"Retrieve failed for namespace {ns}: {ns_error}")
+                        errors.append(f"{ns}: {ns_error}")
+
+                if not contents and errors:
+                    return {
+                        "status": "error",
+                        "content": [{
+                            "text": (
+                                "Memory retrieve failed for all namespaces "
+                                f"(often IAM AccessDenied on RetrieveMemoryRecords): "
+                                f"{'; '.join(errors)}"
+                            )
+                        }],
+                    }
 
                 return {
                     "text": contents
@@ -270,6 +314,7 @@ def recall_memory(
             elif action == "list":
                 relevant_data = {"memoryRecordSummaries": []}
                 seen_ids = set()
+                errors = []
                 for ns in search_namespaces:
                     try:
                         response = list_memory_records(
@@ -290,6 +335,19 @@ def recall_memory(
                                 relevant_data["nextToken"] = response["nextToken"]
                     except Exception as ns_error:
                         logger.warning(f"List failed for namespace {ns}: {ns_error}")
+                        errors.append(f"{ns}: {ns_error}")
+
+                if not relevant_data["memoryRecordSummaries"] and errors:
+                    return {
+                        "status": "error",
+                        "content": [{
+                            "text": (
+                                "Memory list failed for all namespaces "
+                                f"(often IAM AccessDenied on ListMemoryRecords): "
+                                f"{'; '.join(errors)}"
+                            )
+                        }],
+                    }
 
                 return {
                     "status": "success",
