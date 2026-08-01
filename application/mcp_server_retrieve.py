@@ -24,7 +24,8 @@ try:
         name = "mcp-retrieve",
         instructions=(
             "You are a helpful assistant. "
-            "You retrieve documents in RAG."
+            "You retrieve documents in RAG. "
+            "Results are scoped to the current user's uploaded documents only."
         ),
     )
     logger.info("MCP server initialized successfully")
@@ -39,6 +40,7 @@ except Exception as e:
 def retrieve(keyword: str) -> str:
     """
     Query the keyword using RAG based on the knowledge base.
+    Only returns documents owned by the current user (metadata owner filter).
     keyword: the keyword to query
     return: the result of query
     """

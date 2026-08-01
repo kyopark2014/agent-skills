@@ -471,6 +471,53 @@ def update_rag_info():
 if not knowledge_base_id or not data_source_id:
     knowledge_base_id, data_source_id = update_rag_info()
 
+ACTIVE_INGESTION_STATUSES = ("STARTING", "IN_PROGRESS")
+
+
+def get_active_ingestion_job() -> dict | None:
+    """Return an in-flight ingestion job if Knowledge Base sync is already running."""
+    if not knowledge_base_id or not data_source_id:
+        logger.error("knowledge_base_id or data_source_id is not configured")
+        return None
+
+    try:
+        bedrock_client = boto3.client(
+            service_name="bedrock-agent",
+            region_name=region,
+        )
+        for status in ACTIVE_INGESTION_STATUSES:
+            response = bedrock_client.list_ingestion_jobs(
+                knowledgeBaseId=knowledge_base_id,
+                dataSourceId=data_source_id,
+                filters=[
+                    {
+                        "attribute": "STATUS",
+                        "operator": "EQ",
+                        "values": [status],
+                    }
+                ],
+                maxResults=1,
+                sortBy={
+                    "attribute": "STARTED_AT",
+                    "order": "DESCENDING",
+                },
+            )
+            summaries = response.get("ingestionJobSummaries") or []
+            if not summaries:
+                continue
+            job = summaries[0]
+            logger.info("Active ingestion job found: %s", job)
+            return {
+                "ingestion_job_id": job.get("ingestionJobId"),
+                "status": job.get("status"),
+                "started_at": str(job["startedAt"]) if job.get("startedAt") else None,
+            }
+        return None
+    except Exception:
+        logger.error("Error listing ingestion jobs: %s", traceback.format_exc())
+        raise
+
+
 def sync_data_source():
     """Start a Knowledge Base ingestion job for the configured data source."""
     if not knowledge_base_id or not data_source_id:
@@ -497,8 +544,31 @@ def sync_data_source():
         return None
 
 
-def upload_to_s3(file_bytes: bytes, file_name: str) -> dict | None:
-    """Upload a file to S3 under docs/ (or images/) and return upload metadata."""
+def _sanitize_s3_user_segment(user_id: str | None) -> str | None:
+    """Return a safe single path segment for per-user S3 folders, or None."""
+    if not user_id:
+        return None
+    # Collapse path separators so user_id cannot escape the intended prefix.
+    segment = (
+        str(user_id)
+        .strip()
+        .replace("/", "_")
+        .replace("\\", "_")
+        .replace("..", "_")
+    )
+    return segment or None
+
+
+def upload_to_s3(
+    file_bytes: bytes,
+    file_name: str,
+    user_id: str | None = None,
+) -> dict | None:
+    """Upload a file to S3 under docs/ (or images/) and return upload metadata.
+
+    When ``user_id`` is provided, the object key becomes
+    ``{prefix}/{user_id}/{file_name}`` so each user has a separate folder.
+    """
     if not s3_bucket:
         logger.error("s3_bucket is not configured")
         return None
@@ -509,7 +579,13 @@ def upload_to_s3(file_bytes: bytes, file_name: str) -> dict | None:
         logger.info("content_type: %s", content_type)
 
         prefix = "images" if content_type.startswith("image/") else "docs"
-        s3_key = f"{prefix}/{file_name}"
+        user_segment = _sanitize_s3_user_segment(user_id)
+        if user_segment:
+            s3_key = f"{prefix}/{user_segment}/{file_name}"
+            relative_url_path = f"{prefix}/{parse.quote(user_segment)}/{parse.quote(file_name)}"
+        else:
+            s3_key = f"{prefix}/{file_name}"
+            relative_url_path = f"{prefix}/{parse.quote(file_name)}"
         user_meta = {"content_type": content_type}
 
         put_params = {
@@ -528,7 +604,7 @@ def upload_to_s3(file_bytes: bytes, file_name: str) -> dict | None:
 
         url = None
         if sharing_url:
-            url = f"{sharing_url.rstrip('/')}/{prefix}/{parse.quote(file_name)}"
+            url = f"{sharing_url.rstrip('/')}/{relative_url_path}"
 
         return {
             "file_name": file_name,

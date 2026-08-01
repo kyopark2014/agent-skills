@@ -4,7 +4,7 @@ import os
 from fastapi import APIRouter, File, HTTPException, Request, UploadFile
 
 from application.api.routes_auth import require_user_id
-from application import utils
+from application.services.rag_service import RagServiceError, ingest_rag_upload
 
 logger = logging.getLogger("routes_rag")
 
@@ -44,38 +44,14 @@ def _validate_filename(filename: str) -> str:
 
 @router.post("/upload")
 async def upload_to_rag(request: Request, file: UploadFile = File(...)):
-    require_user_id(request)
+    user_id = require_user_id(request)
 
     file_name = _validate_filename(file.filename or "")
     file_bytes = await file.read()
     if not file_bytes:
         raise HTTPException(status_code=400, detail="Empty file")
 
-    upload_result = utils.upload_to_s3(file_bytes, file_name)
-    if not upload_result:
-        raise HTTPException(status_code=500, detail="Failed to upload file to S3")
-
-    sync_result = utils.sync_data_source()
-    if not sync_result:
-        raise HTTPException(
-            status_code=500,
-            detail="File uploaded but Knowledge Base sync failed",
-        )
-
-    logger.info(
-        "RAG upload complete: file=%s s3_key=%s job=%s",
-        file_name,
-        upload_result.get("s3_key"),
-        sync_result.get("ingestion_job_id"),
-    )
-
-    return {
-        "ok": True,
-        "file_name": upload_result["file_name"],
-        "s3_key": upload_result["s3_key"],
-        "url": upload_result.get("url"),
-        "sync": sync_result,
-        "message": (
-            f'"{file_name}" was uploaded to S3 and Knowledge Base sync was started.'
-        ),
-    }
+    try:
+        return ingest_rag_upload(file_bytes, file_name, user_id=user_id)
+    except RagServiceError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
