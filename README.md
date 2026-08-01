@@ -332,6 +332,11 @@ Bedrock Knowledge Base는 문서와 **같은 경로**에 `{원본파일명}.meta
 | `created_time` | `STRING` | UTC ISO 8601 (`...Z`) | 시각 포함 |
 | `is_confidential` | `BOOLEAN` | `false` | 공유/비기밀 문서 구분용 |
 
+실제 OpenSearch에 들어간 데이터는 아래와 같습니다. owner, team, created_time, is_confidential이 meta로 등록됩니다.
+
+<img width="1062" height="797" alt="image" src="https://github.com/user-attachments/assets/fd0b9b3c-1978-4827-be17-eccecd4e417a" />
+
+
 ### 현재 적용된 검색 필터
 
 `mcp_retrieve.retrieve()`는 MCP 프로세스 env의 `AGENTCORE_USER_ID`를 읽고, 없으면 검색을 거부합니다.  
