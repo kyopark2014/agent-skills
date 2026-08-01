@@ -5,6 +5,7 @@ import { ConfigDrawer } from "./ConfigDrawer";
 import { LlmGatewayModal } from "./LlmGatewayModal";
 import { TaskListItem } from "./TaskListItem";
 import {
+  DashboardIcon,
   GuardrailIcon,
   LlmGatewayIcon,
   LogoutIcon,
@@ -33,6 +34,7 @@ interface Props {
   onPatchTask: (taskId: string, patch: Partial<Task>) => void;
   onDeleteTask: (taskId: string) => void;
   onLogout: () => void;
+  onOpenDashboard?: () => void;
   onRefreshConfig?: () => Promise<AppConfig | void> | AppConfig | void;
 }
 
@@ -51,6 +53,7 @@ export function Sidebar({
   onPatchTask,
   onDeleteTask,
   onLogout,
+  onOpenDashboard,
   onRefreshConfig,
 }: Props) {
   const skillBtnRef = useRef<HTMLButtonElement>(null);
@@ -136,6 +139,13 @@ export function Sidebar({
           <NewTaskIcon className="sidebar-icon" />
           <span>New task</span>
         </button>
+
+        {config?.is_admin && onOpenDashboard && (
+          <button type="button" className="sidebar-menu-btn" onClick={onOpenDashboard}>
+            <DashboardIcon className="sidebar-icon" />
+            <span>Dashboard</span>
+          </button>
+        )}
 
         <div className="task-list">
           {pinnedTasks.length > 0 && (
@@ -272,6 +282,8 @@ export function Sidebar({
       {llmGatewayOpen && activeTask && (
         <LlmGatewayModal
           enabled={llmGatewayEnabled}
+          isAdmin={Boolean(config?.is_admin)}
+          gatewayConfigured={Boolean(config?.llm_gateway_configured)}
           onConfirmEnable={async (uiModels) => {
             const refreshed = await onRefreshConfig?.();
             const gatewayList =

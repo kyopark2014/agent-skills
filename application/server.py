@@ -13,6 +13,7 @@ from application.api.routes_tasks import router as tasks_router
 from application.api.routes_chat import router as chat_router
 from application.api.routes_files import router as files_router
 from application.api.routes_rag import router as rag_router
+from application.api.routes_admin import router as admin_router
 from application.task_store import init_db
 from application.task_store_persistence import (
     flush_persist,
@@ -58,6 +59,7 @@ app.include_router(tasks_router)
 app.include_router(chat_router)
 app.include_router(files_router)
 app.include_router(rag_router)
+app.include_router(admin_router)
 
 
 @app.get("/api/health")

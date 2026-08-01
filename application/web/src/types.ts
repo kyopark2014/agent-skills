@@ -34,16 +34,65 @@ export interface Message {
 
 export interface AppConfig {
   projectName: string;
+  google_client_id?: string;
+  local_auth_bypass?: boolean;
+  is_admin?: boolean;
   skills: string[];
   mcp_servers: string[];
   models: string[];
-  /** UI model names available on the configured LLM Gateway (/v1/models). */
   gateway_models?: string[];
   default_model: string;
   default_gateway_model?: string;
   default_skills: string[];
   default_mcp_servers: string[];
   llm_gateway_configured?: boolean;
+}
+
+export interface DashboardSummary {
+  total_users: number;
+  google_users: number;
+  legacy_users: number;
+  total_tasks: number;
+  total_messages: number;
+  total_logins: number;
+  logins_today: number;
+  active_users_today: number;
+  logins_7d: number;
+  active_users_7d: number;
+}
+
+export interface DashboardUser {
+  user_id: string;
+  task_count: number;
+  message_count: number;
+  login_count: number;
+  first_seen?: string | null;
+  last_active?: string | null;
+  last_login?: string | null;
+  auth_methods: string[];
+  is_google: boolean;
+}
+
+export interface DashboardLogin {
+  id: string;
+  user_id: string;
+  method: string;
+  name?: string | null;
+  picture?: string | null;
+  logged_at: string;
+}
+
+export interface DashboardDailyLogin {
+  date: string;
+  logins: number;
+  unique_users: number;
+}
+
+export interface DashboardStats {
+  summary: DashboardSummary;
+  users: DashboardUser[];
+  recent_logins: DashboardLogin[];
+  daily_logins: DashboardDailyLogin[];
 }
 
 export interface StreamEvent {

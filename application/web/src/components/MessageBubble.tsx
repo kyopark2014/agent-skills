@@ -1,7 +1,6 @@
 import { useEffect, useRef, useState, type MouseEvent } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { copyTextToClipboard } from "../copyToClipboard";
 import type { Message, ToolEvent } from "../types";
 import { ToolCallCard } from "./ToolCallCard";
 
@@ -62,7 +61,38 @@ function filterSupersededTextEvents(events: ToolEvent[], content: string): ToolE
 }
 
 function MarkdownText({ content }: { content: string }) {
-  return <ReactMarkdown remarkPlugins={[remarkGfm]}>{content}</ReactMarkdown>;
+  return (
+    <ReactMarkdown
+      remarkPlugins={[remarkGfm]}
+      components={{
+        a: ({ href, children, ...props }) => (
+          <a href={href} target="_blank" rel="noopener noreferrer" {...props}>
+            {children}
+          </a>
+        ),
+      }}
+    >
+      {content}
+    </ReactMarkdown>
+  );
+}
+
+async function copyTextToClipboard(text: string): Promise<void> {
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(text);
+    return;
+  }
+
+  // Fallback for older browsers / non-secure contexts
+  const textarea = document.createElement("textarea");
+  textarea.value = text;
+  textarea.setAttribute("readonly", "");
+  textarea.style.position = "fixed";
+  textarea.style.left = "-9999px";
+  document.body.appendChild(textarea);
+  textarea.select();
+  document.execCommand("copy");
+  document.body.removeChild(textarea);
 }
 
 const COPY_ICON = (
@@ -141,7 +171,7 @@ function MarkdownContextMenu({
   }, [menu.x, menu.y]);
 
   function handleCopy(text: string) {
-    copyTextToClipboard(text);
+    void copyTextToClipboard(text);
     onClose();
   }
 
@@ -173,6 +203,9 @@ function MarkdownBubble({ content }: { content: string }) {
 
   function onContextMenu(e: MouseEvent<HTMLDivElement>) {
     if (!content.trim()) return;
+    // Let the browser show its native link menu (Open in New Tab, etc.)
+    const target = e.target as HTMLElement | null;
+    if (target?.closest("a[href]")) return;
     e.preventDefault();
     const selectedText = bubbleRef.current
       ? getSelectedTextInElement(bubbleRef.current)

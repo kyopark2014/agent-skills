@@ -172,3 +172,23 @@ export function LogoutIcon({ className }: IconProps) {
     </svg>
   );
 }
+
+export function DashboardIcon({ className }: IconProps) {
+  return (
+    <svg
+      className={className}
+      viewBox="0 0 16 16"
+      aria-hidden="true"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.15"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <path d="M2.5 2.5h4.5v4.5H2.5z" />
+      <path d="M9 2.5h4.5v6H9z" />
+      <path d="M2.5 9h4.5v4.5H2.5z" />
+      <path d="M9 10.5h4.5v3H9z" />
+    </svg>
+  );
+}

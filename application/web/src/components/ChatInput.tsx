@@ -1,6 +1,6 @@
 import {
   ClipboardEvent,
-  DragEvent,
+  CompositionEvent,
   FormEvent,
   KeyboardEvent,
   useEffect,
@@ -9,16 +9,28 @@ import {
   useState,
 } from "react";
 import { createPortal } from "react-dom";
-import { api } from "../api";
+import {
+  isImageFile,
+  collectClipboardImages,
+  useFileUpload,
+} from "../hooks/useFileUpload";
 
-interface AttachedImage {
-  url: string;
-  name: string;
-  previewUrl: string;
+interface QueuedMessage {
+  id: string;
+  text: string;
+  files: string[];
 }
 
 interface Props {
   disabled?: boolean;
+  /** True while waiting for an assistant response (shows stop icon + progress animation). */
+  waiting?: boolean;
+  queuedMessages?: QueuedMessage[];
+  queuePaused?: boolean;
+  onRemoveQueued?: (id: string) => void;
+  onSteerQueued?: (id: string) => void;
+  onResumeQueue?: () => void;
+  onStop?: () => void;
   onSend: (text: string, files?: string[]) => void;
   onRagUploadComplete?: (message: string) => void;
 }
@@ -28,64 +40,20 @@ const RAG_ACCEPT =
 const IMAGE_ACCEPT = "image/png,image/jpeg,image/webp,image/gif,.png,.jpg,.jpeg,.webp,.gif";
 const MIN_INPUT_HEIGHT = 24;
 const MAX_INPUT_HEIGHT = 160;
+const MENU_VERTICAL_OFFSET = 8; // gap between the input box and the popup menu above it
 
-function extensionFromMime(mime: string): string {
-  if (mime === "image/jpeg") return ".jpg";
-  if (mime === "image/webp") return ".webp";
-  if (mime === "image/gif") return ".gif";
-  return ".png";
-}
-
-function isImageFile(file: File): boolean {
-  if (file.type.startsWith("image/")) return true;
-  return /\.(png|jpe?g|gif|webp)$/i.test(file.name);
-}
-
-function normalizeImageFile(file: File, fallbackName = "pasted_screenshot"): File {
-  if (!isImageFile(file)) return file;
-  const mime = file.type || "image/png";
-  const ext = extensionFromMime(mime);
-  const hasUsefulName =
-    file.name &&
-    file.name !== "image.png" &&
-    file.name !== "image.jpg" &&
-    file.name !== "blob";
-  if (hasUsefulName) return file;
-  return new File([file], `${fallbackName}${ext}`, { type: mime });
-}
-
-function collectClipboardImages(clipboardData: DataTransfer | null): File[] {
-  if (!clipboardData) return [];
-
-  const files: File[] = [];
-  const seen = new Set<string>();
-
-  // Clipboard File objects for the same paste often differ in name/lastModified
-  // between items and files, so dedupe by size+type only.
-  const pushUnique = (file: File) => {
-    const key = `${file.size}:${file.type || "image/png"}`;
-    if (seen.has(key)) return;
-    seen.add(key);
-    files.push(normalizeImageFile(file));
-  };
-
-  // Prefer items; files usually mirrors the same image with different metadata.
-  for (const item of Array.from(clipboardData.items ?? [])) {
-    if (!item.type.startsWith("image/")) continue;
-    const blob = item.getAsFile();
-    if (blob) pushUnique(blob);
-  }
-
-  if (files.length === 0) {
-    for (const file of Array.from(clipboardData.files ?? [])) {
-      if (isImageFile(file)) pushUnique(file);
-    }
-  }
-
-  return files;
-}
-
-export function ChatInput({ disabled, onSend, onRagUploadComplete }: Props) {
+export function ChatInput({
+  disabled,
+  waiting = false,
+  queuedMessages = [],
+  queuePaused = false,
+  onRemoveQueued,
+  onSteerQueued,
+  onResumeQueue,
+  onStop,
+  onSend,
+  onRagUploadComplete,
+}: Props) {
   const [value, setValue] = useState("");
   const [menuOpen, setMenuOpen] = useState(false);
   const [menuPosition, setMenuPosition] = useState<{
@@ -93,13 +61,6 @@ export function ChatInput({ disabled, onSend, onRagUploadComplete }: Props) {
     top: number;
     width: number;
   } | null>(null);
-  const [uploading, setUploading] = useState(false);
-  const [uploadError, setUploadError] = useState<string | null>(null);
-  const [attachments, setAttachments] = useState<AttachedImage[]>([]);
-  const [dragOver, setDragOver] = useState(false);
-  const attachmentsRef = useRef<AttachedImage[]>([]);
-  const uploadingRef = useRef(false);
-  const dragDepthRef = useRef(0);
   const addWrapRef = useRef<HTMLDivElement>(null);
   const menuPortalRef = useRef<HTMLDivElement>(null);
   const addBtnRef = useRef<HTMLButtonElement>(null);
@@ -107,15 +68,25 @@ export function ChatInput({ disabled, onSend, onRagUploadComplete }: Props) {
   const ragInputRef = useRef<HTMLInputElement>(null);
   const imageInputRef = useRef<HTMLInputElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const isComposingRef = useRef(false);
+  const submitAfterCompositionRef = useRef(false);
 
-  attachmentsRef.current = attachments;
-  uploadingRef.current = uploading;
-
-  useEffect(() => {
-    if (!uploadError) return;
-    const timer = window.setTimeout(() => setUploadError(null), 5000);
-    return () => window.clearTimeout(timer);
-  }, [uploadError]);
+  const {
+    uploading,
+    uploadError,
+    attachments,
+    dragOver,
+    isUploading,
+    clearUploadError,
+    uploadImageFiles,
+    uploadRagFile,
+    removeAttachment,
+    clearAttachments,
+    onDragEnter,
+    onDragOver,
+    onDragLeave,
+    onDrop,
+  } = useFileUpload({ disabled });
 
   function adjustInputHeight() {
     const el = textareaRef.current;
@@ -132,22 +103,12 @@ export function ChatInput({ disabled, onSend, onRagUploadComplete }: Props) {
     adjustInputHeight();
   }, [value]);
 
-  useEffect(() => {
-    return () => {
-      for (const item of attachmentsRef.current) {
-        if (item.previewUrl.startsWith("blob:")) {
-          URL.revokeObjectURL(item.previewUrl);
-        }
-      }
-    };
-  }, []);
-
   function updateMenuPosition() {
     const rect = inputWrapRef.current?.getBoundingClientRect();
     if (!rect) return;
     setMenuPosition({
       left: rect.left,
-      top: rect.top - 8,
+      top: rect.top - MENU_VERTICAL_OFFSET,
       width: rect.width,
     });
   }
@@ -182,66 +143,56 @@ export function ChatInput({ disabled, onSend, onRagUploadComplete }: Props) {
     };
   }, [menuOpen]);
 
-  function submit() {
-    const text = value.trim();
+  function submit(textOverride?: string) {
+    const text = (textOverride ?? value).trim();
     const files = attachments.map((item) => item.url);
     if ((!text && files.length === 0) || disabled || uploading) return;
     onSend(text, files);
     setValue("");
-    setAttachments((prev) => {
-      for (const item of prev) {
-        if (item.previewUrl.startsWith("blob:")) {
-          URL.revokeObjectURL(item.previewUrl);
-        }
-      }
-      return [];
-    });
+    clearAttachments();
   }
 
   function onKeyDown(e: KeyboardEvent<HTMLTextAreaElement>) {
-    if (e.key === "Enter" && !e.shiftKey) {
-      e.preventDefault();
-      submit();
+    if (e.key !== "Enter" || e.shiftKey) return;
+    // Korean/CJK IME: Enter confirms composition — do not send mid-compose.
+    // keyCode 229 covers browsers that omit isComposing on the confirming Enter.
+    if (
+      e.nativeEvent.isComposing ||
+      e.keyCode === 229 ||
+      isComposingRef.current
+    ) {
+      submitAfterCompositionRef.current = true;
+      return;
     }
-  }
-
-  function onSubmit(e: FormEvent) {
+    // Some browsers fire a second Enter after 229; compositionend will submit.
+    if (submitAfterCompositionRef.current) {
+      e.preventDefault();
+      return;
+    }
     e.preventDefault();
     submit();
   }
 
-  async function uploadImageFile(file: File) {
-    setUploading(true);
-    setUploadError(null);
-    const previewUrl = URL.createObjectURL(file);
-    try {
-      const result = await api.uploadFile(file);
-      setAttachments((prev) => [
-        ...prev,
-        {
-          url: result.url,
-          name: result.file_name,
-          previewUrl,
-        },
-      ]);
-    } catch (err) {
-      URL.revokeObjectURL(previewUrl);
-      const message = err instanceof Error ? err.message : String(err);
-      setUploadError(message);
-    } finally {
-      setUploading(false);
-    }
+  function onCompositionStart() {
+    isComposingRef.current = true;
   }
 
-  async function uploadImageFiles(files: File[]) {
-    if (files.length === 0 || disabled || uploadingRef.current) return;
-    for (const file of files) {
-      await uploadImageFile(normalizeImageFile(file, "uploaded_image"));
-    }
+  function onCompositionEnd(e: CompositionEvent<HTMLTextAreaElement>) {
+    isComposingRef.current = false;
+    if (!submitAfterCompositionRef.current) return;
+    submitAfterCompositionRef.current = false;
+    // React state can lag behind the DOM after compositionend; use live value.
+    submit(e.currentTarget.value);
+  }
+
+  function onSubmit(e: FormEvent) {
+    e.preventDefault();
+    if (isComposingRef.current || submitAfterCompositionRef.current) return;
+    submit();
   }
 
   async function onPaste(e: ClipboardEvent<HTMLTextAreaElement>) {
-    if (disabled || uploadingRef.current) return;
+    if (disabled || isUploading()) return;
     const imageFiles = collectClipboardImages(e.clipboardData);
     if (imageFiles.length === 0) return;
 
@@ -249,65 +200,15 @@ export function ChatInput({ disabled, onSend, onRagUploadComplete }: Props) {
     await uploadImageFiles(imageFiles);
   }
 
-  function onDragEnter(e: DragEvent<HTMLFormElement>) {
-    if (disabled || uploading) return;
-    if (![...e.dataTransfer.types].includes("Files")) return;
-    e.preventDefault();
-    dragDepthRef.current += 1;
-    setDragOver(true);
-  }
-
-  function onDragOver(e: DragEvent<HTMLFormElement>) {
-    if (disabled || uploading) return;
-    if (![...e.dataTransfer.types].includes("Files")) return;
-    e.preventDefault();
-    e.dataTransfer.dropEffect = "copy";
-  }
-
-  function onDragLeave(e: DragEvent<HTMLFormElement>) {
-    if (![...e.dataTransfer.types].includes("Files") && dragDepthRef.current === 0) {
-      return;
-    }
-    e.preventDefault();
-    dragDepthRef.current = Math.max(0, dragDepthRef.current - 1);
-    if (dragDepthRef.current === 0) setDragOver(false);
-  }
-
-  async function onDrop(e: DragEvent<HTMLFormElement>) {
-    e.preventDefault();
-    dragDepthRef.current = 0;
-    setDragOver(false);
-    if (disabled || uploadingRef.current) return;
-
-    const imageFiles = Array.from(e.dataTransfer.files ?? []).filter(isImageFile);
-    await uploadImageFiles(imageFiles);
-  }
-
-  function removeAttachment(url: string) {
-    setAttachments((prev) => {
-      const next: AttachedImage[] = [];
-      for (const item of prev) {
-        if (item.url === url) {
-          if (item.previewUrl.startsWith("blob:")) {
-            URL.revokeObjectURL(item.previewUrl);
-          }
-          continue;
-        }
-        next.push(item);
-      }
-      return next;
-    });
-  }
-
   function openImageUpload() {
     setMenuOpen(false);
-    setUploadError(null);
+    clearUploadError();
     imageInputRef.current?.click();
   }
 
   function openRagUpload() {
     setMenuOpen(false);
-    setUploadError(null);
+    clearUploadError();
     ragInputRef.current?.click();
   }
 
@@ -320,23 +221,22 @@ export function ChatInput({ disabled, onSend, onRagUploadComplete }: Props) {
   async function onRagFileSelected(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
     e.target.value = "";
-    if (!file || disabled || uploading) return;
-
-    setUploading(true);
-    setUploadError(null);
-    try {
-      const result = await api.uploadToRag(file);
-      onRagUploadComplete?.(result.message);
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      setUploadError(message);
-    } finally {
-      setUploading(false);
-    }
+    if (!file) return;
+    await uploadRagFile(file, onRagUploadComplete);
   }
 
   const inputDisabled = disabled || uploading;
-  const canSend = !inputDisabled && (value.trim().length > 0 || attachments.length > 0);
+  const canSend =
+    !inputDisabled && (value.trim().length > 0 || attachments.length > 0);
+  const showInputSteer = queuedMessages.length > 0 && canSend;
+
+  function onLeftButtonClick() {
+    if (showInputSteer) {
+      submit();
+      return;
+    }
+    setMenuOpen((open) => !open);
+  }
 
   const menu =
     menuOpen && menuPosition
@@ -433,6 +333,90 @@ export function ChatInput({ disabled, onSend, onRagUploadComplete }: Props) {
           업로드 중...
         </div>
       )}
+      {queuedMessages.length > 0 && (
+        <div
+          className={`chat-queue-panel${queuePaused ? " is-paused" : ""}`}
+          aria-label="대기 중인 메시지"
+        >
+          {queuePaused && (
+            <div className="chat-queue-header">
+              <span className="chat-queue-paused-label">
+                Queue paused because you interrupted
+              </span>
+              <button
+                type="button"
+                className="chat-queue-resume"
+                onClick={() => onResumeQueue?.()}
+              >
+                Resume
+              </button>
+            </div>
+          )}
+          <ul className="chat-queue">
+            {queuedMessages.map((item) => {
+              const label =
+                item.text.trim() ||
+                (item.files.length > 0
+                  ? `첨부 ${item.files.length}개`
+                  : "메시지");
+              return (
+                <li key={item.id} className="chat-queue-item">
+                  <span className="chat-queue-text" title={label}>
+                    {label}
+                  </span>
+                  <div className="chat-queue-actions">
+                    <button
+                      type="button"
+                      className="chat-queue-steer"
+                      title="진행 중인 응답을 멈추고 이 메시지로 전환"
+                      aria-label={`이 메시지로 전환: ${label}`}
+                      onClick={() => onSteerQueued?.(item.id)}
+                    >
+                      <svg
+                        width="14"
+                        height="14"
+                        viewBox="0 0 16 16"
+                        aria-hidden="true"
+                      >
+                        <path
+                          d="M5 3.5 2.5 6 5 8.5M2.5 6H10a3.5 3.5 0 0 1 0 7H8"
+                          fill="none"
+                          stroke="currentColor"
+                          strokeWidth="1.4"
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                        />
+                      </svg>
+                    </button>
+                    <button
+                      type="button"
+                      className="chat-queue-remove"
+                      aria-label={`대기 메시지 삭제: ${label}`}
+                      onClick={() => onRemoveQueued?.(item.id)}
+                    >
+                      <svg
+                        width="14"
+                        height="14"
+                        viewBox="0 0 16 16"
+                        aria-hidden="true"
+                      >
+                        <path
+                          d="M5.5 3.5h5M6.5 3.5V2.75A.75.75 0 0 1 7.25 2h1.5a.75.75 0 0 1 .75.75V3.5m2 0V13a1 1 0 0 1-1 1H5.5a1 1 0 0 1-1-1V3.5h8ZM7 6.5v5M9 6.5v5"
+                          fill="none"
+                          stroke="currentColor"
+                          strokeWidth="1.2"
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                        />
+                      </svg>
+                    </button>
+                  </div>
+                </li>
+              );
+            })}
+          </ul>
+        </div>
+      )}
       <form
         className={`chat-input-wrap${dragOver ? " is-dragover" : ""}`}
         ref={inputWrapRef}
@@ -488,6 +472,8 @@ export function ChatInput({ disabled, onSend, onRagUploadComplete }: Props) {
           disabled={inputDisabled}
           onChange={(e) => setValue(e.target.value)}
           onKeyDown={onKeyDown}
+          onCompositionStart={onCompositionStart}
+          onCompositionEnd={onCompositionEnd}
           onPaste={onPaste}
         />
         <div className="chat-input-toolbar">
@@ -495,39 +481,79 @@ export function ChatInput({ disabled, onSend, onRagUploadComplete }: Props) {
             <button
               ref={addBtnRef}
               type="button"
-              className="chat-add-btn"
-              aria-label="추가"
-              aria-expanded={menuOpen}
+              className={showInputSteer ? "chat-steer-btn" : "chat-add-btn"}
+              aria-label={
+                showInputSteer
+                  ? "진행 중인 응답을 멈추지 않고 대기열에 추가"
+                  : "추가"
+              }
+              title={
+                showInputSteer
+                  ? "진행 중인 응답을 멈추지 않고 대기열에 추가"
+                  : undefined
+              }
+              aria-expanded={showInputSteer ? undefined : menuOpen}
               disabled={inputDisabled}
-              onClick={() => setMenuOpen((open) => !open)}
+              onClick={onLeftButtonClick}
+            >
+              {showInputSteer ? (
+                <svg
+                  width="14"
+                  height="14"
+                  viewBox="0 0 16 16"
+                  aria-hidden="true"
+                >
+                  <path
+                    d="M5 3.5 2.5 6 5 8.5M2.5 6H10a3.5 3.5 0 0 1 0 7H8"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="1.4"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  />
+                </svg>
+              ) : (
+                <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true">
+                  <path
+                    d="M8 3v10M3 8h10"
+                    stroke="currentColor"
+                    strokeWidth="1.5"
+                    strokeLinecap="round"
+                  />
+                </svg>
+              )}
+            </button>
+          </div>
+          {waiting ? (
+            <button
+              className="chat-send-btn is-waiting"
+              type="button"
+              aria-label="응답 중지"
+              aria-busy="true"
+              onClick={() => onStop?.()}
+            >
+              <span className="chat-send-progress" aria-hidden="true" />
+              <span className="chat-send-stop" aria-hidden="true" />
+            </button>
+          ) : (
+            <button
+              className="chat-send-btn"
+              type="submit"
+              aria-label="전송"
+              disabled={!canSend}
             >
               <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true">
                 <path
-                  d="M8 3v10M3 8h10"
+                  d="M8 12.5V3.5M4.5 7 8 3.5 11.5 7"
+                  fill="none"
                   stroke="currentColor"
-                  strokeWidth="1.5"
+                  strokeWidth="1.6"
                   strokeLinecap="round"
+                  strokeLinejoin="round"
                 />
               </svg>
             </button>
-          </div>
-          <button
-            className="chat-send-btn"
-            type="submit"
-            aria-label="전송"
-            disabled={!canSend}
-          >
-            <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true">
-              <path
-                d="M8 12.5V3.5M4.5 7 8 3.5 11.5 7"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="1.6"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-              />
-            </svg>
-          </button>
+          )}
         </div>
       </form>
       {menu}

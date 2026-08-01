@@ -1,4 +1,4 @@
-import type { AppConfig, Message, StreamEvent, Task } from "./types";
+import type { AppConfig, DashboardStats, Message, StreamEvent, Task } from "./types";
 import { uiError, uiLog } from "./debug";
 
 export interface RagUploadResult {
@@ -23,8 +23,8 @@ export interface FileUploadResult {
 
 export interface LlmGatewayConfig {
   url: string;
-  key: string;
   configured: boolean;
+  key_configured?: boolean;
 }
 
 export interface LlmGatewayVerifyResult {
@@ -48,7 +48,16 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   if (!res.ok) {
     const text = await res.text();
     uiError(`api:${method} ${path} failed`, { status: res.status, body: text });
-    throw new Error(text || res.statusText);
+    let message = text || res.statusText;
+    try {
+      const parsed = JSON.parse(text) as { detail?: string | { msg?: string }[] };
+      if (typeof parsed.detail === "string" && parsed.detail) {
+        message = parsed.detail;
+      }
+    } catch {
+      // keep raw text
+    }
+    throw new Error(message);
   }
   if (res.status === 204) {
     uiLog(`api:${method} ${path} -> 204`);
@@ -65,28 +74,42 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 export const api = {
-  getSession: () => request<{ user_id: string } | null>("/api/session"),
-  setSession: (user_id: string) =>
-    request<{ user_id: string }>("/api/session", {
+  getSession: () =>
+    request<{ user_id: string; llm_gateway_ready?: boolean } | null>("/api/session"),
+  setSession: (credential: string) =>
+    request<{
+      user_id: string;
+      name?: string | null;
+      picture?: string | null;
+      llm_gateway_ready?: boolean;
+    }>("/api/session", {
+      method: "POST",
+      body: JSON.stringify({ credential }),
+    }),
+  setSessionWithAccessToken: (access_token: string) =>
+    request<{
+      user_id: string;
+      name?: string | null;
+      picture?: string | null;
+      llm_gateway_ready?: boolean;
+    }>("/api/session", {
+      method: "POST",
+      body: JSON.stringify({ access_token }),
+    }),
+  setLocalSession: (user_id: string) =>
+    request<{ user_id: string; llm_gateway_ready?: boolean }>("/api/session", {
       method: "POST",
       body: JSON.stringify({ user_id }),
     }),
   clearSession: () => request<void>("/api/session", { method: "DELETE" }),
   getConfig: () => request<AppConfig>("/api/config"),
+  getAdminDashboard: () => request<DashboardStats>("/api/admin/dashboard"),
   getLlmGateway: () =>
     request<LlmGatewayConfig>("/api/config/llm-gateway"),
-  verifyLlmGateway: (body: { url: string; key: string }) =>
+  verifyLlmGateway: (body: { url: string; key?: string }) =>
     request<LlmGatewayVerifyResult>("/api/config/llm-gateway/verify", {
       method: "POST",
-      body: JSON.stringify(body),
-    }),
-  patchDefaults: (body: {
-    default_skills?: string[];
-    default_mcp_servers?: string[];
-  }) =>
-    request<{ ok: boolean }>("/api/config/defaults", {
-      method: "PATCH",
-      body: JSON.stringify(body),
+      body: JSON.stringify({ url: body.url, key: body.key ?? "" }),
     }),
   listTasks: () => request<{ tasks: Task[] }>("/api/tasks"),
   createTask: (body: Partial<Task>) =>
@@ -116,7 +139,16 @@ export const api = {
     if (!res.ok) {
       const text = await res.text();
       uiError("rag:upload failed", { status: res.status, body: text });
-      throw new Error(text || res.statusText);
+      let message = text || res.statusText;
+      try {
+        const parsed = JSON.parse(text) as { detail?: string };
+        if (typeof parsed.detail === "string" && parsed.detail) {
+          message = parsed.detail;
+        }
+      } catch {
+        // keep raw text
+      }
+      throw new Error(message);
     }
     const data = (await res.json()) as RagUploadResult;
     uiLog("rag:upload complete", data);
@@ -147,6 +179,7 @@ export const api = {
     taskId: string,
     prompt: string,
     files: string[] = [],
+    signal?: AbortSignal,
   ): AsyncGenerator<StreamEvent> {
     uiLog("chat:stream start", { taskId, prompt, files });
     const res = await fetch(`/api/tasks/${taskId}/chat`, {
@@ -154,11 +187,12 @@ export const api = {
       credentials: "include",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ prompt, files }),
+      signal,
     });
     if (!res.ok || !res.body) {
       const body = await res.text();
       uiError("chat:stream request failed", { status: res.status, body });
-      throw new Error(body);
+      throw new Error("Chat request failed. Please try again.");
     }
 
     const reader = res.body.getReader();
@@ -166,31 +200,43 @@ export const api = {
     let buffer = "";
     let eventCount = 0;
 
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true });
-      const parts = buffer.split("\n\n");
-      buffer = parts.pop() ?? "";
-      for (const part of parts) {
-        const line = part
-          .split("\n")
-          .find((l) => l.startsWith("data:"));
-        if (!line) continue;
-        const payload = line.slice(5).trim();
-        if (!payload) continue;
-        const event = JSON.parse(payload) as StreamEvent;
-        eventCount += 1;
-        if (event.type === "token") {
-          const text = event.data ?? "";
-          uiLog("chat:sse token", { chars: text.length, preview: text.slice(0, 80) });
-        } else if (event.type === "error") {
-          uiError("chat:sse error", event);
-        } else {
-          uiLog(`chat:sse ${event.type}`, event);
+    try {
+      while (true) {
+        if (signal?.aborted) {
+          throw new DOMException("Aborted", "AbortError");
         }
-        yield event;
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const parts = buffer.split("\n\n");
+        buffer = parts.pop() ?? "";
+        for (const part of parts) {
+          const line = part
+            .split("\n")
+            .find((l) => l.startsWith("data:"));
+          if (!line) continue;
+          const payload = line.slice(5).trim();
+          if (!payload) continue;
+          const event = JSON.parse(payload) as StreamEvent;
+          eventCount += 1;
+          if (event.type === "token") {
+            const text = event.data ?? "";
+            uiLog("chat:sse token", { chars: text.length, preview: text.slice(0, 80) });
+          } else if (event.type === "error") {
+            uiError("chat:sse error", event);
+          } else {
+            uiLog(`chat:sse ${event.type}`, event);
+          }
+          yield event;
+        }
       }
+    } catch (err) {
+      try {
+        await reader.cancel();
+      } catch {
+        /* ignore cancel errors */
+      }
+      throw err;
     }
 
     uiLog("chat:stream end", { taskId, eventCount });

@@ -2,14 +2,18 @@ import logging
 import os
 
 import httpx
-from fastapi import APIRouter
+from fastapi import APIRouter, Request
 from pydantic import BaseModel
 
 try:
     from application import utils
+    from application.api.routes_auth import get_optional_user_id, local_auth_bypass_enabled
+    from application.api.routes_admin import is_admin_user
     from application.llm_gateway_models import ui_models_for_gateway_ids
 except ImportError:
     import utils
+    from routes_auth import get_optional_user_id, local_auth_bypass_enabled  # type: ignore
+    from routes_admin import is_admin_user  # type: ignore
     from llm_gateway_models import ui_models_for_gateway_ids  # type: ignore
 
 logger = logging.getLogger("routes_config")
@@ -144,7 +148,7 @@ def _gateway_ui_models() -> list[str]:
 
 
 @router.get("")
-def get_config():
+def get_config(request: Request):
     skill_options = load_capability_list("skills.list")
     mcp_options = load_capability_list("mcp.list")
     default_skills, default_mcp = utils.get_initial_tool_defaults()
@@ -162,8 +166,12 @@ def get_config():
         if DEFAULT_GATEWAY_MODEL in gateway_models
         else (gateway_models[0] if gateway_models else DEFAULT_MODEL)
     )
+    session_user = get_optional_user_id(request)
     return {
         "projectName": config.get("projectName", "agent"),
+        "google_client_id": (config.get("google_client_id") or "").strip(),
+        "local_auth_bypass": local_auth_bypass_enabled(request),
+        "is_admin": bool(session_user and is_admin_user(session_user)),
         "skills": skill_options,
         "mcp_servers": mcp_options,
         "models": MODELS,
@@ -183,17 +191,19 @@ def get_llm_gateway():
         "url": url,
         "key": key,
         "configured": bool(url and key),
+        "key_configured": bool(key),
     }
 
 
 @router.post("/llm-gateway/verify")
 def verify_llm_gateway(body: LlmGatewaySettings | None = None):
     """Probe LiteLLM /v1/models with form (or config) values; save on success."""
+    stored_url, stored_key = _llm_gateway_from_config()
     if body is not None:
-        url = (body.url or "").strip().rstrip("/")
-        key = (body.key or "").strip()
+        url = (body.url or "").strip().rstrip("/") or stored_url
+        key = (body.key or "").strip() or stored_key
     else:
-        url, key = _llm_gateway_from_config()
+        url, key = stored_url, stored_key
 
     if not url or not key:
         return {

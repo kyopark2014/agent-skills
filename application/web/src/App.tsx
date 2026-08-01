@@ -1,48 +1,49 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { api } from "./api";
 import { uiError, uiLog } from "./debug";
 import { formatBrandTitle } from "./formatBrandTitle";
 import { useChatStream } from "./hooks/useChatStream";
-import { randomUUID } from "./randomUUID";
+import { appDataService } from "./services/appDataService";
+import {
+  applyTaskTitleFromPrompt,
+  buildFallbackTaskDefaults,
+  buildNewTaskDefaults,
+  sortTasks,
+} from "./services/taskService";
+import {
+  buildDisplayPrompt,
+  buildOptimisticUserMessage,
+  buildPendingAssistantMessage,
+  buildRagUploadNotice,
+  shouldAppendAssistantMessage,
+  stabilizeMessageKeys,
+} from "./services/messageService";
+import { api } from "./api";
 import type { AppConfig, Message, Task } from "./types";
 import { Sidebar } from "./components/Sidebar";
 import { ChatThread } from "./components/ChatThread";
 import { ChatInput } from "./components/ChatInput";
-import { UserIdModal } from "./components/UserIdModal";
+import { GoogleLoginModal } from "./components/GoogleLoginModal";
+import { Dashboard } from "./components/Dashboard";
 
 type DrawerKind = "skill" | "mcp" | "model" | null;
 
-function sortTasks(tasks: Task[]): Task[] {
-  return [...tasks].sort((a, b) => {
-    if (a.pinned !== b.pinned) return a.pinned ? -1 : 1;
-    return new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime();
-  });
-}
+type QueuedMessage = {
+  id: string;
+  text: string;
+  files: string[];
+};
 
-function titleFromPrompt(prompt: string): string {
-  return prompt.trim().slice(0, 50) || "New task";
-}
-
-/** Keep optimistic `pending-*` ids when server rows match, to avoid remount flicker. */
-function stabilizeMessageKeys(prev: Message[], next: Message[]): Message[] {
-  if (prev.length === 0) return next;
-  const used = new Set<string>();
-  return next.map((msg) => {
-    const match = prev.find(
-      (p) =>
-        !used.has(p.id) &&
-        p.id.startsWith("pending") &&
-        p.role === msg.role &&
-        p.content === msg.content,
-    );
-    if (!match) return msg;
-    used.add(match.id);
-    return { ...msg, id: match.id };
-  });
-}
+const MOBILE_BREAKPOINT_PX = 768;
+const BOOT_ERROR_MESSAGE =
+  "Failed to load application configuration. Please try again.";
+const TASK_ERROR_MESSAGE = "Task operation failed. Please try again.";
+const CHAT_ERROR_MESSAGE = "Failed to send message. Please try again.";
+const LOAD_MESSAGES_ERROR_MESSAGE =
+  "Failed to load messages. Please try again.";
 
 export default function App() {
   const [userId, setUserId] = useState<string | null>(null);
+  const [llmGatewayReady, setLlmGatewayReady] = useState(false);
   const [authReady, setAuthReady] = useState(false);
   const [bootError, setBootError] = useState<string | null>(null);
   const [config, setConfig] = useState<AppConfig | null>(null);
@@ -51,51 +52,76 @@ export default function App() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [drawer, setDrawer] = useState<DrawerKind>(null);
   const [sidebarOpen, setSidebarOpen] = useState(false);
-  const { getStreamForTask, sendMessage } = useChatStream();
-  // Survives React Strict Mode remount so empty-list bootstrap creates only one task.
+  const [view, setView] = useState<"chat" | "dashboard">("chat");
+  const [queuedByTaskId, setQueuedByTaskId] = useState<
+    Record<string, QueuedMessage[]>
+  >({});
+  const [queuePausedByTaskId, setQueuePausedByTaskId] = useState<
+    Record<string, boolean>
+  >({});
+  const { getStreamForTask, sendMessage, stopMessage } = useChatStream();
   const emptyTaskBootstrapRef = useRef<Promise<Task> | null>(null);
   const tasksBootstrappedForUserRef = useRef<string | null>(null);
   const activeTaskIdRef = useRef<string | null>(null);
+  const queuedByTaskIdRef = useRef(queuedByTaskId);
+  const pendingSteerRef = useRef<{
+    taskId: string;
+    text: string;
+    files: string[];
+  } | null>(null);
 
   const activeTask = tasks.find((t) => t.id === activeTaskId) ?? null;
   const activeStream = getStreamForTask(activeTaskId);
+  const activeQueuedMessages = activeTaskId
+    ? (queuedByTaskId[activeTaskId] ?? [])
+    : [];
+  const activeQueuePaused = Boolean(
+    activeTaskId && queuePausedByTaskId[activeTaskId],
+  );
 
   useEffect(() => {
     activeTaskIdRef.current = activeTaskId;
   }, [activeTaskId]);
 
+  useEffect(() => {
+    queuedByTaskIdRef.current = queuedByTaskId;
+  }, [queuedByTaskId]);
+
   const loadMessages = useCallback(async (taskId: string) => {
     uiLog("messages:load start", { taskId });
-    const { messages: rows } = await api.getMessages(taskId);
-    uiLog("messages:load complete", { taskId, count: rows.length, roles: rows.map((m) => m.role) });
+    const rows = await appDataService.getMessages(taskId);
+    uiLog("messages:load complete", {
+      taskId,
+      count: rows.length,
+      roles: rows.map((m) => m.role),
+    });
     setMessages((prev) => stabilizeMessageKeys(prev, rows));
   }, []);
 
   const refreshTasks = useCallback(async () => {
-    const { tasks: rows } = await api.listTasks();
-    setTasks(sortTasks(rows));
-    return sortTasks(rows);
+    const rows = await appDataService.listTasksSorted(sortTasks);
+    setTasks(rows);
+    return rows;
   }, []);
 
   const refreshConfig = useCallback(async () => {
-    const cfg = await api.getConfig();
-    setConfig(cfg);
-    return cfg;
+    const latest = await api.getConfig();
+    setConfig(latest);
+    return latest;
   }, []);
 
   useEffect(() => {
     (async () => {
       try {
-        const cfg = await api.getConfig();
-        setConfig(cfg);
-        const session = await api.getSession();
-        const id = session?.user_id?.trim();
-        if (id) {
-          setUserId(id);
+        const boot = await appDataService.loadBootState();
+        setConfig(boot.config);
+        if (boot.userId) {
+          setUserId(boot.userId);
+          setLlmGatewayReady(boot.llmGatewayReady);
         }
       } catch (err) {
         uiError("boot failed", err);
-        setBootError(err instanceof Error ? err.message : String(err));
+        setBootError(BOOT_ERROR_MESSAGE);
       } finally {
         setAuthReady(true);
       }
@@ -119,16 +145,11 @@ export default function App() {
 
       if (rows.length === 0) {
         if (!emptyTaskBootstrapRef.current) {
-          emptyTaskBootstrapRef.current = (async () => {
-            const latest = sortTasks((await api.listTasks()).tasks);
-            if (latest.length > 0) return latest[0];
-            return api.createTask({
-              model_name: config.default_model,
-              skills: config.default_skills,
-              mcp_servers: config.default_mcp_servers,
-              memory_enabled: true,
-            });
-          })();
+          emptyTaskBootstrapRef.current = appDataService.ensureInitialTask(
+            config,
+            sortTasks,
+            llmGatewayReady,
+          );
         }
         const task = await emptyTaskBootstrapRef.current;
         if (cancelled) return;
@@ -147,11 +168,37 @@ export default function App() {
     return () => {
       cancelled = true;
     };
-  }, [userId, config, refreshTasks, loadMessages]);
+  }, [userId, config, refreshTasks, loadMessages, llmGatewayReady]);
+
+  useEffect(() => {
+    if (!llmGatewayReady || !activeTaskId) return;
+    const task = tasks.find((t) => t.id === activeTaskId);
+    if (!task || task.llm_gateway_enabled) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const updated = await appDataService.patchTask(activeTaskId, {
+          llm_gateway_enabled: true,
+        });
+        if (cancelled) return;
+        setTasks((prev) =>
+          sortTasks(prev.map((t) => (t.id === updated.id ? updated : t))),
+        );
+      } catch (err) {
+        uiError("auto-enable LLM Gateway failed", err);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [llmGatewayReady, activeTaskId, tasks]);
 
   useEffect(() => {
     if (activeTaskId) {
-      loadMessages(activeTaskId);
+      loadMessages(activeTaskId).catch((err) => {
+        uiError("task:select failed", err);
+        setBootError(LOAD_MESSAGES_ERROR_MESSAGE);
+      });
     }
   }, [activeTaskId, loadMessages]);
 
@@ -170,36 +217,81 @@ export default function App() {
 
   useEffect(() => {
     function onResize() {
-      if (window.innerWidth > 768) setSidebarOpen(false);
+      if (window.innerWidth > MOBILE_BREAKPOINT_PX) setSidebarOpen(false);
     }
     window.addEventListener("resize", onResize);
     return () => window.removeEventListener("resize", onResize);
   }, []);
 
-  async function handleLogin(id: string) {
-    setBootError(null);
-    try {
-      await api.setSession(id);
-      setUserId(id.trim());
-    } catch (err) {
-      setBootError(err instanceof Error ? err.message : String(err));
-    }
-  }
+  const handleGoogleCredential = useCallback(
+    async (credential: string) => {
+      setBootError(null);
+      try {
+        const session = await appDataService.setSession(credential);
+        setUserId(session.user_id.trim());
+        setLlmGatewayReady(Boolean(session.llm_gateway_ready));
+        await refreshConfig();
+      } catch (err) {
+        setBootError(err instanceof Error ? err.message : String(err));
+      }
+    },
+    [refreshConfig],
+  );
+
+  const handleGoogleAccessToken = useCallback(
+    async (accessToken: string) => {
+      setBootError(null);
+      try {
+        const session =
+          await appDataService.setSessionWithAccessToken(accessToken);
+        setUserId(session.user_id.trim());
+        setLlmGatewayReady(Boolean(session.llm_gateway_ready));
+        await refreshConfig();
+      } catch (err) {
+        setBootError(err instanceof Error ? err.message : String(err));
+      }
+    },
+    [refreshConfig],
+  );
+
+  const handleLocalUserId = useCallback(
+    async (id: string) => {
+      setBootError(null);
+      try {
+        const session = await appDataService.setLocalSession(id.trim());
+        setUserId(session.user_id.trim());
+        setLlmGatewayReady(Boolean(session.llm_gateway_ready));
+        await refreshConfig();
+      } catch (err) {
+        setBootError(err instanceof Error ? err.message : String(err));
+      }
+    },
+    [refreshConfig],
+  );
 
   async function handleLogout() {
     setBootError(null);
     try {
-      await api.clearSession();
+      await appDataService.logout();
     } catch (err) {
       uiError("logout failed", err);
+    }
+    try {
+      window.google?.accounts?.id?.disableAutoSelect();
+    } catch {
+      // GSI may not be loaded yet
     }
     tasksBootstrappedForUserRef.current = null;
     emptyTaskBootstrapRef.current = null;
     setUserId(null);
+    setLlmGatewayReady(false);
     setTasks([]);
     setActiveTaskId(null);
     setMessages([]);
     setDrawer(null);
+    setView("chat");
+    setQueuedByTaskId({});
+    setQueuePausedByTaskId({});
     if (config?.projectName) {
       document.title = formatBrandTitle(config.projectName);
     }
@@ -207,63 +299,226 @@ export default function App() {
 
   async function handleNewTask() {
     if (!config) return;
-    const task = await api.createTask({
-      model_name: activeTask?.model_name ?? config.default_model,
-      skills: activeTask?.skills ?? config.default_skills,
-      mcp_servers: activeTask?.mcp_servers ?? config.default_mcp_servers,
-      guardrail_enabled: activeTask?.guardrail_enabled ?? false,
-      llm_gateway_enabled: activeTask?.llm_gateway_enabled ?? false,
-      memory_enabled: activeTask?.memory_enabled ?? true,
-    });
-    setTasks((prev) => [task, ...prev]);
-    setActiveTaskId(task.id);
-    setMessages([]);
+    try {
+      const defaults = buildNewTaskDefaults(config, activeTask);
+      const task = await appDataService.createTask({
+        ...defaults,
+        llm_gateway_enabled:
+          activeTask?.llm_gateway_enabled ?? llmGatewayReady,
+      });
+      setTasks((prev) => [task, ...prev]);
+      setActiveTaskId(task.id);
+      setMessages([]);
+    } catch (err) {
+      uiError("task:create failed", err);
+      setBootError(TASK_ERROR_MESSAGE);
+    }
   }
 
   async function handleSelectTask(id: string) {
+    setView("chat");
     setActiveTaskId(id);
     setSidebarOpen(false);
-    await loadMessages(id);
+    try {
+      await loadMessages(id);
+    } catch (err) {
+      uiError("task:select failed", err);
+      setBootError(LOAD_MESSAGES_ERROR_MESSAGE);
+    }
   }
 
   async function handlePatchTask(taskId: string, patch: Partial<Task>) {
-    const updated = await api.patchTask(taskId, patch);
-    setTasks((prev) => sortTasks(prev.map((t) => (t.id === updated.id ? updated : t))));
+    try {
+      const updated = await appDataService.patchTask(taskId, patch);
+      setTasks((prev) =>
+        sortTasks(prev.map((t) => (t.id === updated.id ? updated : t))),
+      );
+    } catch (err) {
+      uiError("task:patch failed", err);
+      setBootError(TASK_ERROR_MESSAGE);
+    }
+  }
+
+  function handleRemoveQueued(queueId: string) {
+    if (!activeTaskId) return;
+    const taskId = activeTaskId;
+    const nextList = (queuedByTaskIdRef.current[taskId] ?? []).filter(
+      (item) => item.id !== queueId,
+    );
+    const next = { ...queuedByTaskIdRef.current, [taskId]: nextList };
+    queuedByTaskIdRef.current = next;
+    setQueuedByTaskId(next);
+    if (nextList.length === 0) {
+      clearQueuePaused(taskId);
+    }
+  }
+
+  function clearQueuePaused(taskId: string) {
+    setQueuePausedByTaskId((prev) => {
+      if (!prev[taskId]) return prev;
+      const next = { ...prev };
+      delete next[taskId];
+      return next;
+    });
+  }
+
+  function handleStop() {
+    if (!activeTaskId) return;
+    stopMessage(activeTaskId);
+  }
+
+  async function handleResumeQueue() {
+    if (!activeTaskId) return;
+    const taskId = activeTaskId;
+    if (getStreamForTask(taskId).streaming) return;
+    clearQueuePaused(taskId);
+    await drainQueue(taskId);
+  }
+
+  async function handleSteerQueued(queueId: string) {
+    if (!activeTaskId) return;
+    const taskId = activeTaskId;
+    const queue = queuedByTaskIdRef.current[taskId] ?? [];
+    const item = queue.find((entry) => entry.id === queueId);
+    if (!item) return;
+
+    const rest = queue.filter((entry) => entry.id !== queueId);
+    const updated = { ...queuedByTaskIdRef.current, [taskId]: rest };
+    queuedByTaskIdRef.current = updated;
+    setQueuedByTaskId(updated);
+    clearQueuePaused(taskId);
+    uiLog("chat:queue steer", { taskId, queueId });
+
+    if (getStreamForTask(taskId).streaming) {
+      pendingSteerRef.current = {
+        taskId,
+        text: item.text,
+        files: item.files,
+      };
+      stopMessage(taskId);
+      return;
+    }
+
+    await dispatchSend(taskId, item.text, item.files);
   }
 
   async function handleDeleteTask(taskId: string) {
-    await api.deleteTask(taskId);
-    const rows = await refreshTasks();
-    if (activeTaskId !== taskId) return;
-    if (rows.length > 0) {
-      setActiveTaskId(rows[0].id);
-      await loadMessages(rows[0].id);
-      return;
+    try {
+      await appDataService.deleteTask(taskId);
+      setQueuedByTaskId((prev) => {
+        if (!(taskId in prev)) return prev;
+        const next = { ...prev };
+        delete next[taskId];
+        queuedByTaskIdRef.current = next;
+        return next;
+      });
+      setQueuePausedByTaskId((prev) => {
+        if (!prev[taskId]) return prev;
+        const next = { ...prev };
+        delete next[taskId];
+        return next;
+      });
+      const rows = await refreshTasks();
+      if (activeTaskId !== taskId) return;
+      if (rows.length > 0) {
+        setActiveTaskId(rows[0].id);
+        await loadMessages(rows[0].id);
+        return;
+      }
+      if (!config) return;
+      const task = await appDataService.createTask({
+        ...buildFallbackTaskDefaults(config),
+        llm_gateway_enabled: llmGatewayReady,
+      });
+      setTasks([task]);
+      setActiveTaskId(task.id);
+      setMessages([]);
+    } catch (err) {
+      uiError("task:delete failed", err);
+      setBootError(TASK_ERROR_MESSAGE);
     }
-    if (!config) return;
-    const task = await api.createTask({
-      model_name: config.default_model,
-      skills: config.default_skills,
-      mcp_servers: config.default_mcp_servers,
-      memory_enabled: true,
-    });
-    setTasks([task]);
-    setActiveTaskId(task.id);
-    setMessages([]);
   }
 
   async function handleRagUploadComplete(message: string) {
     if (!activeTaskId) return;
-    const notice: Message = {
-      id: `rag-upload-${randomUUID()}`,
-      task_id: activeTaskId,
-      role: "assistant",
-      content: message,
-      images: [],
-      tool_events: [],
-      created_at: new Date().toISOString(),
-    };
-    setMessages((prev) => [...prev, notice]);
+    setMessages((prev) => [
+      ...prev,
+      buildRagUploadNotice(activeTaskId, message),
+    ]);
+  }
+
+  async function dispatchSend(
+    taskId: string,
+    prompt: string,
+    files: string[] = [],
+  ) {
+    const displayPrompt = buildDisplayPrompt(prompt, files);
+    uiLog("chat:handleSend", { taskId, prompt: displayPrompt, files });
+    if (activeTaskIdRef.current === taskId) {
+      setMessages((prev) => [
+        ...prev,
+        buildOptimisticUserMessage(taskId, displayPrompt, files),
+      ]);
+    }
+    setTasks((prev) => applyTaskTitleFromPrompt(prev, taskId, displayPrompt));
+
+    try {
+      await sendMessage(
+        taskId,
+        displayPrompt,
+        async (final) => {
+          if (activeTaskIdRef.current === taskId) {
+            if (shouldAppendAssistantMessage(final)) {
+              setMessages((prev) => [
+                ...prev,
+                buildPendingAssistantMessage(
+                  taskId,
+                  final!.content,
+                  final!.images,
+                  final!.tool_events,
+                ),
+              ]);
+            }
+            if (!final?.stopped) {
+              await loadMessages(taskId);
+            }
+          }
+          await refreshTasks();
+          if (final?.stopped) {
+            const pending = pendingSteerRef.current;
+            if (pending && pending.taskId === taskId) {
+              pendingSteerRef.current = null;
+              clearQueuePaused(taskId);
+              await dispatchSend(pending.taskId, pending.text, pending.files);
+              return;
+            }
+            if ((queuedByTaskIdRef.current[taskId] ?? []).length > 0) {
+              setQueuePausedByTaskId((prev) => ({ ...prev, [taskId]: true }));
+            }
+            return;
+          }
+          clearQueuePaused(taskId);
+          await drainQueue(taskId);
+        },
+        files,
+      );
+    } catch (err) {
+      uiError("chat:send failed", err);
+      setBootError(CHAT_ERROR_MESSAGE);
+    }
+  }
+
+  async function drainQueue(taskId: string) {
+    const queue = queuedByTaskIdRef.current[taskId] ?? [];
+    if (queue.length === 0) return;
+
+    const [next, ...rest] = queue;
+    const updated = { ...queuedByTaskIdRef.current, [taskId]: rest };
+    queuedByTaskIdRef.current = updated;
+    setQueuedByTaskId(updated);
+
+    uiLog("chat:queue drain", { taskId, remaining: rest.length });
+    await dispatchSend(taskId, next.text, next.files);
   }
 
   async function handleSend(prompt: string, files: string[] = []) {
@@ -273,60 +528,25 @@ export default function App() {
     }
 
     const taskId = activeTaskId;
-    const displayPrompt =
-      prompt.trim() ||
-      (files.length > 0 ? "첨부한 이미지를 분석해주세요." : "");
-    uiLog("chat:handleSend", { taskId, prompt: displayPrompt, files });
-    const optimistic: Message = {
-      id: `pending-${randomUUID()}`,
-      task_id: taskId,
-      role: "user",
-      content: displayPrompt,
-      images: files,
-      tool_events: [],
-      created_at: new Date().toISOString(),
-    };
-    setMessages((prev) => [...prev, optimistic]);
-    setTasks((prev) =>
-      sortTasks(
-        prev.map((task) =>
-          task.id === taskId && (task.title === "New task" || !task.title)
-            ? {
-                ...task,
-                title: titleFromPrompt(displayPrompt),
-                updated_at: new Date().toISOString(),
-              }
-            : task,
-        ),
-      ),
-    );
+    if (getStreamForTask(taskId).streaming) {
+      const item: QueuedMessage = {
+        id: crypto.randomUUID(),
+        text: prompt,
+        files,
+      };
+      uiLog("chat:queue enqueue", { taskId, queueId: item.id });
+      setQueuedByTaskId((prev) => {
+        const next = {
+          ...prev,
+          [taskId]: [...(prev[taskId] ?? []), item],
+        };
+        queuedByTaskIdRef.current = next;
+        return next;
+      });
+      return;
+    }
 
-    await sendMessage(
-      taskId,
-      displayPrompt,
-      async (final) => {
-        // Only update the open thread if the user is still viewing this task.
-        if (activeTaskIdRef.current === taskId) {
-          if (final && (final.content || final.tool_events.length > 0)) {
-            setMessages((prev) => [
-              ...prev,
-              {
-                id: `pending-assistant-${randomUUID()}`,
-                task_id: taskId,
-                role: "assistant",
-                content: final.content,
-                images: final.images,
-                tool_events: final.tool_events,
-                created_at: new Date().toISOString(),
-              },
-            ]);
-          }
-          await loadMessages(taskId);
-        }
-        await refreshTasks();
-      },
-      files,
-    );
+    await dispatchSend(taskId, prompt, files);
   }
 
   async function handleNewTaskAndCloseSidebar() {
@@ -334,16 +554,18 @@ export default function App() {
     setSidebarOpen(false);
   }
 
-  // Wait for session check before showing login — otherwise a saved cookie
-  // briefly flashes the User ID modal, then the main app.
   if (!authReady) {
     return <div className="boot-loading">불러오는 중…</div>;
   }
 
   if (!userId) {
     return (
-      <UserIdModal
-        onSubmit={handleLogin}
+      <GoogleLoginModal
+        clientId={config?.google_client_id ?? ""}
+        onCredential={handleGoogleCredential}
+        onAccessToken={handleGoogleAccessToken}
+        onLocalUserId={handleLocalUserId}
+        localAuthBypass={Boolean(config?.local_auth_bypass)}
         error={bootError}
         projectName={config?.projectName}
       />
@@ -375,24 +597,43 @@ export default function App() {
         onPatchTask={handlePatchTask}
         onDeleteTask={handleDeleteTask}
         onLogout={handleLogout}
+        onOpenDashboard={
+          config?.is_admin
+            ? () => {
+                setView("dashboard");
+                setSidebarOpen(false);
+              }
+            : undefined
+        }
         onRefreshConfig={refreshConfig}
       />
       <div className="main-panel">
-        <ChatThread
-          messages={messages}
-          streaming={activeStream.streaming}
-          streamText={activeStream.streamText}
-          streamEvents={activeStream.streamEvents}
-          taskTitle={activeTask?.title ?? "New task"}
-          onMenuClick={() => setSidebarOpen(true)}
-          footer={
-            <ChatInput
-              disabled={!activeTask || activeStream.streaming}
-              onSend={handleSend}
-              onRagUploadComplete={handleRagUploadComplete}
-            />
-          }
-        />
+        {view === "dashboard" ? (
+          <Dashboard onBack={() => setView("chat")} />
+        ) : (
+          <ChatThread
+            messages={messages}
+            streaming={activeStream.streaming}
+            streamText={activeStream.streamText}
+            streamEvents={activeStream.streamEvents}
+            taskTitle={activeTask?.title ?? "New task"}
+            onMenuClick={() => setSidebarOpen(true)}
+            footer={
+              <ChatInput
+                disabled={!activeTask}
+                waiting={activeStream.streaming}
+                queuedMessages={activeQueuedMessages}
+                queuePaused={activeQueuePaused}
+                onRemoveQueued={handleRemoveQueued}
+                onSteerQueued={handleSteerQueued}
+                onResumeQueue={handleResumeQueue}
+                onStop={handleStop}
+                onSend={handleSend}
+                onRagUploadComplete={handleRagUploadComplete}
+              />
+            }
+          />
+        )}
       </div>
     </div>
   );

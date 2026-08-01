@@ -1,7 +1,7 @@
 import { useCallback, useRef, useState } from "react";
 import type { ToolEvent } from "../types";
-import { api } from "../api";
 import { uiError, uiLog, uiWarn } from "../debug";
+import { chatService } from "../services/chatService";
 
 const TOOL_INPUT_INFO_RE = /^Tool: .+?, Input:/s;
 const TOOL_RESULT_INFO_RE = /^Tool Result: /s;
@@ -53,10 +53,19 @@ function isSegmentReset(previous: string, next: string): boolean {
   return !next.startsWith(previous);
 }
 
+function isAbortError(err: unknown): boolean {
+  return (
+    (err instanceof DOMException && err.name === "AbortError") ||
+    (err instanceof Error && err.name === "AbortError")
+  );
+}
+
 export interface ChatFinalMessage {
   content: string;
   images: string[];
   tool_events: ToolEvent[];
+  stopped?: boolean;
+  elapsedSeconds?: number;
 }
 
 interface TaskStreamState {
@@ -72,6 +81,7 @@ export function useChatStream() {
   >({});
   const streamTextRefs = useRef<Record<string, string>>({});
   const streamingTaskIdsRef = useRef<Set<string>>(new Set());
+  const abortControllersRef = useRef<Record<string, AbortController>>({});
 
   const patchStream = useCallback(
     (taskId: string, updater: (prev: TaskStreamState) => TaskStreamState) => {
@@ -82,6 +92,16 @@ export function useChatStream() {
     },
     [],
   );
+
+  const stopMessage = useCallback((taskId: string) => {
+    const controller = abortControllersRef.current[taskId];
+    if (!controller) {
+      uiWarn("chat:stop ignored — no active stream", { taskId });
+      return;
+    }
+    uiLog("chat:stop", { taskId });
+    controller.abort();
+  }, []);
 
   const sendMessage = useCallback(
     async (
@@ -103,15 +123,20 @@ export function useChatStream() {
         [taskId]: { text: "", events: [] },
       }));
 
+      const controller = new AbortController();
+      abortControllersRef.current[taskId] = controller;
+      const startedAt = Date.now();
+      let localEvents: ToolEvent[] = [];
       let finalMessage: ChatFinalMessage | undefined;
 
       const flushTextSegment = () => {
         const text = (streamTextRefs.current[taskId] ?? "").trim();
         if (!text) return;
+        localEvents = appendTextSegment(localEvents, text);
         patchStream(taskId, (s) => ({
           ...s,
           text: "",
-          events: appendTextSegment(s.events, text),
+          events: localEvents,
         }));
         streamTextRefs.current[taskId] = "";
       };
@@ -119,6 +144,7 @@ export function useChatStream() {
       const teardownStreaming = () => {
         streamingTaskIdsRef.current.delete(taskId);
         delete streamTextRefs.current[taskId];
+        delete abortControllersRef.current[taskId];
         setStreamsByTaskId((prev) => {
           if (!(taskId in prev)) return prev;
           const next = { ...prev };
@@ -128,7 +154,12 @@ export function useChatStream() {
       };
 
       try {
-        for await (const event of api.streamChat(taskId, prompt, files)) {
+        for await (const event of chatService.streamChat(
+          taskId,
+          prompt,
+          files,
+          controller.signal,
+        )) {
           if (event.type === "token" && event.data !== undefined) {
             const previous = streamTextRefs.current[taskId] ?? "";
             const next = event.data;
@@ -138,28 +169,32 @@ export function useChatStream() {
             streamTextRefs.current[taskId] = next;
             patchStream(taskId, (s) => ({ ...s, text: next }));
           } else if (event.type === "text" && event.data) {
+            localEvents = appendTextSegment(localEvents, event.data);
             patchStream(taskId, (s) => ({
               ...s,
               text: "",
-              events: appendTextSegment(s.events, event.data!),
+              events: localEvents,
             }));
             streamTextRefs.current[taskId] = "";
           } else if (event.type === "tool") {
             flushTextSegment();
+            localEvents = upsertToolEvent(localEvents, event as ToolEvent);
             patchStream(taskId, (s) => ({
               ...s,
-              events: upsertToolEvent(s.events, event as ToolEvent),
+              events: localEvents,
             }));
           } else if (event.type === "tool_result" || event.type === "info") {
+            localEvents = upsertToolEvent(localEvents, event as ToolEvent);
             patchStream(taskId, (s) => ({
               ...s,
-              events: upsertToolEvent(s.events, event as ToolEvent),
+              events: localEvents,
             }));
           } else if (event.type === "error") {
             const msg = event.data ?? "Unknown error";
             uiError("chat:send stream error", msg);
             finalMessage = {
-              content: msg.startsWith("Error:") ? msg : `Error: ${msg}`,
+              content:
+                "An error occurred while processing your request. Please try again.",
               images: [],
               tool_events: [],
             };
@@ -187,16 +222,41 @@ export function useChatStream() {
               ? `${partial}\n\nError: Connection closed before the response completed. Try again or refresh messages.`
               : "Error: Connection closed before the response completed. The agent may still be running — refresh or try again.",
             images: [],
-            tool_events: [],
+            tool_events: localEvents,
           };
         }
       } catch (err) {
-        uiError("chat:send failed", err);
-        finalMessage = {
-          content: `Error: ${err instanceof Error ? err.message : String(err)}`,
-          images: [],
-          tool_events: [],
-        };
+        if (isAbortError(err) || controller.signal.aborted) {
+          flushTextSegment();
+          const partial = localEvents
+            .filter((e) => e.type === "text" && e.data)
+            .map((e) => e.data!)
+            .join("\n\n")
+            .trim();
+          const livePartial = (streamTextRefs.current[taskId] ?? "").trim();
+          const body = [partial, livePartial].filter(Boolean).join("\n\n").trim();
+          const elapsedSeconds = Math.max(
+            1,
+            Math.round((Date.now() - startedAt) / 1000),
+          );
+          const notice = `You stopped after ${elapsedSeconds}s`;
+          uiLog("chat:send aborted", { taskId, elapsedSeconds });
+          finalMessage = {
+            content: body ? `${body}\n\n${notice}` : notice,
+            images: [],
+            tool_events: localEvents.filter((e) => e.type !== "text"),
+            stopped: true,
+            elapsedSeconds,
+          };
+        } else {
+          uiError("chat:send failed", err);
+          finalMessage = {
+            content:
+              "An error occurred while processing your request. Please try again.",
+            images: [],
+            tool_events: [],
+          };
+        }
       } finally {
         // Call onDone first so setMessages is scheduled in this same turn,
         // then tear down streaming — React 18 batches both into one commit
@@ -241,5 +301,5 @@ export function useChatStream() {
     [streamsByTaskId],
   );
 
-  return { getStreamForTask, sendMessage };
+  return { getStreamForTask, sendMessage, stopMessage };
 }
