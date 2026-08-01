@@ -2174,12 +2174,24 @@ async def _run_langgraph_agent_impl(
     tool_used = False
     tool_name = toolUseId = ""
     tool_input_list.clear()
+    stop_reason: str | None = None
+
+    def remember_stop_reason(message) -> None:
+        nonlocal stop_reason
+        meta = getattr(message, "response_metadata", None) or {}
+        if not isinstance(meta, dict):
+            return
+        reason = meta.get("stopReason") or meta.get("stop_reason")
+        if reason:
+            stop_reason = reason
+            logger.info(f"[stop_reason] {stop_reason}")
 
     async for stream in app.astream(inputs, agent_config, stream_mode="messages"):
         chunk = stream[0] if isinstance(stream, (list, tuple)) and stream else stream
 
         if isinstance(chunk, AIMessageChunk):
             message = chunk
+            remember_stop_reason(chunk)
             handled_tool_input = False
             if isinstance(message.content, str) and message.content:
                 text_content = message.content
@@ -2302,7 +2314,28 @@ async def _run_langgraph_agent_impl(
             if content:
                 logger.info(f"content: {content}")
 
-    if not result:
+    # Final stop_reason wins even when earlier turns left preamble text
+    # (e.g. "확인해보겠습니다" + tools, then empty refusal).
+    skip_memory = False
+    if stop_reason == "content_filtered":
+        result = (
+            "요청이 모델 안전 정책에 의해 차단되었습니다. "
+            "다른 모델로 시도하거나 질문을 바꿔 주세요."
+        )
+        skip_memory = True
+    elif stop_reason == "guardrail_intervened":
+        result = (
+            "요청이 Guardrail 안전 정책에 의해 차단되었습니다. "
+            "질문을 바꿔 주세요."
+        )
+        skip_memory = True
+    elif stop_reason == "refusal":
+        result = (
+            "모델이 이 요청에 대한 응답을 거부했습니다. "
+            "다른 모델로 시도하거나 질문을 바꿔 주세요."
+        )
+        skip_memory = True
+    elif not result.strip():
         result = "답변을 찾지 못하였습니다."
     logger.info(f"result: {result}")
 
@@ -2313,7 +2346,7 @@ async def _run_langgraph_agent_impl(
 
     _notify_result(notification_queue, result)
 
-    if memory_enabled:
+    if memory_enabled and not skip_memory:
         save_to_memory(query, result)
 
     try:
