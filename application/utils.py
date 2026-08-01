@@ -5,6 +5,7 @@ import traceback
 import boto3
 import os
 from urllib import parse
+from botocore.exceptions import ClientError
 from langchain_community.utilities.tavily_search import TavilySearchAPIWrapper
 
 logging.basicConfig(
@@ -444,23 +445,41 @@ def update_rag_info():
         logger.info(f"(list_data_sources) response: {response}")
         
         data_source_name = sanitize_data_source_name(s3_bucket)
-        if 'dataSourceSummaries' in response:
-            for data_source in response['dataSourceSummaries']:
-                logger.info(f"data_source: {data_source}")
-                if data_source['name'] == data_source_name:
-                    data_source_id = data_source['dataSourceId']
-                    logger.info(f"data_source_id: {data_source_id}")
-                    break    
-        
-        # save config
-        config['knowledge_base_id'] = knowledge_base_id
-        config['data_source_id'] = data_source_id
-        config['s3_bucket'] = s3_bucket
-        config['region'] = region
-        config['projectName'] = projectName
-        config['accountId'] = accountId
-        with open(config_path, "w", encoding="utf-8") as f:
-            json.dump(config, f, indent=2)
+        summaries = response.get("dataSourceSummaries") or []
+        for data_source in summaries:
+            logger.info(f"data_source: {data_source}")
+            if data_source.get("name") == data_source_name:
+                data_source_id = data_source["dataSourceId"]
+                logger.info(f"data_source_id: {data_source_id}")
+                break
+        # Fall back to the first AVAILABLE (or first) data source when names diverge.
+        if not data_source_id and summaries:
+            preferred = next(
+                (
+                    ds
+                    for ds in summaries
+                    if (ds.get("status") or "").upper() == "AVAILABLE"
+                ),
+                summaries[0],
+            )
+            data_source_id = preferred.get("dataSourceId")
+            logger.warning(
+                "data source name mismatch (wanted=%s); using %s (%s)",
+                data_source_name,
+                preferred.get("name"),
+                data_source_id,
+            )
+
+        if knowledge_base_id and data_source_id:
+            config["knowledge_base_id"] = knowledge_base_id
+            config["data_source_id"] = data_source_id
+            config["s3_bucket"] = s3_bucket
+            config["region"] = region
+            config["projectName"] = projectName
+            config["accountId"] = accountId
+            with open(config_path, "w", encoding="utf-8") as f:
+                json.dump(config, f, indent=2)
+                f.write("\n")
 
     except Exception:
         err_msg = traceback.format_exc()
@@ -474,10 +493,39 @@ if not knowledge_base_id or not data_source_id:
 ACTIVE_INGESTION_STATUSES = ("STARTING", "IN_PROGRESS")
 
 
-def get_active_ingestion_job() -> dict | None:
+def refresh_rag_ids() -> bool:
+    """Refresh in-memory KB/data-source IDs from AWS and persist to config.json."""
+    global knowledge_base_id, data_source_id
+    kb_id, ds_id = update_rag_info()
+    if kb_id and ds_id:
+        knowledge_base_id = kb_id
+        data_source_id = ds_id
+        logger.info(
+            "Refreshed RAG ids: knowledge_base_id=%s data_source_id=%s",
+            knowledge_base_id,
+            data_source_id,
+        )
+        return True
+    logger.error(
+        "Failed to refresh RAG ids (knowledge_base_id=%s data_source_id=%s)",
+        kb_id,
+        ds_id,
+    )
+    return False
+
+
+def _is_resource_not_found(exc: Exception) -> bool:
+    if isinstance(exc, ClientError):
+        return exc.response.get("Error", {}).get("Code") == "ResourceNotFoundException"
+    return "ResourceNotFoundException" in type(exc).__name__
+
+
+def get_active_ingestion_job(*, _retried: bool = False) -> dict | None:
     """Return an in-flight ingestion job if Knowledge Base sync is already running."""
     if not knowledge_base_id or not data_source_id:
         logger.error("knowledge_base_id or data_source_id is not configured")
+        if not _retried and refresh_rag_ids():
+            return get_active_ingestion_job(_retried=True)
         return None
 
     try:
@@ -513,15 +561,25 @@ def get_active_ingestion_job() -> dict | None:
                 "started_at": str(job["startedAt"]) if job.get("startedAt") else None,
             }
         return None
-    except Exception:
+    except Exception as e:
+        if not _retried and _is_resource_not_found(e):
+            logger.warning(
+                "Stale knowledge_base_id/data_source_id (%s / %s); refreshing",
+                knowledge_base_id,
+                data_source_id,
+            )
+            if refresh_rag_ids():
+                return get_active_ingestion_job(_retried=True)
         logger.error("Error listing ingestion jobs: %s", traceback.format_exc())
         raise
 
 
-def sync_data_source():
+def sync_data_source(*, _retried: bool = False):
     """Start a Knowledge Base ingestion job for the configured data source."""
     if not knowledge_base_id or not data_source_id:
         logger.error("knowledge_base_id or data_source_id is not configured")
+        if not _retried and refresh_rag_ids():
+            return sync_data_source(_retried=True)
         return None
 
     try:
@@ -539,7 +597,15 @@ def sync_data_source():
             "ingestion_job_id": job.get("ingestionJobId"),
             "status": job.get("status"),
         }
-    except Exception:
+    except Exception as e:
+        if not _retried and _is_resource_not_found(e):
+            logger.warning(
+                "Stale knowledge_base_id/data_source_id (%s / %s); refreshing",
+                knowledge_base_id,
+                data_source_id,
+            )
+            if refresh_rag_ids():
+                return sync_data_source(_retried=True)
         logger.error("Error syncing data source: %s", traceback.format_exc())
         return None
 
