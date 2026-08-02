@@ -332,7 +332,7 @@ Bedrock Knowledge Base는 문서와 **같은 경로**에 `{원본파일명}.meta
 | `created_time` | `NUMBER` | Unix epoch(초) | `greaterThan` / `lessThan` 범위 필터 가능 |
 | `is_confidential` | `BOOLEAN` | `false` | 공유/비기밀 문서 구분용 |
 
-실제 OpenSearch에 들어간 데이터는 아래와 같습니다. owner, team, created_time, is_confidential이 meta로 등록됩니다.
+실제 Vector Store에 들어간 데이터는 아래와 같습니다. owner, team, created_time, is_confidential이 meta로 등록됩니다.
 
 <img width="916" height="781" alt="image" src="https://github.com/user-attachments/assets/3b6c3909-12b4-4856-a86e-376c88d2f273" />
 
