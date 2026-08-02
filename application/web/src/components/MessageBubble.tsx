@@ -203,9 +203,10 @@ function MarkdownBubble({ content }: { content: string }) {
 
   function onContextMenu(e: MouseEvent<HTMLDivElement>) {
     if (!content.trim()) return;
-    // Let the browser show its native link menu (Open in New Tab, etc.)
+    // Let the browser show its native menus for links / images
+    // (Open in New Tab, Save Image As…, etc.)
     const target = e.target as HTMLElement | null;
-    if (target?.closest("a[href]")) return;
+    if (target?.closest("a[href], img")) return;
     e.preventDefault();
     const selectedText = bubbleRef.current
       ? getSelectedTextInElement(bubbleRef.current)
