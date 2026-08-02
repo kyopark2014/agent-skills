@@ -18,8 +18,9 @@ logger = logging.getLogger("skill")
 
 WORKING_DIR = os.path.dirname(os.path.abspath(__file__))
 SKILLS_DIR = os.path.join(WORKING_DIR, "skills")
-# Per-user artifacts: {SESSION_STORAGE_DIR}/{user_id}/artifacts (via set_user_artifacts).
+# Per-user artifacts / skills under SESSION_STORAGE_DIR (via set_user_workspace).
 ARTIFACTS_DIR = utils.get_user_artifacts_dir("default")
+USER_SKILLS_DIR = utils.get_user_skills_dir("default")
 
 config = utils.load_config()
 sharing_url = config.get("sharing_url")
@@ -32,6 +33,23 @@ def set_user_artifacts(user_id: str | None) -> str:
     ARTIFACTS_DIR = artifacts_dir
     logger.info(f"skill ARTIFACTS_DIR set for user {user_id!r}: {artifacts_dir}")
     return artifacts_dir
+
+
+def set_user_skills(user_id: str | None) -> str:
+    """Point USER_SKILLS_DIR and ensure per-user skills.list exists."""
+    global USER_SKILLS_DIR
+    skills_dir = utils.ensure_user_skills_dir(user_id)
+    USER_SKILLS_DIR = skills_dir
+    utils.ensure_user_skills_list(user_id)
+    logger.info(f"skill USER_SKILLS_DIR set for user {user_id!r}: {skills_dir}")
+    return skills_dir
+
+
+def set_user_workspace(user_id: str | None) -> tuple[str, str]:
+    """Configure per-user artifacts + skills dirs; create skills.list if missing."""
+    artifacts_dir = set_user_artifacts(user_id)
+    skills_dir = set_user_skills(user_id)
+    return artifacts_dir, skills_dir
 
 # ═══════════════════════════════════════════════════════════════════
 #  Skill Manager – implementation of Anthropic Agent Skills spec
@@ -153,6 +171,10 @@ def get_skill_info(skill_list: list) -> list:
         skill_managers['base'] = skill_manager
         skill_manager.discover_plugin_skills(SKILLS_DIR)
 
+    # Merge per-user skill-creator skills from .session_storage/{user}/skills.
+    if USER_SKILLS_DIR and os.path.isdir(USER_SKILLS_DIR):
+        skill_manager.discover_plugin_skills(USER_SKILLS_DIR)
+
     registry = skill_manager.registry
     
     if not registry:
@@ -250,7 +272,10 @@ def build_skill_prompt(skill_info: list) -> str:
         f"## Paths (use absolute paths for write_file, read_file)\n"
         f"- WORKING_DIR: {WORKING_DIR}\n"
         f"- ARTIFACTS_DIR: {ARTIFACTS_DIR}\n"
-        f"Example: write_file(filepath='{os.path.join(ARTIFACTS_DIR, 'report.drawio')}', content='...')\n\n"
+        f"- USER_SKILLS_DIR: {USER_SKILLS_DIR}\n"
+        f"Example: write_file(filepath='{os.path.join(ARTIFACTS_DIR, 'report.drawio')}', content='...')\n"
+        f"New skills: write under USER_SKILLS_DIR/<skill-name>/SKILL.md "
+        f"(not under WORKING_DIR/skills/).\n\n"
     )
 
     skills_xml = get_skills_xml(skill_info)
@@ -312,7 +337,9 @@ def build_command_prompt(plugin_name: str, command: str) -> str:
         f"## Paths (use absolute paths for write_file, read_file)\n"
         f"- WORKING_DIR: {WORKING_DIR}\n"
         f"- ARTIFACTS_DIR: {ARTIFACTS_DIR}\n"
-        f"Example: write_file(filepath='{os.path.join(ARTIFACTS_DIR, 'report.drawio')}', content='...')\n\n"
+        f"- USER_SKILLS_DIR: {USER_SKILLS_DIR}\n"
+        f"Example: write_file(filepath='{os.path.join(ARTIFACTS_DIR, 'report.drawio')}', content='...')\n"
+        f"New skills: write under USER_SKILLS_DIR/<skill-name>/SKILL.md.\n\n"
     )
 
     command_instructions = get_command_instructions(plugin_name, command)
@@ -355,12 +382,21 @@ def get_skill_instructions(plugin_name: str, skill_name: str) -> str:
     if instructions:
         return instructions
 
+    # Also search per-user skills when base manager misses the name.
+    if plugin_name == "base" and USER_SKILLS_DIR and os.path.isdir(USER_SKILLS_DIR):
+        skill_manager.discover_plugin_skills(USER_SKILLS_DIR)
+        instructions = skill_manager.get_skill_instructions(skill_name)
+        if instructions:
+            return instructions
+
     # fallback to base skills
     skill_manager = skill_managers.get("base")
     if skill_manager is None:
         skills_dir = SKILLS_DIR
         skill_manager = SkillManager(skills_dir)
         skill_managers["base"] = skill_manager
+    if USER_SKILLS_DIR and os.path.isdir(USER_SKILLS_DIR):
+        skill_manager.discover_plugin_skills(USER_SKILLS_DIR)
     instructions = skill_manager.get_skill_instructions(skill_name)
     if instructions:
         return instructions

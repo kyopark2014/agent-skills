@@ -46,8 +46,7 @@ DEFAULT_MODEL = "Claude 4.6 Sonnet"
 DEFAULT_GATEWAY_MODEL = "Claude 4.6 Sonnet"
 
 
-def load_capability_list(filename: str) -> list[str]:
-    path = os.path.join(_APPLICATION_DIR, filename)
+def load_capability_list_from_path(path: str) -> list[str]:
     try:
         with open(path, "r", encoding="utf-8") as f:
             return [
@@ -58,6 +57,11 @@ def load_capability_list(filename: str) -> list[str]:
     except FileNotFoundError:
         logger.warning("Capability list not found: %s", path)
         return []
+
+
+def load_capability_list(filename: str) -> list[str]:
+    path = os.path.join(_APPLICATION_DIR, filename)
+    return load_capability_list_from_path(path)
 
 
 class DefaultsPatch(BaseModel):
@@ -149,7 +153,13 @@ def _gateway_ui_models() -> list[str]:
 
 @router.get("")
 def get_config(request: Request):
-    skill_options = load_capability_list("skills.list")
+    session_user = get_optional_user_id(request)
+    if session_user:
+        skills_path = utils.ensure_user_skills_list(session_user)
+        skill_options = load_capability_list_from_path(skills_path)
+        logger.info("Loaded skills from %s (%d)", skills_path, len(skill_options))
+    else:
+        skill_options = load_capability_list("skills.list")
     mcp_options = load_capability_list("mcp.list")
     default_skills, default_mcp = utils.get_initial_tool_defaults()
     default_skills = [s for s in default_skills if s in skill_options]
@@ -166,7 +176,6 @@ def get_config(request: Request):
         if DEFAULT_GATEWAY_MODEL in gateway_models
         else (gateway_models[0] if gateway_models else DEFAULT_MODEL)
     )
-    session_user = get_optional_user_id(request)
     return {
         "projectName": config.get("projectName", "agent"),
         "google_client_id": (config.get("google_client_id") or "").strip(),

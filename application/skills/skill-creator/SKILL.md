@@ -44,6 +44,37 @@ It's OK to briefly explain terms if you're in doubt, and feel free to clarify te
 
 ## Creating a skill
 
+### Skill storage location (required)
+
+**Always create new skills under the per-user skills directory**, never under the
+builtin `$WORKING_DIR/skills/` tree (that path is the app image copy and is not
+durable per user).
+
+1. Ensure the directory exists (create if missing):
+   ```bash
+   mkdir -p "$USER_SKILLS_DIR"
+   ```
+   `$USER_SKILLS_DIR` resolves to
+   `application/.session_storage/{user-id}/skills`
+   (or `{SESSION_STORAGE_DIR}/{user-id}/skills` when overridden).
+
+2. Write the skill as:
+   ```
+   $USER_SKILLS_DIR/<skill-name>/
+   ├── SKILL.md          (required)
+   ├── scripts/          (optional)
+   ├── references/       (optional)
+   └── assets/           (optional)
+   ```
+
+3. Use `write_file` with an absolute path under `$USER_SKILLS_DIR`, e.g.
+   `$USER_SKILLS_DIR/my-skill/SKILL.md`. Do **not** write skills into `artifacts/`.
+
+4. After the skill is saved, the next agent load ensures
+   `.session_storage/{user-id}/skills.list` exists (creates it if missing) and
+   appends newly discovered skill names so the UI and skill tools see both
+   builtin `skills/` entries and user-created skills.
+
 ### Capture Intent
 
 Start by understanding the user's intent. The current conversation might already contain a workflow the user wants to capture (e.g., they say "turn this into a skill"). If so, extract answers from the conversation history first — the tools used, the sequence of steps, corrections the user made, input/output formats observed. The user may need to fill the gaps, and should confirm before proceeding to the next step.
@@ -73,7 +104,7 @@ Based on the user interview, fill in these components:
 #### Anatomy of a Skill
 
 ```
-skill-name/
+$USER_SKILLS_DIR/skill-name/
 ├── SKILL.md (required)
 │   ├── YAML frontmatter (name, description required)
 │   └── Markdown instructions
@@ -82,6 +113,9 @@ skill-name/
     ├── references/ - Docs loaded into context as needed
     └── assets/     - Files used in output (templates, icons, fonts)
 ```
+
+Create `$USER_SKILLS_DIR` first (`mkdir -p "$USER_SKILLS_DIR"`), then create the
+`skill-name/` folder inside it. Never place new skills under `$WORKING_DIR/skills/`.
 
 #### Progressive Disclosure
 

@@ -207,6 +207,8 @@ def set_session(body: SessionRequest, request: Request, response: Response) -> S
         user_id = idinfo["email"].strip()
         _set_user_cookie(response, user_id)
         utils.ensure_user_artifacts_dir(user_id)
+        utils.ensure_user_skills_dir(user_id)
+        utils.ensure_user_skills_list(user_id)
         logger.info("Google login success: %s (llm_gateway_ready=%s)", user_id, gateway_ready)
         return SessionResponse(
             user_id=user_id,
@@ -223,6 +225,8 @@ def set_session(body: SessionRequest, request: Request, response: Response) -> S
             )
         _set_user_cookie(response, local_user_id)
         utils.ensure_user_artifacts_dir(local_user_id)
+        utils.ensure_user_skills_dir(local_user_id)
+        utils.ensure_user_skills_list(local_user_id)
         logger.info(
             "Local auth bypass login: %s (llm_gateway_ready=%s)",
             local_user_id,
@@ -247,6 +251,8 @@ def get_session(request: Request, response: Response) -> SessionResponse | None:
         logger.info("Normalized signed session cookie to user_id=%s", user_id)
     # Ensure workspace survives process restarts for an existing cookie session
     utils.ensure_user_artifacts_dir(user_id)
+    utils.ensure_user_skills_dir(user_id)
+    utils.ensure_user_skills_list(user_id)
     return SessionResponse(user_id=user_id, llm_gateway_ready=_llm_gateway_ready())
 
 
