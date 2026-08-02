@@ -334,7 +334,7 @@ Bedrock Knowledge Base는 문서와 **같은 경로**에 `{원본파일명}.meta
 
 실제 OpenSearch에 들어간 데이터는 아래와 같습니다. owner, team, created_time, is_confidential이 meta로 등록됩니다.
 
-<img width="1062" height="797" alt="image" src="https://github.com/user-attachments/assets/fd0b9b3c-1978-4827-be17-eccecd4e417a" />
+<img width="916" height="781" alt="image" src="https://github.com/user-attachments/assets/3b6c3909-12b4-4856-a86e-376c88d2f273" />
 
 
 ### 현재 적용된 검색 필터
