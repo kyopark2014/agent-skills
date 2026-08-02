@@ -60,25 +60,23 @@ def build_kb_metadata_document(
     owners: Sequence[str],
     team: str = DEFAULT_TEAM,
     is_confidential: bool = DEFAULT_IS_CONFIDENTIAL,
-    created_time: str | None = None,
+    created_time: int | float | None = None,
 ) -> dict[str, Any]:
     """Return Bedrock Knowledge Base ``.metadata.json`` body for filtering.
 
     ``owner`` uses STRING_LIST so multiple owners can be registered.
     All attributes set ``includeForEmbedding`` to false (filter-only).
-    ``created_time`` is an ISO 8601 UTC timestamp string (includes time).
+    ``created_time`` is a Unix epoch in seconds (NUMBER) so Retrieve can use
+    greaterThan / lessThan range filters.
     """
     owner_list = [o.strip() for o in owners if o and str(o).strip()]
     if not owner_list:
         raise ValueError("At least one owner is required")
 
     if created_time is None:
-        created_time = (
-            datetime.now(timezone.utc)
-            .replace(microsecond=0)
-            .isoformat()
-            .replace("+00:00", "Z")
-        )
+        created_time = int(datetime.now(timezone.utc).timestamp())
+    else:
+        created_time = int(created_time)
 
     return {
         "metadataAttributes": {
@@ -93,8 +91,8 @@ def build_kb_metadata_document(
                 include_for_embedding=False,
             ),
             "created_time": _metadata_attr(
-                "STRING",
-                string_value=created_time,
+                "NUMBER",
+                number_value=created_time,
                 include_for_embedding=False,
             ),
             "is_confidential": _metadata_attr(

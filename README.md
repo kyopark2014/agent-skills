@@ -314,7 +314,7 @@ Bedrock Knowledge Base는 문서와 **같은 경로**에 `{원본파일명}.meta
       "includeForEmbedding": false
     },
     "created_time": {
-      "value": { "type": "STRING", "stringValue": "2026-08-02T07:37:00Z" },
+      "value": { "type": "NUMBER", "numberValue": 1754120285 },
       "includeForEmbedding": false
     },
     "is_confidential": {
@@ -329,7 +329,7 @@ Bedrock Knowledge Base는 문서와 **같은 경로**에 `{원본파일명}.meta
 |------|------|--------|------|
 | `owner` | `STRING_LIST` | 업로드한 `user_id` 1명 | 여러 owner 등록 가능 |
 | `team` | `STRING` | `mycompany` | |
-| `created_time` | `STRING` | UTC ISO 8601 (`...Z`) | 시각 포함 |
+| `created_time` | `NUMBER` | Unix epoch(초) | `greaterThan` / `lessThan` 범위 필터 가능 |
 | `is_confidential` | `BOOLEAN` | `false` | 공유/비기밀 문서 구분용 |
 
 실제 OpenSearch에 들어간 데이터는 아래와 같습니다. owner, team, created_time, is_confidential이 meta로 등록됩니다.
