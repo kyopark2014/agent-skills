@@ -127,7 +127,7 @@ def update(userId=None, modelName=None, debugMode=None, guardrailEnabled=None, l
         if userId != user_id:
             user_id = userId
             logger.info(f"user_id: {user_id}")
-        # Isolate generated files under workspace/{user_id}/artifacts
+        # Isolate generated files under {SESSION_STORAGE_DIR}/{user_id}/artifacts
         langgraph_agent.set_user_artifacts(user_id)
         skill.set_user_artifacts(user_id)
 
@@ -204,9 +204,10 @@ def check_input_guardrail(text: str) -> tuple[bool, str]:
         logger.error(f"apply_guardrail failed: {e}")
     return False, text
 
+# Local only — agent-skills does not mount /mnt/workspace.
 SESSION_STORAGE_DIR = os.environ.get(
     "SESSION_STORAGE_DIR",
-    "/mnt/workspace" if os.path.isdir("/mnt/workspace") else os.path.join(workingDir, ".session_storage"),
+    os.path.join(workingDir, ".session_storage"),
 )
 LEGACY_CHECKPOINT_DB = os.path.join(SESSION_STORAGE_DIR, "langgraph_checkpoints.sqlite")
 

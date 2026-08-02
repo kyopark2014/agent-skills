@@ -18,7 +18,7 @@ logger = logging.getLogger("skill")
 
 WORKING_DIR = os.path.dirname(os.path.abspath(__file__))
 SKILLS_DIR = os.path.join(WORKING_DIR, "skills")
-# Per-user artifacts: workspace/{user_id}/artifacts (kept in sync via set_user_artifacts).
+# Per-user artifacts: {SESSION_STORAGE_DIR}/{user_id}/artifacts (via set_user_artifacts).
 ARTIFACTS_DIR = utils.get_user_artifacts_dir("default")
 
 config = utils.load_config()
@@ -26,7 +26,7 @@ sharing_url = config.get("sharing_url")
 
 
 def set_user_artifacts(user_id: str | None) -> str:
-    """Point ARTIFACTS_DIR at workspace/{user_id}/artifacts for skill prompts."""
+    """Point ARTIFACTS_DIR at {SESSION_STORAGE_DIR}/{user_id}/artifacts for skill prompts."""
     global ARTIFACTS_DIR
     artifacts_dir = utils.ensure_user_artifacts_dir(user_id)
     ARTIFACTS_DIR = artifacts_dir

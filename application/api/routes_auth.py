@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import logging
 import os
@@ -23,6 +24,9 @@ router = APIRouter(prefix="/api/session", tags=["session"])
 
 SESSION_COOKIE = "agent_user_id"
 TOKENINFO_URL = "https://oauth2.googleapis.com/tokeninfo"
+# agentic-work and peers store opaque HMAC cookies under the same name.
+_SIGNED_COOKIE_PREFIX = "v1."
+_MAX_PLAIN_USER_ID_LEN = 128
 
 
 class SessionRequest(BaseModel):
@@ -139,9 +143,43 @@ def _set_user_cookie(response: Response, user_id: str) -> None:
     )
 
 
+def _uid_from_signed_cookie(raw: str) -> str | None:
+    """Extract uid from opaque ``v1.<payload_b64>.<sig>`` cookies (e.g. agentic-work).
+
+    agent-skills itself stores plain user_id values. When the browser still has a
+    signed peer-app cookie under the same name, decode the payload so artifacts
+    land under ``{uid}/`` instead of the full token string.
+    """
+    parts = raw.split(".")
+    if len(parts) != 3 or parts[0] != "v1":
+        return None
+    try:
+        padding = "=" * (-len(parts[1]) % 4)
+        payload = json.loads(base64.urlsafe_b64decode(parts[1] + padding))
+    except Exception:
+        logger.warning("Ignoring undecodable signed session cookie")
+        return None
+    uid = (payload.get("uid") or "").strip()
+    if not uid or len(uid) > _MAX_PLAIN_USER_ID_LEN:
+        return None
+    return uid
+
+
+def resolve_cookie_user_id(raw: str | None) -> str | None:
+    """Normalize cookie value to a plain user_id (never return a signed token)."""
+    value = (raw or "").strip()
+    if not value:
+        return None
+    if value.startswith(_SIGNED_COOKIE_PREFIX):
+        return _uid_from_signed_cookie(value)
+    if len(value) > _MAX_PLAIN_USER_ID_LEN:
+        logger.warning("Ignoring oversized session cookie (%d chars)", len(value))
+        return None
+    return value
+
+
 def get_optional_user_id(request: Request) -> str | None:
-    user_id = (request.cookies.get(SESSION_COOKIE) or "").strip()
-    return user_id or None
+    return resolve_cookie_user_id(request.cookies.get(SESSION_COOKIE))
 
 
 @router.post("", response_model=SessionResponse)
@@ -198,10 +236,15 @@ def set_session(body: SessionRequest, request: Request, response: Response) -> S
 
 
 @router.get("", response_model=SessionResponse | None)
-def get_session(request: Request) -> SessionResponse | None:
-    user_id = get_optional_user_id(request)
+def get_session(request: Request, response: Response) -> SessionResponse | None:
+    raw_cookie = (request.cookies.get(SESSION_COOKIE) or "").strip()
+    user_id = resolve_cookie_user_id(raw_cookie)
     if not user_id:
         return None
+    # Rewrite opaque peer-app cookies to plain user_id for this app.
+    if raw_cookie.startswith(_SIGNED_COOKIE_PREFIX) and raw_cookie != user_id:
+        _set_user_cookie(response, user_id)
+        logger.info("Normalized signed session cookie to user_id=%s", user_id)
     # Ensure workspace survives process restarts for an existing cookie session
     utils.ensure_user_artifacts_dir(user_id)
     return SessionResponse(user_id=user_id, llm_gateway_ready=_llm_gateway_ready())

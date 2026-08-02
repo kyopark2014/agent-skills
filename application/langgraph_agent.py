@@ -45,7 +45,7 @@ from urllib.parse import quote
 from langchain_core.tools import tool
 
 WORKING_DIR = os.path.dirname(os.path.abspath(__file__))
-# Per-user artifacts live under workspace/{user_id}/artifacts (set via set_user_artifacts).
+# Per-user artifacts: {SESSION_STORAGE_DIR}/{user_id}/artifacts (set via set_user_artifacts).
 ARTIFACTS_DIR = utils.get_user_artifacts_dir("default")
 
 _py_ver = f"{sys.version_info.major}.{sys.version_info.minor}"
@@ -84,12 +84,12 @@ _EXCLUDED_SNAPSHOT_DIRS = frozenset({
     "build",
     ".mypy_cache",
     ".pytest_cache",
-    "workspace",  # scan only the active user's ARTIFACTS_DIR below
+    ".session_storage",  # scan only the active user's ARTIFACTS_DIR below
 })
 
 
 def set_user_artifacts(user_id: str | None) -> str:
-    """Point ARTIFACTS_DIR at workspace/{user_id}/artifacts and refresh execute_code globals."""
+    """Point ARTIFACTS_DIR at {SESSION_STORAGE_DIR}/{user_id}/artifacts."""
     global ARTIFACTS_DIR
     artifacts_dir = utils.ensure_user_artifacts_dir(user_id)
     ARTIFACTS_DIR = artifacts_dir
@@ -116,7 +116,7 @@ def _working_dir_files_mtime_snapshot() -> dict:
 
     Code often writes under artifacts/ but may also write to the working dir root;
     scanning only artifacts/ missed those files and left download lists empty.
-    Other users' workspace folders are excluded; the active ARTIFACTS_DIR is scanned.
+    Other users' session folders are excluded; the active ARTIFACTS_DIR is scanned.
     """
     snap = {}
     if not os.path.isdir(WORKING_DIR):
@@ -136,7 +136,10 @@ def _working_dir_files_mtime_snapshot() -> dict:
             for fn in filenames:
                 full = os.path.join(dirpath, fn)
                 try:
-                    rel = os.path.relpath(full, WORKING_DIR)
+                    try:
+                        rel = os.path.relpath(full, WORKING_DIR)
+                    except ValueError:
+                        rel = full
                     snap[rel] = os.path.getmtime(full)
                 except OSError:
                     pass
@@ -335,7 +338,7 @@ def execute_code(code: str) -> str:
 
     Path variables (pre-defined, do NOT redefine):
     - WORKING_DIR: absolute path to application directory
-    - ARTIFACTS_DIR: absolute path to this user's artifacts (workspace/{user_id}/artifacts)
+    - ARTIFACTS_DIR: absolute path to this user's artifacts ({SESSION_STORAGE_DIR}/{user_id}/artifacts)
     - register_korean_font(): registers Nanum TTF or CID fallback for ReportLab; returns font name str
 
     Args:

@@ -24,17 +24,28 @@ aws_session_token = os.environ.get('AWS_SESSION_TOKEN')
 workingDir = os.path.dirname(os.path.abspath(__file__))
 config_path = os.path.join(workingDir, "config.json")
 favorite_tools_path = os.path.join(workingDir, "favorite_tools.json")
-WORKSPACE_DIR = os.path.join(workingDir, "workspace")
+# Local session root for per-user artifacts (agent-skills does not use /mnt/workspace).
+SESSION_STORAGE_DIR = os.environ.get(
+    "SESSION_STORAGE_DIR",
+    os.path.join(workingDir, ".session_storage"),
+)
 
 
 def sanitize_user_path_segment(user_id: str | None) -> str | None:
     """Return a safe single path segment for per-user workspace folders, or None."""
     if not user_id:
         return None
+    raw = str(user_id).strip()
+    # Never treat opaque signed session cookies as folder names.
+    if raw.startswith("v1.") and raw.count(".") >= 2:
+        logger.warning("Refusing signed session token as artifacts path segment")
+        return None
+    if len(raw) > 128:
+        logger.warning("Refusing oversized user_id as artifacts path segment")
+        return None
     # Collapse path separators so user_id cannot escape the intended prefix.
     segment = (
-        str(user_id)
-        .strip()
+        raw
         .replace("/", "_")
         .replace("\\", "_")
         .replace("..", "_")
@@ -43,14 +54,22 @@ def sanitize_user_path_segment(user_id: str | None) -> str | None:
 
 
 def get_user_artifacts_dir(user_id: str | None) -> str:
-    """Absolute path to workspace/{user_id}/artifacts (does not create the directory)."""
-    segment = sanitize_user_path_segment(user_id) or "default"
-    return os.path.join(WORKSPACE_DIR, segment, "artifacts")
+    """Absolute path to {SESSION_STORAGE_DIR}/{user_id}/artifacts (does not create)."""
+    segment = sanitize_user_path_segment(user_id)
+    if not segment:
+        segment = "default"
+    return os.path.join(SESSION_STORAGE_DIR, segment, "artifacts")
 
 
 def ensure_user_artifacts_dir(user_id: str | None) -> str:
-    """Create workspace/{user_id}/artifacts if needed and return its absolute path."""
-    artifacts_dir = get_user_artifacts_dir(user_id)
+    """Create {SESSION_STORAGE_DIR}/{user_id}/artifacts if needed and return it."""
+    segment = sanitize_user_path_segment(user_id)
+    if not segment:
+        raise ValueError(
+            "Invalid user_id for artifacts path; expected a plain user id, "
+            "not a signed session cookie"
+        )
+    artifacts_dir = os.path.join(SESSION_STORAGE_DIR, segment, "artifacts")
     os.makedirs(artifacts_dir, exist_ok=True)
     logger.info("user artifacts dir ready: %s", artifacts_dir)
     return artifacts_dir

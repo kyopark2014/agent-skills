@@ -13,7 +13,6 @@ package-lock.json
 
 # local task / user session data
 data/
-workspace/
 
 # macOS
 .DS_Store

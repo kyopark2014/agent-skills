@@ -44,13 +44,17 @@ WORKING_DIR = os.path.dirname(os.path.abspath(__file__))
 
 
 def _artifacts_dir() -> str:
-    """Per-user artifacts under workspace/{user_id}/artifacts."""
+    """Per-user artifacts under {SESSION_STORAGE_DIR}/{user_id}/artifacts."""
     try:
         import utils
         user_id = (os.environ.get("AGENTCORE_USER_ID") or "").strip() or "default"
         return utils.ensure_user_artifacts_dir(user_id)
     except Exception:
-        fallback = os.path.join(WORKING_DIR, "workspace", "default", "artifacts")
+        root = os.environ.get(
+            "SESSION_STORAGE_DIR",
+            os.path.join(WORKING_DIR, ".session_storage"),
+        )
+        fallback = os.path.join(root, "default", "artifacts")
         os.makedirs(fallback, exist_ok=True)
         return fallback
 
