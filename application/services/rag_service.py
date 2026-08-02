@@ -67,7 +67,8 @@ def build_kb_metadata_document(
     ``owner`` uses STRING_LIST so multiple owners can be registered.
     All attributes set ``includeForEmbedding`` to false (filter-only).
     ``created_time`` is a Unix epoch in seconds (NUMBER) so Retrieve can use
-    greaterThan / lessThan range filters.
+    greaterThan / lessThan range filters. Requires a fresh OpenSearch index
+    so the field is mapped as numeric (not ``date``).
     """
     owner_list = [o.strip() for o in owners if o and str(o).strip()]
     if not owner_list:
