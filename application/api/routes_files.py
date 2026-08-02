@@ -32,15 +32,15 @@ def _validate_image_filename(filename: str) -> str:
 
 @router.post("/upload")
 async def upload_file(request: Request, file: UploadFile = File(...)):
-    """Upload an image to S3 (images/) for chat attachment. No Knowledge Base sync."""
-    require_user_id(request)
+    """Upload an image to S3 (images/{user_id}/) for chat attachment. No Knowledge Base sync."""
+    user_id = require_user_id(request)
 
     file_name = _validate_image_filename(file.filename or "pasted.png")
     file_bytes = await file.read()
     if not file_bytes:
         raise HTTPException(status_code=400, detail="Empty file")
 
-    upload_result = utils.upload_to_s3(file_bytes, file_name)
+    upload_result = utils.upload_to_s3(file_bytes, file_name, user_id=user_id)
     if not upload_result:
         raise HTTPException(status_code=500, detail="Failed to upload file to S3")
     if not upload_result.get("url"):
@@ -50,7 +50,8 @@ async def upload_file(request: Request, file: UploadFile = File(...)):
         )
 
     logger.info(
-        "File upload complete: file=%s s3_key=%s url=%s",
+        "File upload complete: user=%s file=%s s3_key=%s url=%s",
+        user_id,
         file_name,
         upload_result.get("s3_key"),
         upload_result.get("url"),

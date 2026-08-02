@@ -127,9 +127,9 @@ def update(userId=None, modelName=None, debugMode=None, guardrailEnabled=None, l
         if userId != user_id:
             user_id = userId
             logger.info(f"user_id: {user_id}")
-        # Isolate generated files under {SESSION_STORAGE_DIR}/{user_id}/artifacts
-        langgraph_agent.set_user_artifacts(user_id)
-        skill.set_user_artifacts(user_id)
+        # Isolate artifacts + user skills under {SESSION_STORAGE_DIR}/{user_id}/
+        langgraph_agent.set_user_workspace(user_id)
+        skill.set_user_workspace(user_id)
 
     if modelName is not None and model_name != modelName:
         model_name = modelName
@@ -922,7 +922,7 @@ reference_docs = []
 
 def upload_to_s3(file_bytes, file_name):
     """
-    Upload a file to S3 and return the URL
+    Upload a file to S3 under {prefix}/{user_id}/ and return the URL.
     """
 
     try:
@@ -931,18 +931,21 @@ def upload_to_s3(file_bytes, file_name):
             region_name=bedrock_region,
         )
 
-        # Generate a unique file name to avoid collisions
-        #timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        #unique_id = str(uuid.uuid4())[:8]
-        #s3_key = f"uploaded_images/{timestamp}_{unique_id}_{file_name}"
-
         content_type = utils.get_contents_type(file_name)       
         logger.info(f"content_type: {content_type}") 
 
-        if content_type == "image/jpeg" or content_type == "image/png":
-            s3_key = f"{s3_image_prefix}/{file_name}"
+        if content_type.startswith("image/"):
+            prefix = s3_image_prefix
         else:
-            s3_key = f"{s3_prefix}/{file_name}"
+            prefix = s3_prefix
+
+        user_segment = utils.sanitize_user_path_segment(user_id)
+        if user_segment:
+            s3_key = f"{prefix}/{user_segment}/{file_name}"
+            relative_url_path = f"{prefix}/{parse.quote(user_segment)}/{parse.quote(file_name)}"
+        else:
+            s3_key = f"{prefix}/{file_name}"
+            relative_url_path = f"{prefix}/{parse.quote(file_name)}"
         
         user_meta = {  # user-defined metadata
             "content_type": content_type,
@@ -958,10 +961,7 @@ def upload_to_s3(file_bytes, file_name):
         )
         logger.info(f"upload response: {response}")
 
-        if content_type == "image/jpeg" or content_type == "image/png":
-            url = path + "/" + s3_image_prefix + "/" + parse.quote(file_name)
-        else:
-            url = path + "/" + s3_prefix + "/" + parse.quote(file_name)
+        url = path.rstrip("/") + "/" + relative_url_path if path else relative_url_path
         return url
     
     except Exception as e:
@@ -1183,8 +1183,47 @@ def _prepare_image_base64(image_content: bytes) -> tuple[str, str]:
     return img_base64, "image/png"
 
 
+def _file_name_from_ref(file_ref: str) -> str:
+    """Extract a basename from a sharing URL or plain file name."""
+    raw = (file_ref or "").strip()
+    if not raw:
+        return ""
+    name = raw.rsplit("/", 1)[-1]
+    return parse.unquote(name)
+
+
+def _s3_key_from_file_ref(file_ref: str, *, default_prefix: str = s3_image_prefix) -> str:
+    """Derive S3 object key from a sharing URL or bare file name.
+
+    Prefer the ``images/{user_id}/...`` (or docs/) path embedded in the URL;
+    otherwise fall back to ``{prefix}/{user_id}/{file_name}``.
+    """
+    raw = (file_ref or "").strip()
+    if not raw:
+        return ""
+
+    raw = raw.split("?", 1)[0].split("#", 1)[0]
+
+    for prefix in (s3_image_prefix, s3_prefix, "images", "docs"):
+        marker = f"/{prefix}/"
+        idx = raw.find(marker)
+        if idx >= 0:
+            return parse.unquote(raw[idx + 1 :])
+        if raw.startswith(f"{prefix}/"):
+            return parse.unquote(raw)
+
+    file_name = _file_name_from_ref(file_ref)
+    if not file_name:
+        return ""
+
+    user_segment = utils.sanitize_user_path_segment(user_id)
+    if user_segment:
+        return f"{default_prefix}/{user_segment}/{file_name}"
+    return f"{default_prefix}/{file_name}"
+
+
 def _load_image_bytes_from_ref(file_ref: str) -> tuple[str, bytes]:
-    """Load image bytes from S3 (images/) using a sharing URL or file name."""
+    """Load image bytes from S3 (images/{user_id}/) using a sharing URL or file name."""
     file_name = _file_name_from_ref(file_ref)
     if not file_name:
         raise ValueError("파일 이름을 확인할 수 없습니다.")
@@ -1197,7 +1236,7 @@ def _load_image_bytes_from_ref(file_ref: str) -> tuple[str, bytes]:
         raise ValueError("s3_bucket is not configured")
 
     s3_client = boto3.client(service_name="s3", region_name=bedrock_region)
-    s3_key = f"{s3_image_prefix}/{file_name}"
+    s3_key = _s3_key_from_file_ref(file_ref, default_prefix=s3_image_prefix)
     logger.info(f"loading image from s3://{s3_bucket}/{s3_key}")
     image_obj = s3_client.get_object(Bucket=s3_bucket, Key=s3_key)
     return file_name, image_obj["Body"].read()
@@ -1276,19 +1315,10 @@ def summarize_image(image_content: bytes, prompt: str) -> str:
     return summary
 
 
-def _file_name_from_ref(file_ref: str) -> str:
-    """Extract a basename from a sharing URL or plain file name."""
-    raw = (file_ref or "").strip()
-    if not raw:
-        return ""
-    name = raw.rsplit("/", 1)[-1]
-    return parse.unquote(name)
-
-
 def get_summary_of_uploaded_file(file_ref: str, prompt: str = "") -> str:
     """Analyze an uploaded file (by URL or name) and return a text summary.
 
-    Images are loaded from S3 under images/ and summarized with vision.
+    Images are loaded from S3 under images/{user_id}/ and summarized with vision.
     """
     file_name = _file_name_from_ref(file_ref)
     if not file_name:
