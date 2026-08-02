@@ -256,7 +256,11 @@ SKILL_SYSTEM_PROMPT = (
 SKILL_USAGE_GUIDE = (
     "\n## Skill 사용 가이드\n"
     "위의 <available_skills>에 나열된 skill이 사용자의 요청과 관련될 때:\n"
-    "1. 먼저 get_skill_instructions 도구로 해당 skill의 상세 지침을 로드하세요.\n"
+    "1. 먼저 get_skill_instructions(plugin_name=\"base\", "
+    "skill_name=\"<available_skills의 name>\")로 상세 지침을 로드하세요.\n"
+    "   - plugin_name은 항상 \"base\" (MCP 서버 이름·구 skill 이름 금지).\n"
+    "   - skill_name은 <name>과 정확히 일치해야 합니다 "
+    "(예: architecture-drawer).\n"
     "2. **중요: 지침을 읽기 전에 어떤 작업을 할지 단정짓지 마세요.** "
     "skill의 description에 서브커맨드(query, path, explain 등)가 있다면, "
     "사용자 명령의 서브커맨드를 정확히 파악한 후 그에 맞는 동작을 설명하세요.\n"
@@ -351,6 +355,28 @@ def build_command_prompt(plugin_name: str, command: str) -> str:
     return f"{SKILL_SYSTEM_PROMPT}\n{path_info}\n{command_section}\n{skills_section}\n{COMMAND_USAGE_GUIDE}"
 
 
+# Renamed / legacy skill names → current registry name.
+SKILL_ALIASES = {}
+
+
+def _resolve_skill_name(skill_name: str) -> str:
+    key = (skill_name or "").strip()
+    return SKILL_ALIASES.get(key, key)
+
+
+def _get_or_create_skill_manager(plugin_name: str) -> SkillManager:
+    skill_manager = skill_managers.get(plugin_name)
+    if skill_manager is not None:
+        return skill_manager
+    if plugin_name == "base":
+        skills_dir = SKILLS_DIR
+    else:
+        skills_dir = os.path.join(WORKING_DIR, "plugins", plugin_name, "skills")
+    skill_manager = SkillManager(skills_dir)
+    skill_managers[plugin_name] = skill_manager
+    return skill_manager
+
+
 # ═══════════════════════════════════════════════════════════════════
 #  2. Skill Tools – get_skill_instructions
 # ═══════════════════════════════════════════════════════════════════
@@ -363,20 +389,32 @@ def get_skill_instructions(plugin_name: str, skill_name: str) -> str:
     one of the available skills listed in the system prompt.
 
     Args:
-        skill_name: The name of the skill to load (e.g. 'pdf').
+        plugin_name: Use "base" for application skills in <available_skills>.
+        skill_name: Exact <name> from <available_skills>
+            (e.g. 'architecture-drawer', 'pdf').
 
     Returns:
         The full skill instructions, or an error message if not found.
-    """    
+    """
+    requested = skill_name
+    skill_name = _resolve_skill_name(skill_name)
+    if skill_name != requested:
+        logger.info(
+            "skill alias resolved: %s -> %s", requested, skill_name
+        )
+    # MCP / legacy names are sometimes passed as plugin_name; treat as base.
+    if plugin_name != "base" and not os.path.isdir(
+        os.path.join(WORKING_DIR, "plugins", plugin_name, "skills")
+    ):
+        logger.info(
+            "unknown plugin %r; falling back to base for skill %r",
+            plugin_name,
+            skill_name,
+        )
+        plugin_name = "base"
+
     logger.info(f"###### get_skill_instructions: {skill_name} ######")
-    skill_manager = skill_managers.get(plugin_name)
-    if skill_manager is None:
-        if plugin_name == "base": # base skills
-            skills_dir = SKILLS_DIR
-        else:   # plugin skills
-            skills_dir = os.path.join(WORKING_DIR, "plugins", plugin_name, "skills")
-        skill_manager = SkillManager(skills_dir)
-        skill_managers[plugin_name] = skill_manager
+    skill_manager = _get_or_create_skill_manager(plugin_name)
 
     instructions = skill_manager.get_skill_instructions(skill_name)
     if instructions:
@@ -390,11 +428,7 @@ def get_skill_instructions(plugin_name: str, skill_name: str) -> str:
             return instructions
 
     # fallback to base skills
-    skill_manager = skill_managers.get("base")
-    if skill_manager is None:
-        skills_dir = SKILLS_DIR
-        skill_manager = SkillManager(skills_dir)
-        skill_managers["base"] = skill_manager
+    skill_manager = _get_or_create_skill_manager("base")
     if USER_SKILLS_DIR and os.path.isdir(USER_SKILLS_DIR):
         skill_manager.discover_plugin_skills(USER_SKILLS_DIR)
     instructions = skill_manager.get_skill_instructions(skill_name)
@@ -402,7 +436,7 @@ def get_skill_instructions(plugin_name: str, skill_name: str) -> str:
         return instructions
 
     available = ", ".join(skill_manager.registry.keys())
-    return f"Skill '{skill_name}' not found. Available skills: {available}"
+    return f"Skill '{requested}' not found. Available skills: {available}"
 
 
 def get_skill_tools():

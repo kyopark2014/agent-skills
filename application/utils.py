@@ -168,12 +168,23 @@ def update_user_skills_list(user_id: str | None) -> str:
     return write_user_skills_list(user_id)
 
 
+def _builtin_skill_exists(name: str) -> bool:
+    return os.path.isfile(os.path.join(workingDir, "skills", name, "SKILL.md"))
+
+
+def _user_skill_exists(user_id: str | None, name: str) -> bool:
+    return os.path.isfile(
+        os.path.join(get_user_skills_dir(user_id), name, "SKILL.md")
+    )
+
+
 def ensure_user_skills_list(user_id: str | None) -> str:
     """Use {SESSION_STORAGE_DIR}/{user_id}/skills.list; create it if missing.
 
-    When the file already exists, keep it and only append newly discovered
-    skill-creator dirs under ``{user_id}/skills/``. Seed from application/skills.list
-    only when absent.
+    When the file already exists, keep user ordering/custom entries, but:
+    - append new builtin names from application/skills.list
+    - append newly discovered skill-creator dirs under ``{user_id}/skills/``
+    - drop entries whose SKILL.md no longer exists in builtin or user skills
     """
     ensure_user_skills_dir(user_id)
     path = get_user_skills_list_path(user_id)
@@ -181,14 +192,20 @@ def ensure_user_skills_list(user_id: str | None) -> str:
         return write_user_skills_list(user_id)
 
     existing = _load_skills_list_file(path)
-    seen = set(existing)
-    appended = [
+    kept = [
         name
-        for name in _list_skill_dir_names(get_user_skills_dir(user_id))
-        if name not in seen
+        for name in existing
+        if _builtin_skill_exists(name) or _user_skill_exists(user_id, name)
     ]
-    if appended:
-        return write_user_skills_list(user_id, existing + appended)
+    seen = set(kept)
+    default_path = os.path.join(workingDir, "skills.list")
+    candidates = _load_skills_list_file(default_path) + _list_skill_dir_names(
+        get_user_skills_dir(user_id)
+    )
+    appended = [name for name in candidates if name not in seen]
+    updated = kept + appended
+    if updated != existing:
+        return write_user_skills_list(user_id, updated)
     logger.info(
         "using existing user skills.list (%d skills) -> %s",
         len(existing),

@@ -208,7 +208,6 @@ mcp_options = [
     "aws_documentation",
     "trade_info",
     "web_fetch",
-    "drawio",
     "text_extraction",
     "slack",
     "notion",
