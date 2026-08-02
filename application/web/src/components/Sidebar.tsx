@@ -1,10 +1,15 @@
 import { useEffect, useRef, useState } from "react";
+import { api } from "../api";
 import { formatBrandTitle } from "../formatBrandTitle";
+import { useTheme } from "../hooks/useTheme";
+import type { Theme } from "../theme";
 import type { AppConfig, Task } from "../types";
 import { ConfigDrawer } from "./ConfigDrawer";
 import { LlmGatewayModal } from "./LlmGatewayModal";
 import { TaskListItem } from "./TaskListItem";
 import {
+  AppearanceIcon,
+  ChevronIcon,
   DashboardIcon,
   GuardrailIcon,
   LlmGatewayIcon,
@@ -13,11 +18,25 @@ import {
   MemoryIcon,
   ModelIcon,
   NewTaskIcon,
+  SettingsIcon,
   SkillIcon,
   CloseIcon,
 } from "./SidebarIcons";
 
-type DrawerKind = "skill" | "mcp" | "model" | null;
+type DrawerKind = "skill" | "mcp" | "model" | "appearance" | null;
+
+const LLM_GATEWAY_NOT_CONFIGURED =
+  "LLM Gateway가 설정되어 있지 않아 활성화할 수 없습니다. 관리자에게 설정을 요청하세요.";
+
+const THEME_OPTIONS = ["Light", "Dark"] as const;
+
+function themeToLabel(theme: Theme): string {
+  return theme === "light" ? "Light" : "Dark";
+}
+
+function labelToTheme(label: string): Theme {
+  return label === "Light" ? "light" : "dark";
+}
 
 interface Props {
   userId: string;
@@ -31,7 +50,7 @@ interface Props {
   onSelectTask: (id: string) => void;
   onOpenDrawer: (kind: DrawerKind) => void;
   onCloseDrawer: () => void;
-  onPatchTask: (taskId: string, patch: Partial<Task>) => void;
+  onPatchTask: (taskId: string, patch: Partial<Task>) => void | Promise<void>;
   onDeleteTask: (taskId: string) => void;
   onLogout: () => void;
   onOpenDashboard?: () => void;
@@ -59,7 +78,11 @@ export function Sidebar({
   const skillBtnRef = useRef<HTMLButtonElement>(null);
   const mcpBtnRef = useRef<HTMLButtonElement>(null);
   const modelBtnRef = useRef<HTMLButtonElement>(null);
+  const appearanceBtnRef = useRef<HTMLButtonElement>(null);
+  const settingsSectionRef = useRef<HTMLDivElement>(null);
   const [llmGatewayOpen, setLlmGatewayOpen] = useState(false);
+  const [settingsExpanded, setSettingsExpanded] = useState(false);
+  const { theme, setTheme } = useTheme();
   const skills = activeTask?.skills ?? config?.default_skills ?? [];
   const mcpServers = activeTask?.mcp_servers ?? config?.default_mcp_servers ?? [];
   const modelName = activeTask?.model_name ?? config?.default_model ?? "";
@@ -70,6 +93,12 @@ export function Sidebar({
   const gatewayModels = config?.gateway_models ?? [];
   const modelOptions =
     llmGatewayEnabled && gatewayModels.length > 0 ? gatewayModels : (config?.models ?? []);
+
+  function collapseSettings() {
+    setSettingsExpanded(false);
+    setLlmGatewayOpen(false);
+    onCloseDrawer();
+  }
 
   useEffect(() => {
     if (!activeTask || !llmGatewayEnabled || gatewayModels.length === 0) return;
@@ -88,6 +117,22 @@ export function Sidebar({
     onPatchTask,
   ]);
 
+  useEffect(() => {
+    if (!settingsExpanded) return;
+
+    function onPointerDown(e: MouseEvent) {
+      const target = e.target;
+      if (!(target instanceof Element)) return;
+      if (settingsSectionRef.current?.contains(target)) return;
+      if (target.closest(".config-popover")) return;
+      if (target.closest(".modal-overlay, .llm-gateway-modal")) return;
+      collapseSettings();
+    }
+
+    document.addEventListener("mousedown", onPointerDown);
+    return () => document.removeEventListener("mousedown", onPointerDown);
+  }, [settingsExpanded, onCloseDrawer]);
+
   function renderTask(task: Task, hidePinBadge = false) {
     return (
       <TaskListItem
@@ -95,7 +140,10 @@ export function Sidebar({
         task={task}
         active={activeTask?.id === task.id}
         hidePinBadge={hidePinBadge}
-        onSelect={() => onSelectTask(task.id)}
+        onSelect={() => {
+          collapseSettings();
+          onSelectTask(task.id);
+        }}
         onDelete={() => onDeleteTask(task.id)}
         onRename={(title) => onPatchTask(task.id, { title })}
         onTogglePin={() => onPatchTask(task.id, { pinned: !task.pinned })}
@@ -105,6 +153,15 @@ export function Sidebar({
 
   function toggleDrawer(kind: Exclude<DrawerKind, null>) {
     onOpenDrawer(drawer === kind ? null : kind);
+  }
+
+  function handleSettingApplied() {
+    collapseSettings();
+  }
+
+  function handleDrawerClose() {
+    onCloseDrawer();
+    setSettingsExpanded(false);
   }
 
   return (
@@ -135,13 +192,27 @@ export function Sidebar({
           </div>
         </div>
 
-        <button type="button" className="sidebar-menu-btn" onClick={onNewTask}>
+        <button
+          type="button"
+          className="sidebar-menu-btn"
+          onClick={() => {
+            collapseSettings();
+            onNewTask();
+          }}
+        >
           <NewTaskIcon className="sidebar-icon" />
           <span>New task</span>
         </button>
 
         {config?.is_admin && onOpenDashboard && (
-          <button type="button" className="sidebar-menu-btn" onClick={onOpenDashboard}>
+          <button
+            type="button"
+            className="sidebar-menu-btn"
+            onClick={() => {
+              collapseSettings();
+              onOpenDashboard();
+            }}
+          >
             <DashboardIcon className="sidebar-icon" />
             <span>Dashboard</span>
           </button>
@@ -162,86 +233,121 @@ export function Sidebar({
           )}
         </div>
 
-        <div className="sidebar-section">
-          <div className="section-label">Configuration</div>
+        <div
+          ref={settingsSectionRef}
+          className={`sidebar-section${settingsExpanded ? " is-expanded" : ""}`}
+        >
           <button
-            ref={skillBtnRef}
             type="button"
-            className={`sidebar-menu-btn${drawer === "skill" ? " is-active" : ""}`}
-            aria-expanded={drawer === "skill"}
-            aria-haspopup="dialog"
-            onClick={() => toggleDrawer("skill")}
-            disabled={!activeTask}
-          >
-            <SkillIcon className="sidebar-icon" />
-            <span>Skill ({skills.length})</span>
-          </button>
-          <button
-            ref={mcpBtnRef}
-            type="button"
-            className={`sidebar-menu-btn${drawer === "mcp" ? " is-active" : ""}`}
-            aria-expanded={drawer === "mcp"}
-            aria-haspopup="dialog"
-            onClick={() => toggleDrawer("mcp")}
-            disabled={!activeTask}
-          >
-            <McpIcon className="sidebar-icon" />
-            <span>MCP ({mcpServers.length})</span>
-          </button>
-          <button
-            ref={modelBtnRef}
-            type="button"
-            className={`sidebar-menu-btn${drawer === "model" ? " is-active" : ""}`}
-            aria-expanded={drawer === "model"}
-            aria-haspopup="dialog"
-            title={modelName || "Model"}
-            onClick={() => toggleDrawer("model")}
-            disabled={!activeTask}
-          >
-            <ModelIcon className="sidebar-icon" />
-            <span>{modelName || "Model"}</span>
-          </button>
-        </div>
-
-        <div className="sidebar-section">
-          <div className="section-label">Settings</div>
-          <label className="sidebar-menu-btn settings-toggle">
-            <GuardrailIcon className="sidebar-icon" />
-            <span>Guardrail</span>
-            <input
-              type="checkbox"
-              checked={activeTask?.guardrail_enabled ?? false}
-              disabled={!activeTask}
-              onChange={(e) =>
-                activeTask &&
-                onPatchTask(activeTask.id, { guardrail_enabled: e.target.checked })
+            className="section-toggle"
+            aria-expanded={settingsExpanded}
+            onClick={() => {
+              if (settingsExpanded) {
+                collapseSettings();
+                return;
               }
-            />
-          </label>
-          <label className="sidebar-menu-btn settings-toggle">
-            <MemoryIcon className="sidebar-icon" />
-            <span>Memory</span>
-            <input
-              type="checkbox"
-              checked={activeTask?.memory_enabled ?? true}
-              disabled={!activeTask}
-              onChange={(e) =>
-                activeTask &&
-                onPatchTask(activeTask.id, { memory_enabled: e.target.checked })
-              }
-            />
-          </label>
-          <button
-            type="button"
-            className={`sidebar-menu-btn${llmGatewayEnabled ? " is-active" : ""}`}
-            disabled={!activeTask}
-            onClick={() => setLlmGatewayOpen(true)}
+              setSettingsExpanded(true);
+            }}
           >
-            <LlmGatewayIcon className="sidebar-icon" />
-            <span>
-              LLM Gateway{llmGatewayEnabled ? " (On)" : ""}
-            </span>
+            <SettingsIcon className="sidebar-icon" />
+            <span>Settings</span>
+            <ChevronIcon className="section-chevron" />
           </button>
+          {settingsExpanded && (
+            <div className="sidebar-section-body">
+              <button
+                ref={modelBtnRef}
+                type="button"
+                className={`sidebar-menu-btn${drawer === "model" ? " is-active" : ""}`}
+                aria-expanded={drawer === "model"}
+                aria-haspopup="dialog"
+                title={modelName || "Model"}
+                onClick={() => toggleDrawer("model")}
+                disabled={!activeTask}
+              >
+                <ModelIcon className="sidebar-icon" />
+                <span>{modelName || "Model"}</span>
+              </button>
+              <button
+                ref={skillBtnRef}
+                type="button"
+                className={`sidebar-menu-btn${drawer === "skill" ? " is-active" : ""}`}
+                aria-expanded={drawer === "skill"}
+                aria-haspopup="dialog"
+                onClick={() => toggleDrawer("skill")}
+                disabled={!activeTask}
+              >
+                <SkillIcon className="sidebar-icon" />
+                <span>Skill ({skills.length})</span>
+              </button>
+              <button
+                ref={mcpBtnRef}
+                type="button"
+                className={`sidebar-menu-btn${drawer === "mcp" ? " is-active" : ""}`}
+                aria-expanded={drawer === "mcp"}
+                aria-haspopup="dialog"
+                onClick={() => toggleDrawer("mcp")}
+                disabled={!activeTask}
+              >
+                <McpIcon className="sidebar-icon" />
+                <span>MCP ({mcpServers.length})</span>
+              </button>
+              <label className="sidebar-menu-btn settings-toggle">
+                <GuardrailIcon className="sidebar-icon" />
+                <span>Guardrail</span>
+                <input
+                  type="checkbox"
+                  checked={activeTask?.guardrail_enabled ?? false}
+                  disabled={!activeTask}
+                  onChange={(e) => {
+                    if (!activeTask) return;
+                    onPatchTask(activeTask.id, {
+                      guardrail_enabled: e.target.checked,
+                    });
+                    handleSettingApplied();
+                  }}
+                />
+              </label>
+              <label className="sidebar-menu-btn settings-toggle">
+                <MemoryIcon className="sidebar-icon" />
+                <span>Memory</span>
+                <input
+                  type="checkbox"
+                  checked={activeTask?.memory_enabled ?? true}
+                  disabled={!activeTask}
+                  onChange={(e) => {
+                    if (!activeTask) return;
+                    onPatchTask(activeTask.id, {
+                      memory_enabled: e.target.checked,
+                    });
+                    handleSettingApplied();
+                  }}
+                />
+              </label>
+              <button
+                type="button"
+                className={`sidebar-menu-btn${llmGatewayOpen ? " is-active" : ""}`}
+                disabled={!activeTask}
+                onClick={() => setLlmGatewayOpen(true)}
+              >
+                <LlmGatewayIcon className="sidebar-icon" />
+                <span>
+                  LLM Gateway{llmGatewayEnabled ? " (On)" : ""}
+                </span>
+              </button>
+              <button
+                ref={appearanceBtnRef}
+                type="button"
+                className={`sidebar-menu-btn${drawer === "appearance" ? " is-active" : ""}`}
+                aria-expanded={drawer === "appearance"}
+                aria-haspopup="dialog"
+                onClick={() => toggleDrawer("appearance")}
+              >
+                <AppearanceIcon className="sidebar-icon" />
+                <span>Appearance ({themeToLabel(theme)})</span>
+              </button>
+            </div>
+          )}
         </div>
       </aside>
 
@@ -252,7 +358,7 @@ export function Sidebar({
           selected={skills}
           anchorEl={skillBtnRef.current}
           onChange={(next) => activeTask && onPatchTask(activeTask.id, { skills: next })}
-          onClose={onCloseDrawer}
+          onClose={handleDrawerClose}
         />
       )}
       {drawer === "mcp" && config && activeTask && (
@@ -262,7 +368,7 @@ export function Sidebar({
           selected={mcpServers}
           anchorEl={mcpBtnRef.current}
           onChange={(next) => activeTask && onPatchTask(activeTask.id, { mcp_servers: next })}
-          onClose={onCloseDrawer}
+          onClose={handleDrawerClose}
         />
       )}
       {drawer === "model" && config && activeTask && (
@@ -275,7 +381,20 @@ export function Sidebar({
           onChange={(next) =>
             activeTask && next[0] && onPatchTask(activeTask.id, { model_name: next[0] })
           }
-          onClose={onCloseDrawer}
+          onClose={handleDrawerClose}
+        />
+      )}
+      {drawer === "appearance" && (
+        <ConfigDrawer
+          title="Appearance"
+          options={[...THEME_OPTIONS]}
+          selected={[themeToLabel(theme)]}
+          mode="single"
+          anchorEl={appearanceBtnRef.current}
+          onChange={(next) => {
+            if (next[0]) setTheme(labelToTheme(next[0]));
+          }}
+          onClose={handleDrawerClose}
         />
       )}
 
@@ -286,6 +405,16 @@ export function Sidebar({
           gatewayConfigured={Boolean(config?.llm_gateway_configured)}
           onConfirmEnable={async (uiModels) => {
             const refreshed = await onRefreshConfig?.();
+            const gatewayStatus = await api.getLlmGateway();
+            const configured = Boolean(
+              gatewayStatus.configured ||
+                (refreshed &&
+                  "llm_gateway_configured" in refreshed &&
+                  refreshed.llm_gateway_configured),
+            );
+            if (!configured) {
+              throw new Error(LLM_GATEWAY_NOT_CONFIGURED);
+            }
             const gatewayList =
               uiModels && uiModels.length > 0
                 ? uiModels
@@ -303,12 +432,16 @@ export function Sidebar({
                   ? defaultGw
                   : gatewayList[0];
             }
-            onPatchTask(activeTask.id, patch);
+            await onPatchTask(activeTask.id, patch);
           }}
           onDisable={() =>
             onPatchTask(activeTask.id, { llm_gateway_enabled: false })
           }
-          onClose={() => setLlmGatewayOpen(false)}
+          onClose={() => {
+            setLlmGatewayOpen(false);
+            setSettingsExpanded(false);
+            onCloseDrawer();
+          }}
         />
       )}
     </>

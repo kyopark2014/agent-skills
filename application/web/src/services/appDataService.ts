@@ -111,7 +111,8 @@ export const appDataService = {
         skills: config.default_skills,
         mcp_servers: config.default_mcp_servers,
         memory_enabled: true,
-        llm_gateway_enabled: llmGatewayReady,
+        llm_gateway_enabled:
+          Boolean(config.llm_gateway_configured) && llmGatewayReady,
       });
     } catch (error) {
       throw sanitizeError(error, "Failed to initialize task.");
@@ -122,6 +123,7 @@ export const appDataService = {
     try {
       return await api.patchTask(taskId, patch);
     } catch (error) {
+      if (error instanceof Error && error.message) throw error;
       throw sanitizeError(error, "Failed to update task.");
     }
   },

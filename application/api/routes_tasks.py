@@ -1,10 +1,14 @@
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
-from application.api.routes_auth import require_user_id
+from application.api.routes_auth import require_user_id, _llm_gateway_ready
 from application import task_store
 
 router = APIRouter(prefix="/api/tasks", tags=["tasks"])
+
+_LLM_GATEWAY_NOT_CONFIGURED = (
+    "LLM Gateway가 설정되어 있지 않아 활성화할 수 없습니다."
+)
 
 
 class TaskCreate(BaseModel):
@@ -28,6 +32,11 @@ class TaskPatch(BaseModel):
     pinned: bool | None = None
 
 
+def _require_gateway_if_enabling(enabled: bool | None) -> None:
+    if enabled and not _llm_gateway_ready():
+        raise HTTPException(status_code=400, detail=_LLM_GATEWAY_NOT_CONFIGURED)
+
+
 @router.get("")
 def list_tasks(request: Request, limit: int = 100):
     user_id = require_user_id(request)
@@ -37,6 +46,7 @@ def list_tasks(request: Request, limit: int = 100):
 @router.post("")
 def create_task(body: TaskCreate, request: Request):
     user_id = require_user_id(request)
+    _require_gateway_if_enabling(body.llm_gateway_enabled)
     task = task_store.create_task(
         user_id,
         model_name=body.model_name,
@@ -65,10 +75,12 @@ def patch_task(task_id: str, body: TaskPatch, request: Request):
     task = task_store.get_task(task_id, user_id)
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
+    patch = body.model_dump(exclude_unset=True)
+    _require_gateway_if_enabling(patch.get("llm_gateway_enabled"))
     updated = task_store.update_task(
         task_id,
         user_id,
-        **body.model_dump(exclude_unset=True),
+        **patch,
     )
     return updated
 

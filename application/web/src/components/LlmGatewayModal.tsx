@@ -70,12 +70,18 @@ export function LlmGatewayModal({
     setSuccess(null);
 
     if (!isAdmin) {
-      if (!gatewayConfigured) {
-        setError("관리자가 LLM Gateway를 먼저 설정해야 합니다.");
-        return;
-      }
       setBusy(true);
+      setError(null);
       try {
+        const status = await api.getLlmGateway();
+        if (!status.configured) {
+          setError(
+            gatewayConfigured
+              ? "LLM Gateway가 설정되어 있지 않아 활성화할 수 없습니다. 관리자에게 설정을 요청하세요."
+              : "관리자가 LLM Gateway를 먼저 설정해야 합니다.",
+          );
+          return;
+        }
         await onConfirmEnable();
         onClose();
       } catch (err) {
