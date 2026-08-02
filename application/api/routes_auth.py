@@ -168,6 +168,7 @@ def set_session(body: SessionRequest, request: Request, response: Response) -> S
 
         user_id = idinfo["email"].strip()
         _set_user_cookie(response, user_id)
+        utils.ensure_user_artifacts_dir(user_id)
         logger.info("Google login success: %s (llm_gateway_ready=%s)", user_id, gateway_ready)
         return SessionResponse(
             user_id=user_id,
@@ -183,6 +184,7 @@ def set_session(body: SessionRequest, request: Request, response: Response) -> S
                 detail="Local auth bypass is disabled",
             )
         _set_user_cookie(response, local_user_id)
+        utils.ensure_user_artifacts_dir(local_user_id)
         logger.info(
             "Local auth bypass login: %s (llm_gateway_ready=%s)",
             local_user_id,
@@ -200,6 +202,8 @@ def get_session(request: Request) -> SessionResponse | None:
     user_id = get_optional_user_id(request)
     if not user_id:
         return None
+    # Ensure workspace survives process restarts for an existing cookie session
+    utils.ensure_user_artifacts_dir(user_id)
     return SessionResponse(user_id=user_id, llm_gateway_ready=_llm_gateway_ready())
 
 

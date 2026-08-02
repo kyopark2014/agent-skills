@@ -13,3 +13,4 @@ package-lock.json
 
 # local task / user session data
 data/
+workspace/

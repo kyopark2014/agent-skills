@@ -45,7 +45,8 @@ from urllib.parse import quote
 from langchain_core.tools import tool
 
 WORKING_DIR = os.path.dirname(os.path.abspath(__file__))
-ARTIFACTS_DIR = os.path.join(WORKING_DIR, "artifacts")
+# Per-user artifacts live under workspace/{user_id}/artifacts (set via set_user_artifacts).
+ARTIFACTS_DIR = utils.get_user_artifacts_dir("default")
 
 _py_ver = f"{sys.version_info.major}.{sys.version_info.minor}"
 _user_bin = os.path.expanduser(f"~/Library/Python/{_py_ver}/bin")
@@ -83,7 +84,31 @@ _EXCLUDED_SNAPSHOT_DIRS = frozenset({
     "build",
     ".mypy_cache",
     ".pytest_cache",
+    "workspace",  # scan only the active user's ARTIFACTS_DIR below
 })
+
+
+def set_user_artifacts(user_id: str | None) -> str:
+    """Point ARTIFACTS_DIR at workspace/{user_id}/artifacts and refresh execute_code globals."""
+    global ARTIFACTS_DIR
+    artifacts_dir = utils.ensure_user_artifacts_dir(user_id)
+    ARTIFACTS_DIR = artifacts_dir
+    exec_globals = globals().get("_exec_globals")
+    if isinstance(exec_globals, dict):
+        exec_globals["ARTIFACTS_DIR"] = artifacts_dir
+    logger.info(f"ARTIFACTS_DIR set for user {user_id!r}: {artifacts_dir}")
+    return artifacts_dir
+
+
+def _resolve_workdir_path(filepath: str) -> str:
+    """Resolve filepath; map relative artifacts/ onto the active ARTIFACTS_DIR."""
+    if os.path.isabs(filepath):
+        return filepath
+    normalized = filepath.replace("\\", "/").lstrip("./")
+    if normalized == "artifacts" or normalized.startswith("artifacts/"):
+        suffix = normalized[len("artifacts") :].lstrip("/")
+        return os.path.join(ARTIFACTS_DIR, suffix) if suffix else ARTIFACTS_DIR
+    return os.path.join(WORKING_DIR, filepath)
 
 
 def _working_dir_files_mtime_snapshot() -> dict:
@@ -91,6 +116,7 @@ def _working_dir_files_mtime_snapshot() -> dict:
 
     Code often writes under artifacts/ but may also write to the working dir root;
     scanning only artifacts/ missed those files and left download lists empty.
+    Other users' workspace folders are excluded; the active ARTIFACTS_DIR is scanned.
     """
     snap = {}
     if not os.path.isdir(WORKING_DIR):
@@ -104,6 +130,16 @@ def _working_dir_files_mtime_snapshot() -> dict:
                 snap[rel] = os.path.getmtime(full)
             except OSError:
                 pass
+    if os.path.isdir(ARTIFACTS_DIR):
+        for dirpath, dirnames, filenames in os.walk(ARTIFACTS_DIR):
+            dirnames[:] = [d for d in dirnames if d not in _EXCLUDED_SNAPSHOT_DIRS]
+            for fn in filenames:
+                full = os.path.join(dirpath, fn)
+                try:
+                    rel = os.path.relpath(full, WORKING_DIR)
+                    snap[rel] = os.path.getmtime(full)
+                except OSError:
+                    pass
     return snap
 
 
@@ -263,7 +299,7 @@ _exec_globals = {
     "re": _re,
     "requests": _requests,
     "WORKING_DIR": WORKING_DIR,
-    "ARTIFACTS_DIR": ARTIFACTS_DIR,
+    "ARTIFACTS_DIR": ARTIFACTS_DIR,  # updated by set_user_artifacts()
     "register_korean_font": register_korean_font,
 }
 
@@ -291,7 +327,7 @@ def execute_code(code: str) -> str:
     json, csv, os, requests, etc.
 
     Variables and imports from previous calls persist across invocations.
-    Generated files should be saved to the 'artifacts/' directory.
+    Generated files should be saved under ARTIFACTS_DIR (per-user workspace).
 
     Document types (do not confuse extensions):
     - Word / 한글 보고서 산출물 → 반드시 '.docx' (권장: Python python-docx). '.js'는 자바스크립트 소스용이며 Word 본문 보고서 파일명으로 쓰지 마세요.
@@ -299,7 +335,7 @@ def execute_code(code: str) -> str:
 
     Path variables (pre-defined, do NOT redefine):
     - WORKING_DIR: absolute path to application directory
-    - ARTIFACTS_DIR: absolute path to artifacts directory (WORKING_DIR/artifacts)
+    - ARTIFACTS_DIR: absolute path to this user's artifacts (workspace/{user_id}/artifacts)
     - register_korean_font(): registers Nanum TTF or CID fallback for ReportLab; returns font name str
 
     Args:
@@ -311,6 +347,7 @@ def execute_code(code: str) -> str:
     """
     logger.info(f"###### execute_code ######")
     os.makedirs(ARTIFACTS_DIR, exist_ok=True)
+    _exec_globals["ARTIFACTS_DIR"] = ARTIFACTS_DIR
     before_files = _working_dir_files_mtime_snapshot()
 
     old_cwd = os.getcwd()
@@ -392,7 +429,7 @@ def write_file(filepath: str, content: str = "") -> str:
         )
     logger.info(f"###### write_file: {filepath} ######")
     try:
-        full_path = filepath if os.path.isabs(filepath) else os.path.join(WORKING_DIR, filepath)
+        full_path = _resolve_workdir_path(filepath)
         parent = os.path.dirname(full_path)
         if parent:
             os.makedirs(parent, exist_ok=True)
@@ -413,13 +450,14 @@ def read_file(filepath: str) -> str:
 
     Args:
         filepath: Absolute path or path relative to WORKING_DIR.
+            Relative paths under artifacts/ map to the active user's ARTIFACTS_DIR.
 
     Returns:
         The file contents as text, or an error message.
     """
     logger.info(f"###### read_file: {filepath} ######")
     try:
-        full_path = filepath if os.path.isabs(filepath) else os.path.join(WORKING_DIR, filepath)
+        full_path = _resolve_workdir_path(filepath)
         with open(full_path, "r", encoding="utf-8") as f:
             return f.read()
     except Exception as e:
@@ -431,7 +469,8 @@ def upload_file_to_s3(filepath: str) -> str:
     """Upload a local file to S3 and return the download URL.
 
     Args:
-        filepath: Path relative to the working directory (e.g. 'artifacts/report.pdf').
+        filepath: Absolute path or path relative to WORKING_DIR
+            (e.g. 'artifacts/report.pdf' → active user's ARTIFACTS_DIR).
 
     Returns:
         The download URL, or an error message.
@@ -445,20 +484,21 @@ def upload_file_to_s3(filepath: str) -> str:
         if not s3_bucket:
             return "S3 bucket is not configured."
 
-        full_path = os.path.join(WORKING_DIR, filepath)
+        full_path = _resolve_workdir_path(filepath)
         if not os.path.exists(full_path):
             return f"File not found: {filepath}"
 
-        content_type = utils.get_contents_type(filepath)
+        s3_key = os.path.relpath(full_path, WORKING_DIR).replace("\\", "/")
+        content_type = utils.get_contents_type(s3_key)
         s3 = boto3.client("s3", region_name=config.get("region", "us-west-2"))
 
         with open(full_path, "rb") as f:
-            s3.put_object(Bucket=s3_bucket, Key=filepath, Body=f.read(), ContentType=content_type)
+            s3.put_object(Bucket=s3_bucket, Key=s3_key, Body=f.read(), ContentType=content_type)
 
         if sharing_url:
-            url = f"{sharing_url}/{url_parse.quote(filepath)}"
+            url = f"{sharing_url}/{url_parse.quote(s3_key)}"
             return f"Upload complete: {url}"
-        return f"Upload complete: {chat.s3_uri_to_console_url(f"s3://{s3_bucket}/{filepath}", config.get("region", "us-west-2"))}"
+        return f"Upload complete: {chat.s3_uri_to_console_url(f"s3://{s3_bucket}/{s3_key}", config.get("region", "us-west-2"))}"
 
     except Exception as e:
         return f"Upload failed: {str(e)}"

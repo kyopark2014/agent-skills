@@ -18,10 +18,20 @@ logger = logging.getLogger("skill")
 
 WORKING_DIR = os.path.dirname(os.path.abspath(__file__))
 SKILLS_DIR = os.path.join(WORKING_DIR, "skills")
-ARTIFACTS_DIR = os.path.join(WORKING_DIR, "artifacts")
+# Per-user artifacts: workspace/{user_id}/artifacts (kept in sync via set_user_artifacts).
+ARTIFACTS_DIR = utils.get_user_artifacts_dir("default")
 
 config = utils.load_config()
 sharing_url = config.get("sharing_url")
+
+
+def set_user_artifacts(user_id: str | None) -> str:
+    """Point ARTIFACTS_DIR at workspace/{user_id}/artifacts for skill prompts."""
+    global ARTIFACTS_DIR
+    artifacts_dir = utils.ensure_user_artifacts_dir(user_id)
+    ARTIFACTS_DIR = artifacts_dir
+    logger.info(f"skill ARTIFACTS_DIR set for user {user_id!r}: {artifacts_dir}")
+    return artifacts_dir
 
 # ═══════════════════════════════════════════════════════════════════
 #  Skill Manager – implementation of Anthropic Agent Skills spec

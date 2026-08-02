@@ -123,9 +123,13 @@ def update(userId=None, modelName=None, debugMode=None, guardrailEnabled=None, l
         modelName = userId
         userId = None
 
-    if userId is not None and userId != user_id:
-        user_id = userId
-        logger.info(f"user_id: {user_id}")
+    if userId is not None:
+        if userId != user_id:
+            user_id = userId
+            logger.info(f"user_id: {user_id}")
+        # Isolate generated files under workspace/{user_id}/artifacts
+        langgraph_agent.set_user_artifacts(user_id)
+        skill.set_user_artifacts(user_id)
 
     if modelName is not None and model_name != modelName:
         model_name = modelName
@@ -1983,7 +1987,13 @@ async def create_agent(
 
     # Pass current user_id to per-user MCP servers via process env
     # mcp_config registers the retrieve server as "kb_retriever"
-    for server_name in ("memory", "kb_retriever", "kb-retriever"):
+    for server_name in (
+        "memory",
+        "kb_retriever",
+        "kb-retriever",
+        "imageGeneration",
+        "image_generation",
+    ):
         params = server_params.get(server_name)
         if params and params.get("transport") == "stdio":
             env = dict(params.get("env") or {})
