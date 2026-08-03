@@ -233,6 +233,28 @@ export function Sidebar({
           )}
         </div>
 
+        <button
+          ref={modelBtnRef}
+          type="button"
+          className={`sidebar-menu-btn${drawer === "model" ? " is-active" : ""}`}
+          aria-expanded={drawer === "model"}
+          aria-haspopup="dialog"
+          title={modelName || "Model"}
+          disabled={!activeTask}
+          onClick={() => {
+            setSettingsExpanded(false);
+            setLlmGatewayOpen(false);
+            if (drawer === "model") {
+              onCloseDrawer();
+            } else {
+              onOpenDrawer("model");
+            }
+          }}
+        >
+          <ModelIcon className="sidebar-icon" />
+          <span>{modelName || "Model"}</span>
+        </button>
+
         <div
           ref={settingsSectionRef}
           className={`sidebar-section${settingsExpanded ? " is-expanded" : ""}`}
@@ -246,6 +268,7 @@ export function Sidebar({
                 collapseSettings();
                 return;
               }
+              onCloseDrawer();
               setSettingsExpanded(true);
             }}
           >
@@ -255,19 +278,6 @@ export function Sidebar({
           </button>
           {settingsExpanded && (
             <div className="sidebar-section-body">
-              <button
-                ref={modelBtnRef}
-                type="button"
-                className={`sidebar-menu-btn${drawer === "model" ? " is-active" : ""}`}
-                aria-expanded={drawer === "model"}
-                aria-haspopup="dialog"
-                title={modelName || "Model"}
-                onClick={() => toggleDrawer("model")}
-                disabled={!activeTask}
-              >
-                <ModelIcon className="sidebar-icon" />
-                <span>{modelName || "Model"}</span>
-              </button>
               <button
                 ref={skillBtnRef}
                 type="button"
@@ -381,7 +391,7 @@ export function Sidebar({
           onChange={(next) =>
             activeTask && next[0] && onPatchTask(activeTask.id, { model_name: next[0] })
           }
-          onClose={handleDrawerClose}
+          onClose={onCloseDrawer}
         />
       )}
       {drawer === "appearance" && (
