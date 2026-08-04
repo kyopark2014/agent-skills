@@ -129,6 +129,111 @@ select {
   white-space: nowrap;
 }
 
+.brand-graph-btn {
+  flex: 1;
+  border: none;
+  background: transparent;
+  padding: 4px 6px;
+  margin: -4px -6px;
+  border-radius: 6px;
+  text-align: left;
+  cursor: pointer;
+  font: inherit;
+  color: inherit;
+}
+
+.brand-graph-btn:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.knowledge-graph-modal {
+  padding: 24px 16px;
+  z-index: 1100;
+}
+
+.knowledge-graph-panel {
+  position: relative;
+  width: min(1100px, 94vw);
+  height: min(820px, 88vh);
+  display: flex;
+  flex-direction: column;
+  background: #0d1117;
+  border: 1px solid var(--border-subtle, #30363d);
+  border-radius: 12px;
+  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.55);
+  overflow: hidden;
+}
+
+.knowledge-graph-close {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  z-index: 2;
+  width: 32px;
+  height: 32px;
+  border: 1px solid #30363d;
+  border-radius: 8px;
+  background: rgba(33, 38, 45, 0.92);
+  color: #8b949e;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.knowledge-graph-close:hover {
+  background: #30363d;
+  color: #e6edf3;
+}
+
+.knowledge-graph-frame {
+  flex: 1;
+  width: 100%;
+  border: none;
+  background: #0d1117;
+}
+
+.knowledge-graph-placeholder {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 48px 32px;
+  text-align: center;
+  color: #e6edf3;
+}
+
+.knowledge-graph-placeholder-title {
+  margin: 0;
+  font-size: 1.25rem;
+  font-weight: 600;
+}
+
+.knowledge-graph-placeholder-body {
+  margin: 0;
+  max-width: 28rem;
+  color: #8b949e;
+  line-height: 1.5;
+  font-size: 0.95rem;
+}
+
+.knowledge-graph-banner {
+  position: absolute;
+  left: 50%;
+  bottom: 16px;
+  transform: translateX(-50%);
+  z-index: 2;
+  padding: 6px 14px;
+  border-radius: 999px;
+  background: rgba(33, 38, 45, 0.92);
+  border: 1px solid #30363d;
+  color: #e6edf3;
+  font-size: 0.85rem;
+}
+
 .brand-logout-btn {
   flex-shrink: 0;
   width: 28px;

@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from application.task_store_persistence import (
+    db_write_lock,
     flush_persist,
     schedule_persist,
     working_db_path,
@@ -24,63 +25,66 @@ def _now_iso() -> str:
 
 def _connect() -> sqlite3.Connection:
     os.makedirs(_DATA_DIR, exist_ok=True)
-    conn = sqlite3.connect(_DB_PATH, check_same_thread=False)
+    conn = sqlite3.connect(_DB_PATH, check_same_thread=False, timeout=5.0)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=5000")
     return conn
 
 
 def init_db() -> None:
     global _DB_PATH
     _DB_PATH = working_db_path()
-    with _connect() as conn:
-        conn.executescript(
-            """
-            CREATE TABLE IF NOT EXISTS tasks (
-              id TEXT PRIMARY KEY,
-              user_id TEXT NOT NULL,
-              title TEXT,
-              runtime_session_id TEXT NOT NULL UNIQUE,
-              model_name TEXT,
-              skills_json TEXT,
-              mcp_servers_json TEXT,
-              guardrail_enabled INTEGER DEFAULT 0,
-              llm_gateway_enabled INTEGER DEFAULT 0,
-              memory_enabled INTEGER DEFAULT 1,
-              created_at TEXT,
-              updated_at TEXT
-            );
+    with db_write_lock:
+        with _connect() as conn:
+            conn.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS tasks (
+                  id TEXT PRIMARY KEY,
+                  user_id TEXT NOT NULL,
+                  title TEXT,
+                  runtime_session_id TEXT NOT NULL UNIQUE,
+                  model_name TEXT,
+                  skills_json TEXT,
+                  mcp_servers_json TEXT,
+                  guardrail_enabled INTEGER DEFAULT 0,
+                  llm_gateway_enabled INTEGER DEFAULT 0,
+                  memory_enabled INTEGER DEFAULT 1,
+                  created_at TEXT,
+                  updated_at TEXT
+                );
 
-            CREATE TABLE IF NOT EXISTS messages (
-              id TEXT PRIMARY KEY,
-              task_id TEXT NOT NULL,
-              role TEXT NOT NULL,
-              content TEXT,
-              images_json TEXT,
-              tool_events_json TEXT,
-              created_at TEXT,
-              FOREIGN KEY (task_id) REFERENCES tasks(id)
-            );
+                CREATE TABLE IF NOT EXISTS messages (
+                  id TEXT PRIMARY KEY,
+                  task_id TEXT NOT NULL,
+                  role TEXT NOT NULL,
+                  content TEXT,
+                  images_json TEXT,
+                  tool_events_json TEXT,
+                  created_at TEXT,
+                  FOREIGN KEY (task_id) REFERENCES tasks(id)
+                );
 
-            CREATE INDEX IF NOT EXISTS idx_tasks_user_updated
-              ON tasks(user_id, updated_at DESC);
-            CREATE INDEX IF NOT EXISTS idx_messages_task_created
-              ON messages(task_id, created_at ASC);
-            """
-        )
-        try:
-            conn.execute("ALTER TABLE tasks ADD COLUMN pinned INTEGER DEFAULT 0")
-        except sqlite3.OperationalError:
-            pass
-        try:
-            conn.execute("ALTER TABLE tasks ADD COLUMN memory_enabled INTEGER DEFAULT 1")
-        except sqlite3.OperationalError:
-            pass
-        try:
-            conn.execute(
-                "ALTER TABLE tasks ADD COLUMN llm_gateway_enabled INTEGER DEFAULT 0"
+                CREATE INDEX IF NOT EXISTS idx_tasks_user_updated
+                  ON tasks(user_id, updated_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_messages_task_created
+                  ON messages(task_id, created_at ASC);
+                """
             )
-        except sqlite3.OperationalError:
-            pass
+            try:
+                conn.execute("ALTER TABLE tasks ADD COLUMN pinned INTEGER DEFAULT 0")
+            except sqlite3.OperationalError:
+                pass
+            try:
+                conn.execute("ALTER TABLE tasks ADD COLUMN memory_enabled INTEGER DEFAULT 1")
+            except sqlite3.OperationalError:
+                pass
+            try:
+                conn.execute(
+                    "ALTER TABLE tasks ADD COLUMN llm_gateway_enabled INTEGER DEFAULT 0"
+                )
+            except sqlite3.OperationalError:
+                pass
 
 
 def _after_write() -> None:
@@ -158,6 +162,7 @@ def get_task_refreshing(task_id: str, user_id: str | None = None) -> dict[str, A
 
         if not persistence_enabled():
             return None
+        # restore_tasks_db takes db_write_lock so it won't race mid-write.
         restore_tasks_db()
         init_db()
     except Exception:
@@ -180,30 +185,31 @@ def create_task(
     # Keep the checkpoint namespace aligned with the task identity.
     runtime_session_id = task_id
     now = _now_iso()
-    with _connect() as conn:
-        conn.execute(
-            """
-            INSERT INTO tasks (
-              id, user_id, title, runtime_session_id, model_name,
-              skills_json, mcp_servers_json, guardrail_enabled, llm_gateway_enabled,
-              memory_enabled, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                task_id,
-                user_id,
-                title,
-                runtime_session_id,
-                model_name or DEFAULT_MODEL,
-                json.dumps(skills or [], ensure_ascii=False),
-                json.dumps(mcp_servers or [], ensure_ascii=False),
-                1 if guardrail_enabled else 0,
-                1 if llm_gateway_enabled else 0,
-                1 if memory_enabled else 0,
-                now,
-                now,
-            ),
-        )
+    with db_write_lock:
+        with _connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO tasks (
+                  id, user_id, title, runtime_session_id, model_name,
+                  skills_json, mcp_servers_json, guardrail_enabled, llm_gateway_enabled,
+                  memory_enabled, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    task_id,
+                    user_id,
+                    title,
+                    runtime_session_id,
+                    model_name or DEFAULT_MODEL,
+                    json.dumps(skills or [], ensure_ascii=False),
+                    json.dumps(mcp_servers or [], ensure_ascii=False),
+                    1 if guardrail_enabled else 0,
+                    1 if llm_gateway_enabled else 0,
+                    1 if memory_enabled else 0,
+                    now,
+                    now,
+                ),
+            )
     # Flush immediately so sibling ECS tasks / replacements can see the row
     # (debounced persist alone loses creates during rolling deploys).
     flush_persist()
@@ -245,25 +251,28 @@ def update_task(task_id: str, user_id: str, **fields: Any) -> dict[str, Any] | N
     values.append(_now_iso())
     values.extend([task_id, user_id])
 
-    with _connect() as conn:
-        conn.execute(
-            f"UPDATE tasks SET {', '.join(sets)} WHERE id = ? AND user_id = ?",
-            values,
-        )
+    with db_write_lock:
+        with _connect() as conn:
+            conn.execute(
+                f"UPDATE tasks SET {', '.join(sets)} WHERE id = ? AND user_id = ?",
+                values,
+            )
     _after_write()
     return get_task(task_id, user_id)
 
 
 def delete_task(task_id: str, user_id: str) -> bool:
-    with _connect() as conn:
-        conn.execute("DELETE FROM messages WHERE task_id = ?", (task_id,))
-        cur = conn.execute(
-            "DELETE FROM tasks WHERE id = ? AND user_id = ?",
-            (task_id, user_id),
-        )
-    if cur.rowcount > 0:
+    with db_write_lock:
+        with _connect() as conn:
+            conn.execute("DELETE FROM messages WHERE task_id = ?", (task_id,))
+            cur = conn.execute(
+                "DELETE FROM tasks WHERE id = ? AND user_id = ?",
+                (task_id, user_id),
+            )
+            deleted = cur.rowcount > 0
+    if deleted:
         _after_write()
-    return cur.rowcount > 0
+    return deleted
 
 
 def list_messages(task_id: str) -> list[dict[str, Any]]:
@@ -289,40 +298,41 @@ def add_message(
 ) -> dict[str, Any]:
     message_id = str(uuid.uuid4())
     now = _now_iso()
-    with _connect() as conn:
-        conn.execute(
-            """
-            INSERT INTO messages (
-              id, task_id, role, content, images_json, tool_events_json, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                message_id,
-                task_id,
-                role,
-                content,
-                json.dumps(images or [], ensure_ascii=False),
-                json.dumps(tool_events or [], ensure_ascii=False),
-                now,
-            ),
-        )
-        title_update = None
-        if role == "user":
-            row = conn.execute(
-                "SELECT title FROM tasks WHERE id = ?", (task_id,)
-            ).fetchone()
-            if row and (row["title"] or "New task") in ("New task", ""):
-                title_update = content.strip()[:50] or "New task"
+    with db_write_lock:
+        with _connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO messages (
+                  id, task_id, role, content, images_json, tool_events_json, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    message_id,
+                    task_id,
+                    role,
+                    content,
+                    json.dumps(images or [], ensure_ascii=False),
+                    json.dumps(tool_events or [], ensure_ascii=False),
+                    now,
+                ),
+            )
+            title_update = None
+            if role == "user":
+                row = conn.execute(
+                    "SELECT title FROM tasks WHERE id = ?", (task_id,)
+                ).fetchone()
+                if row and (row["title"] or "New task") in ("New task", ""):
+                    title_update = content.strip()[:50] or "New task"
 
-        conn.execute(
-            "UPDATE tasks SET updated_at = ?"
-            + (", title = ?" if title_update else "")
-            + " WHERE id = ?",
-            ([now, title_update, task_id] if title_update else [now, task_id]),
-        )
+            conn.execute(
+                "UPDATE tasks SET updated_at = ?"
+                + (", title = ?" if title_update else "")
+                + " WHERE id = ?",
+                ([now, title_update, task_id] if title_update else [now, task_id]),
+            )
+            row = conn.execute(
+                "SELECT * FROM messages WHERE id = ?", (message_id,)
+            ).fetchone()
+            message = _row_to_message(row) if row else {}
     _after_write()
-    with _connect() as conn:
-        row = conn.execute(
-            "SELECT * FROM messages WHERE id = ?", (message_id,)
-        ).fetchone()
-    return _row_to_message(row) if row else {}
+    return message

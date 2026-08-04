@@ -5,6 +5,7 @@ import { useTheme } from "../hooks/useTheme";
 import type { Theme } from "../theme";
 import type { AppConfig, Task } from "../types";
 import { ConfigDrawer } from "./ConfigDrawer";
+import { KnowledgeGraphModal } from "./KnowledgeGraphModal";
 import { LlmGatewayModal } from "./LlmGatewayModal";
 import { TaskListItem } from "./TaskListItem";
 import {
@@ -81,6 +82,7 @@ export function Sidebar({
   const appearanceBtnRef = useRef<HTMLButtonElement>(null);
   const settingsSectionRef = useRef<HTMLDivElement>(null);
   const [llmGatewayOpen, setLlmGatewayOpen] = useState(false);
+  const [knowledgeGraphOpen, setKnowledgeGraphOpen] = useState(false);
   const [settingsExpanded, setSettingsExpanded] = useState(false);
   const { theme, setTheme } = useTheme();
   const skills = activeTask?.skills ?? config?.default_skills ?? [];
@@ -125,7 +127,7 @@ export function Sidebar({
       if (!(target instanceof Element)) return;
       if (settingsSectionRef.current?.contains(target)) return;
       if (target.closest(".config-popover")) return;
-      if (target.closest(".modal-overlay, .llm-gateway-modal")) return;
+      if (target.closest(".modal-overlay, .llm-gateway-modal, .knowledge-graph-modal")) return;
       collapseSettings();
     }
 
@@ -169,7 +171,18 @@ export function Sidebar({
       <aside className={`sidebar${open ? " sidebar-panel-open" : ""}`}>
         <div className="sidebar-header">
           <div className="brand-row">
-            <div className="brand">{brandTitle}</div>
+            <button
+              type="button"
+              className="brand brand-graph-btn"
+              title="Knowledge Graph 보기"
+              aria-label={`${brandTitle} Knowledge Graph 보기`}
+              onClick={() => {
+                collapseSettings();
+                setKnowledgeGraphOpen(true);
+              }}
+            >
+              {brandTitle}
+            </button>
             <div className="sidebar-header-actions">
               <button
                 type="button"
@@ -405,6 +418,14 @@ export function Sidebar({
             if (next[0]) setTheme(labelToTheme(next[0]));
           }}
           onClose={handleDrawerClose}
+        />
+      )}
+
+      {knowledgeGraphOpen && (
+        <KnowledgeGraphModal
+          userId={userId}
+          title={brandTitle}
+          onClose={() => setKnowledgeGraphOpen(false)}
         />
       )}
 

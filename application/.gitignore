@@ -6,7 +6,6 @@ config.json
 MEMORY.md
 memory/
 node_modules/
-graphify-out/
 package-lock.json
 *.py[cod]
 .session_storage/
@@ -16,3 +15,7 @@ data/
 
 # macOS
 .DS_Store
+
+out/
+corpus/
+artifacts/
