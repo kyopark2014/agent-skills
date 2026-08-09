@@ -121,6 +121,7 @@ def publish_user_graphs(
     results: list[dict[str, Any]] = []
     pid = pattern or resolve_graph_pattern(user_id=user)
 
+
     for user_id, node_ids in sorted(groups.items(), key=lambda x: (-len(x[1]), x[0])):
         if user is not None and user_id != user and safe_slug(user_id) != safe_slug(user):
             continue
@@ -146,6 +147,8 @@ def publish_user_graphs(
         if user is not None:
             break
     return results
+
+
 
 
 def republish_html_from_json(
@@ -187,7 +190,6 @@ def republish_html_from_json(
         ),
     )
     return html_path
-
 
 def collect_from_graphify_out(
     src: Path,
