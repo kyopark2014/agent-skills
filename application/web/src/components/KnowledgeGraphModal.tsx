@@ -76,7 +76,7 @@ export function KnowledgeGraphModal({ userId, title, onClose }: Props) {
       const data = e.data;
       if (!data || data.type !== "graph-pattern") return;
       const pattern = String(data.pattern || "");
-      if (pattern !== "pattern1" && pattern !== "pattern2") return;
+      if (pattern !== "pattern1" && pattern !== "pattern2" && pattern !== "pattern3") return;
       if (patternBusyRef.current) return;
       patternBusyRef.current = true;
       setPatternBusy(true);

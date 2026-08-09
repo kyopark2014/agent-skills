@@ -1,4 +1,4 @@
-"""Pattern 2 — Neo4j Explore/Bloom 스크린샷 스타일 (작은 점·곡선 엣지·플로팅 검색/범례)."""
+"""Pattern 3 — Neo4j Browser-style holistic view (어두운 배경·라벨 노드·관계 엣지·전체 fit)."""
 
 from __future__ import annotations
 
@@ -11,27 +11,27 @@ from typing import Any
 
 import networkx as nx
 
-# Neo4j Explore 스크린샷에 가까운 타입 팔레트
+# 밝은 배경용 파스텔 팔레트 (스크린샷의 coral / sky 톤 포함)
 GROUP_COLORS = [
-    "#E85D75",  # Person-like coral
-    "#A78BFA",  # Event purple
-    "#2DD4BF",  # Organization teal
-    "#38BDF8",  # Channel cyan
-    "#4ADE80",  # Project green
-    "#C084FC",  # Product lavender
-    "#60A5FA",  # Creative Work blue
-    "#F472B6",  # Web Page pink
-    "#FBBF24",  # Defined Term gold
-    "#F87171",  # Action red
-    "#94A3B8",
-    "#FB923C",
-    "#34D399",
-    "#818CF8",
-    "#F0ABFC",
+    "#F08080",
+    "#7EB6D9",
+    "#90C695",
+    "#E8A87C",
+    "#C39BD3",
+    "#76D7C4",
+    "#F5B041",
+    "#85C1E9",
+    "#F1948A",
+    "#A9CCE3",
+    "#82E0AA",
+    "#D7BDE2",
+    "#F9E79F",
+    "#AED6F1",
+    "#D5DBDB",
 ]
 
 
-def _wrap_label(text: str, width: int = 16) -> str:
+def _wrap_label(text: str, width: int = 18) -> str:
     text = (text or "").strip() or "(unnamed)"
     if len(text) <= width:
         return text
@@ -47,7 +47,7 @@ def _wrap_label(text: str, width: int = 16) -> str:
         parts.append(buf.strip())
     if not parts:
         parts = [text[:width]]
-    return "\n".join(parts[:4])
+    return "\n".join(parts[:3])
 
 
 def _infer_community_labels(
@@ -58,12 +58,13 @@ def _infer_community_labels(
     degree = dict(G.degree())
     for cid, members in communities.items():
         ranked = sorted(members, key=lambda n: degree.get(n, 0), reverse=True)
-        top = ""
-        for nid in ranked[:1]:
+        top = []
+        for nid in ranked[:3]:
             lab = str(G.nodes[nid].get("label") or nid)
             lab = re.sub(r"\s+", " ", lab).strip()
-            top = lab[:32]
-        labels[cid] = top if top else f"Group {cid}"
+            if lab and lab not in top:
+                top.append(lab[:28])
+        labels[cid] = " · ".join(top) if top else f"그룹 {cid}"
     return labels
 
 
@@ -97,7 +98,7 @@ def _node_description(G: nx.Graph, node_id: str) -> str:
     return "\n".join(lines) if lines else "관련 설명이 없습니다."
 
 
-def to_pattern2_html(
+def to_pattern3_html(
     G: nx.Graph,
     communities: dict[int, list[str]],
     output_path: str | Path,
@@ -106,12 +107,13 @@ def to_pattern2_html(
     subtitle: str | None = None,
     community_labels: dict[int, str] | None = None,
 ) -> None:
-    """Write Neo4j Explore/Bloom-style interactive knowledge graph HTML."""
+    """Write Neo4j Browser-style holistic overview HTML."""
     community_labels = community_labels or _infer_community_labels(G, communities)
     node_community = {
         nid: cid for cid, members in communities.items() for nid in members
     }
     degree = dict(G.degree())
+    max_deg = max(degree.values()) if degree else 1
 
     raw_nodes: list[dict[str, Any]] = []
     descriptions: dict[str, str] = {}
@@ -119,12 +121,15 @@ def to_pattern2_html(
         cid = int(node_community.get(nid, 0))
         color = GROUP_COLORS[cid % len(GROUP_COLORS)]
         deg = degree.get(nid, 1)
+        # hubs a bit larger; keep sizes moderate for dense overview
+        size = 18 + 22 * (deg / max_deg)
         label = str(data.get("label") or nid)
         raw_nodes.append(
             {
                 "id": nid,
                 "label": _wrap_label(label),
                 "group": str(cid),
+                "size": round(size, 1),
                 "color": color,
                 "degree": deg,
             }
@@ -140,11 +145,13 @@ def to_pattern2_html(
         if src not in G or tgt not in G:
             src, tgt = u, v
         conf = data.get("confidence") or "EXTRACTED"
+        rel = str(data.get("relation") or "related")
         raw_edges.append(
             {
                 "from": src,
                 "to": tgt,
-                "label": data.get("relation") or "",
+                "label": rel.upper() if rel.islower() or "_" in rel else rel,
+                "dashed": conf != "EXTRACTED",
                 "confidence": conf,
             }
         )
@@ -154,15 +161,13 @@ def to_pattern2_html(
         legend_items.append(
             {
                 "id": str(cid),
-                "label": community_labels.get(cid, f"Group {cid}"),
+                "label": community_labels.get(cid, f"그룹 {cid}"),
                 "color": GROUP_COLORS[cid % len(GROUP_COLORS)],
                 "count": len(communities[cid]),
             }
         )
 
-    subtitle = subtitle or (
-        "Neo4j Explore style · click a node for details"
-    )
+    subtitle = subtitle or "Holistic view · relationship labels · fit entire graph"
 
     payload = {
         "title": title,
@@ -211,7 +216,7 @@ def _render_template(payload: dict[str, Any]) -> str:
   html, body {{
     height: 100%;
     overflow: hidden;
-    background: #151922;
+    background: #0d1117;
     color: #e8eaed;
     font-family: "Segoe UI", "Helvetica Neue", Arial, sans-serif;
     color-scheme: dark;
@@ -221,7 +226,7 @@ def _render_template(payload: dict[str, Any]) -> str:
     position: relative;
     width: 100%;
     height: 100%;
-    background: #151922;
+    background: #0d1117;
     outline: none;
   }}
   #mynetwork {{
@@ -419,10 +424,10 @@ def _render_template(payload: dict[str, Any]) -> str:
   }}
   .ctrl-btn:hover {{ border-color: rgba(255,255,255,0.22); background: rgba(40,46,60,0.96); }}
   .ctrl-btn.active {{
-    background: #3b82f6;
-    border-color: #3b82f6;
+    background: #2563eb;
+    border-color: #2563eb;
     color: #fff;
-    font-weight: 650;
+    font-weight: 700;
   }}
   .ctrl-btn:disabled {{ opacity: 0.55; cursor: wait; }}
 </style>
@@ -461,8 +466,8 @@ def _render_template(payload: dict[str, Any]) -> str:
   <div class="controls">
     <div class="controls-row">
       <button type="button" class="ctrl-btn pattern-btn" data-pattern="pattern1" onclick="selectPattern('pattern1')" title="Force Atlas">Force Atlas</button>
-      <button type="button" class="ctrl-btn pattern-btn active" data-pattern="pattern2" onclick="selectPattern('pattern2')" title="Neo4j Explore (현재)">Neo4j Explore</button>
-      <button type="button" class="ctrl-btn pattern-btn" data-pattern="pattern3" onclick="selectPattern('pattern3')" title="Holistic View">Holistic View</button>
+      <button type="button" class="ctrl-btn pattern-btn" data-pattern="pattern2" onclick="selectPattern('pattern2')" title="Neo4j Explore">Neo4j Explore</button>
+      <button type="button" class="ctrl-btn pattern-btn active" data-pattern="pattern3" onclick="selectPattern('pattern3')" title="Holistic View (현재)">Holistic View</button>
     </div>
     <div class="controls-row">
       <button class="ctrl-btn" onclick="network.fit({{ animation: {{ duration: 400 }} }})">전체 보기</button>
@@ -480,6 +485,12 @@ const nodeDescriptions = DATA.descriptions;
 const legend = DATA.legend;
 let activeGroup = null;
 
+function darkenColor(hex, factor) {{
+  const r = Math.floor(parseInt(hex.slice(1,3), 16) * (1-factor));
+  const g = Math.floor(parseInt(hex.slice(3,5), 16) * (1-factor));
+  const b = Math.floor(parseInt(hex.slice(5,7), 16) * (1-factor));
+  return `rgb(${{r}},${{g}},${{b}})`;
+}}
 function lightenColor(hex, factor) {{
   const r = Math.min(255, Math.floor(parseInt(hex.slice(1,3), 16) + 255 * factor));
   const g = Math.min(255, Math.floor(parseInt(hex.slice(3,5), 16) + 255 * factor));
@@ -514,34 +525,37 @@ legend.forEach(item => {{
 }});
 
 const maxDeg = Math.max(...rawNodes.map(n => n.degree || 1), 1);
-const labelFloor = Math.max(2, maxDeg * 0.2);
+const nCount = rawNodes.length;
+const labelFloor = nCount <= 120 ? 1 : Math.max(1, maxDeg * 0.12);
 const visNodes = rawNodes.map(n => {{
   const showLabel = (n.degree || 1) >= labelFloor;
   const name = (n.label || '').replace(/\\n/g, ' ').trim();
-  const short = name.length > 34 ? name.slice(0, 33) + '…' : name;
+  const short = name.length > 28 ? name.slice(0, 27) + '…' : name;
+  const hubish = (n.degree || 1) >= maxDeg * 0.45;
   return {{
     id: n.id,
-    label: showLabel ? short : '',
+    label: showLabel ? (n.label || short) : '',
     group: n.group,
-    size: 4.2 + 2.8 * ((n.degree || 1) / maxDeg),
+    size: n.size,
     color: {{
-      background: n.color,
-      border: n.color,
-      highlight: {{ background: lightenColor(n.color, 0.2), border: lightenColor(n.color, 0.2) }},
-      hover: {{ background: lightenColor(n.color, 0.12), border: lightenColor(n.color, 0.12) }}
+      background: hubish ? n.color : darkenColor(n.color, 0.08),
+      border: lightenColor(n.color, 0.2),
+      highlight: {{ background: lightenColor(n.color, 0.18), border: '#ffffff' }},
+      hover: {{ background: lightenColor(n.color, 0.12), border: lightenColor(n.color, 0.28) }}
     }},
     font: {{
       color: '#f5f7fa',
-      size: showLabel ? 12 : 0,
+      size: showLabel ? (hubish ? 12 : 10) : 0,
       face: 'Segoe UI',
+      multi: true,
+      align: 'center',
       strokeWidth: 3,
-      strokeColor: 'rgba(21,25,34,0.85)',
-      align: 'right',
-      vadjust: -1
+      strokeColor: 'rgba(13,17,23,0.9)',
+      vadjust: 0
     }},
-    shadow: false,
-    borderWidth: 0,
-    shape: 'dot',
+    shadow: {{ enabled: hubish, color: n.color + '55', size: 10, x: 0, y: 0 }},
+    borderWidth: hubish ? 2.5 : 1.5,
+    shape: 'ellipse',
     title: name
   }};
 }});
@@ -550,18 +564,23 @@ const visEdges = rawEdges.map((e, i) => ({{
   id: i,
   from: e.from,
   to: e.to,
-  label: '',
+  label: e.label || '',
   color: {{
-    color: 'rgba(170, 178, 192, 0.28)',
-    highlight: 'rgba(210, 216, 228, 0.65)',
-    hover: 'rgba(210, 216, 228, 0.5)'
+    color: 'rgba(170, 178, 192, 0.45)',
+    highlight: 'rgba(230, 234, 240, 0.85)',
+    hover: 'rgba(210, 216, 228, 0.7)'
   }},
-  dashes: false,
-  arrows: {{ to: {{ enabled: false }} }},
-  font: {{ size: 0 }},
-  width: 0.55,
-  selectionWidth: 1.2,
-  smooth: {{ type: 'continuous', roundness: 0.45 }},
+  dashes: e.dashed || false,
+  arrows: {{ to: {{ enabled: true, scaleFactor: 0.65 }} }},
+  font: {{
+    size: 9,
+    color: '#c8d0dc',
+    align: 'middle',
+    background: '#0d1117',
+    strokeWidth: 0
+  }},
+  width: e.dashed ? 0.9 : 1.15,
+  smooth: {{ type: 'dynamic', roundness: 0.3 }},
   title: e.label + (e.confidence ? ` [${{e.confidence}}]` : '')
 }}));
 
@@ -573,31 +592,31 @@ const networkData = {{
 
 const options = {{
   nodes: {{
-    shape: 'dot',
-    scaling: {{ min: 4, max: 12 }}
+    shape: 'ellipse',
+    scaling: {{ label: {{ enabled: true, min: 8, max: 14 }} }}
   }},
   edges: {{
-    smooth: {{ type: 'continuous', roundness: 0.45 }}
+    font: {{ size: 9, align: 'middle', background: '#0d1117', color: '#c8d0dc' }},
+    smooth: {{ type: 'dynamic', roundness: 0.3 }}
   }},
   physics: {{
     enabled: true,
-    solver: 'barnesHut',
-    barnesHut: {{
-      gravitationalConstant: -14000,
-      centralGravity: 0.12,
-      springLength: 85,
-      springConstant: 0.03,
+    solver: 'forceAtlas2Based',
+    forceAtlas2Based: {{
+      gravitationalConstant: -55,
+      centralGravity: 0.008,
+      springLength: 160,
+      springConstant: 0.05,
       damping: 0.45,
-      avoidOverlap: 0.12
+      avoidOverlap: 0.9
     }},
-    stabilization: {{ enabled: true, iterations: 260, updateInterval: 25 }}
+    stabilization: {{ enabled: true, iterations: 220, updateInterval: 25 }}
   }},
   interaction: {{
     hover: true,
     tooltipDelay: 100,
     zoomView: true,
     dragView: true,
-    hideEdgesOnDrag: false,
     keyboard: {{ enabled: true, bindToWindow: false }}
   }},
   layout: {{ improvedLayout: true }}
@@ -609,7 +628,6 @@ container.setAttribute('tabindex', '0');
 network.on('click', function(params) {{
   if (params.nodes.length === 0) {{
     hideDetail();
-    // empty canvas (not an edge hit): toggle legend visibility
     if (params.edges.length === 0) toggleLegend();
     return;
   }}
@@ -622,10 +640,10 @@ network.on('click', function(params) {{
   const titleEl = document.getElementById('detail-title');
   const descEl = document.getElementById('detail-desc');
 
-  typeEl.textContent = leg ? leg.label : (`Group ${{node.group}}`);
+  typeEl.textContent = leg ? leg.label : (`그룹 ${{node.group}}`);
   typeEl.style.background = node.color + '33';
-  typeEl.style.color = node.color;
-  typeEl.style.border = `1px solid ${{node.color}}66`;
+  typeEl.style.color = darkenColor(node.color, 0.35);
+  typeEl.style.border = `1px solid ${{node.color}}`;
   titleEl.textContent = node.label.replace(/\\n/g, ' ');
   descEl.textContent = nodeDescriptions[nodeId] || '관련 설명이 없습니다.';
   detail.style.display = 'block';
@@ -635,11 +653,8 @@ network.on('hoverNode', () => {{ container.style.cursor = 'pointer'; }});
 network.on('blurNode', () => {{ container.style.cursor = 'default'; }});
 
 network.once('stabilizationIterationsDone', function() {{
-  if (DATA.hub) {{
-    network.focus(DATA.hub, {{ scale: 0.9, animation: {{ duration: 700 }} }});
-  }} else {{
-    network.fit();
-  }}
+  // Holistic: always fit the full graph
+  network.fit({{ animation: {{ duration: 700, easingFunction: 'easeInOutQuad' }} }});
 }});
 
 function filterGroup(group) {{
@@ -652,13 +667,13 @@ function filterGroup(group) {{
   networkData.nodes.update(rawNodes.map(n => ({{
     id: n.id,
     hidden: false,
-    opacity: n.group === group ? 1 : 0.08
+    opacity: n.group === group ? 1 : 0.12
   }})));
 }}
 
 function stabilize() {{
   const ids = networkData.nodes.getIds();
-  const spread = Math.max(900, Math.sqrt(ids.length) * 200);
+  const spread = Math.max(1000, Math.sqrt(ids.length) * 220);
   networkData.nodes.update(ids.map(id => ({{
     id,
     x: (Math.random() - 0.5) * spread,
@@ -668,13 +683,13 @@ function stabilize() {{
   network.once('stabilizationIterationsDone', function() {{
     network.fit({{ animation: {{ duration: 600 }} }});
   }});
-  network.stabilize(260);
+  network.stabilize(220);
 }}
 
 function selectPattern(pattern) {{
   pattern = String(pattern || '');
   if (pattern !== 'pattern1' && pattern !== 'pattern2' && pattern !== 'pattern3') return;
-  if (pattern === 'pattern2') return;
+  if (pattern === 'pattern3') return;
   document.querySelectorAll('.pattern-btn').forEach(btn => {{ btn.disabled = true; }});
   if (window.parent && window.parent !== window) {{
     window.parent.postMessage({{ type: 'graph-pattern', pattern }}, '*');
@@ -687,7 +702,7 @@ document.getElementById('search').addEventListener('input', (ev) => {{
     networkData.nodes.update(rawNodes.map(n => ({{
       id: n.id,
       hidden: false,
-      opacity: (!activeGroup || n.group === activeGroup) ? 1 : 0.08
+      opacity: (!activeGroup || n.group === activeGroup) ? 1 : 0.12
     }})));
     return;
   }}
@@ -697,7 +712,7 @@ document.getElementById('search').addEventListener('input', (ev) => {{
     if (hit) hits.push(n.id);
     return {{ id: n.id, hidden: !hit, opacity: 1 }};
   }}));
-  if (hits.length === 1) network.focus(hits[0], {{ scale: 1.15, animation: true }});
+  if (hits.length === 1) network.focus(hits[0], {{ scale: 1.1, animation: true }});
 }});
 </script>
 </body>

@@ -1,4 +1,4 @@
-"""Pattern 1 — current Knowledge Graph Force Atlas HTML (default)."""
+"""Pattern 1 — Force Atlas graph with Neo4j Explore-style chrome (search/legend/controls)."""
 
 from __future__ import annotations
 
@@ -90,7 +90,6 @@ def _node_description(G: nx.Graph, node_id: str) -> str:
         if conf and conf != "EXTRACTED":
             tag += f" [{conf}]"
         rels.append(f"→ {tag} → {nbr_label}")
-    # undirected: also show incoming-style via neighbors already covered
     if rels:
         lines.append("관계:")
         lines.extend(rels[:8])
@@ -108,7 +107,7 @@ def to_pattern1_html(
     subtitle: str | None = None,
     community_labels: dict[int, str] | None = None,
 ) -> None:
-    """Write an agentcore-style interactive knowledge graph HTML."""
+    """Write Force Atlas knowledge graph HTML with Pattern 2 chrome."""
     community_labels = community_labels or _infer_community_labels(G, communities)
     node_community = {
         nid: cid for cid, members in communities.items() for nid in members
@@ -136,14 +135,12 @@ def to_pattern1_html(
         )
         descriptions[nid] = _node_description(G, nid)
 
-    # hub = highest degree for initial focus
     hub = max(G.nodes, key=lambda n: degree.get(n, 0)) if G.number_of_nodes() else None
 
     raw_edges: list[dict[str, Any]] = []
     for u, v, data in G.edges(data=True):
         src = data.get("_src") or u
         tgt = data.get("_tgt") or v
-        # keep endpoints inside graph
         if src not in G or tgt not in G:
             src, tgt = u, v
         cid = int(node_community.get(src, node_community.get(u, 0)))
@@ -161,7 +158,7 @@ def to_pattern1_html(
         )
 
     legend_items = []
-    for cid in sorted(communities.keys()):
+    for cid in sorted(communities.keys(), key=lambda c: -len(communities[c])):
         legend_items.append(
             {
                 "id": str(cid),
@@ -198,7 +195,6 @@ def to_pattern1_html(
 
 def _render_template(payload: dict[str, Any]) -> str:
     title = html.escape(payload["title"])
-    subtitle = html.escape(payload["subtitle"])
     data_json = json.dumps(
         {
             "hub": payload["hub"],
@@ -209,7 +205,6 @@ def _render_template(payload: dict[str, Any]) -> str:
         },
         ensure_ascii=False,
     )
-    # Prevent </script> breakout
     data_json = data_json.replace("</", "<\\/")
 
     return f"""<!DOCTYPE html>
@@ -221,333 +216,266 @@ def _render_template(payload: dict[str, Any]) -> str:
 <script src="https://unpkg.com/vis-network/standalone/umd/vis-network.min.js"></script>
 <style>
   * {{ margin: 0; padding: 0; box-sizing: border-box; }}
-  html {{
-    color-scheme: dark;
-    height: 100%;
-    background: #0d1117;
-  }}
-  body {{
+  html, body {{
     height: 100%;
     overflow: hidden;
-    display: flex;
-    flex-direction: column;
-    background: #0d1117;
-    font-family: 'Segoe UI', sans-serif;
-    color: #e6edf3;
-  }}
-
-  #header {{
-    flex-shrink: 0;
-    background: linear-gradient(135deg, #161b22 0%, #1c2128 100%);
-    border-bottom: 1px solid #30363d;
-    padding: 16px 24px;
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-  }}
-  #header h1 {{ font-size: 20px; font-weight: 700; color: #FF6B35; }}
-  #header p {{ font-size: 13px; color: #8b949e; margin-top: 4px; }}
-
-  #main {{
-    flex: 1;
-    min-height: 0;
-    display: flex;
+    background: #151922;
+    color: #e8eaed;
+    font-family: "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+    color-scheme: dark;
   }}
 
   #network-container {{
-    flex: 1;
-    min-width: 0;
     position: relative;
-    overflow: hidden;
+    width: 100%;
+    height: 100%;
+    background: radial-gradient(ellipse at center, #1c2128 0%, #151922 70%);
     outline: none;
-    border: none;
-    background: radial-gradient(ellipse at center, #161b22 0%, #0d1117 100%);
   }}
   #mynetwork {{
     width: 100%;
     height: 100%;
-    overflow: hidden;
-    outline: none;
-    border: none;
-  }}
-  #mynetwork:focus,
-  #mynetwork:focus-visible,
-  #network-container:focus,
-  #network-container:focus-visible {{
     outline: none;
   }}
   #mynetwork .vis-network,
   #mynetwork canvas {{
     outline: none !important;
-    border: none !important;
   }}
 
-  #sidebar {{
-    width: 300px;
-    flex-shrink: 0;
-    background: #161b22;
-    border-left: 1px solid #30363d;
-    overflow-x: hidden;
-    overflow-y: auto;
-    padding: 16px;
-    scrollbar-width: thin;
-    scrollbar-color: rgba(255, 255, 255, 0.22) #161b22;
-    transition: width 0.22s ease, padding 0.22s ease, border-color 0.22s ease,
-      opacity 0.18s ease;
-  }}
-  #sidebar.is-collapsed {{
-    width: 0;
-    padding: 0;
-    border-left-color: transparent;
-    opacity: 0;
-    pointer-events: none;
-  }}
-  #sidebar::-webkit-scrollbar {{
-    width: 8px;
-  }}
-  #sidebar::-webkit-scrollbar-track {{
-    background: #161b22;
-  }}
-  #sidebar::-webkit-scrollbar-thumb {{
-    background: rgba(255, 255, 255, 0.22);
-    border-radius: 999px;
-    border: 2px solid #161b22;
-    background-clip: padding-box;
-  }}
-  #sidebar::-webkit-scrollbar-thumb:hover {{
-    background: rgba(255, 255, 255, 0.35);
-    background-clip: padding-box;
-  }}
-  #sidebar::-webkit-scrollbar-corner {{
-    background: #161b22;
-  }}
-  #sidebar::-webkit-scrollbar-button {{
-    display: none;
-    width: 0;
-    height: 0;
-  }}
-
-  #sidebar-toggle {{
+  .search-panel {{
     position: absolute;
-    top: 16px;
-    right: 16px;
-    z-index: 3;
-    width: 36px;
-    height: 36px;
+    top: 18px;
+    left: 18px;
+    z-index: 4;
+    width: min(320px, calc(100vw - 36px));
+  }}
+  .search-box {{
     display: flex;
     align-items: center;
-    justify-content: center;
-    background: rgba(33, 38, 45, 0.95);
-    border: 1px solid #30363d;
-    border-radius: 8px;
-    color: #e6edf3;
-    cursor: pointer;
-    transition: background 0.2s, border-color 0.2s, color 0.2s;
+    gap: 10px;
+    background: rgba(28, 33, 44, 0.94);
+    border: 1px solid rgba(255,255,255,0.08);
+    border-radius: 10px;
+    padding: 10px 14px;
+    box-shadow: 0 8px 28px rgba(0,0,0,0.35);
   }}
-  #sidebar-toggle:hover {{
-    background: #30363d;
-    border-color: #FF6B35;
-    color: #FF6B35;
-  }}
-  #sidebar-toggle svg {{
+  .search-box svg {{
     width: 18px;
     height: 18px;
-    display: block;
+    color: #9aa3b2;
+    flex-shrink: 0;
   }}
-  #sidebar-toggle .icon-show {{ display: none; }}
-  body.sidebar-collapsed #sidebar-toggle .icon-hide {{ display: none; }}
-  body.sidebar-collapsed #sidebar-toggle .icon-show {{ display: block; }}
-
-  .legend-title {{
-    font-size: 13px;
-    font-weight: 700;
-    color: #8b949e;
-    text-transform: uppercase;
-    letter-spacing: 1px;
-    margin-bottom: 12px;
-    margin-top: 16px;
+  #search {{
+    flex: 1;
+    background: transparent;
+    border: none;
+    outline: none;
+    color: #e8eaed;
+    font-size: 14px;
   }}
-  .legend-title:first-child {{ margin-top: 0; }}
+  #search::placeholder {{ color: #7d8696; }}
 
+  .legend-panel {{
+    position: absolute;
+    left: 18px;
+    bottom: 18px;
+    z-index: 4;
+    width: min(280px, calc(100vw - 36px));
+    max-height: min(52vh, 420px);
+    display: flex;
+    flex-direction: column;
+    background: rgba(28, 33, 44, 0.94);
+    border: 1px solid rgba(255,255,255,0.08);
+    border-radius: 12px;
+    box-shadow: 0 10px 36px rgba(0,0,0,0.4);
+    overflow: hidden;
+    transition: opacity 0.15s ease, transform 0.15s ease;
+  }}
+  .legend-panel.is-hidden {{
+    opacity: 0;
+    pointer-events: none;
+    transform: translateY(8px);
+  }}
+  #legend {{
+    overflow-y: auto;
+    padding: 10px 8px 4px;
+    scrollbar-width: thin;
+    scrollbar-color: rgba(255,255,255,0.2) transparent;
+  }}
   .legend-item {{
     display: flex;
     align-items: center;
     gap: 10px;
-    padding: 6px 10px;
-    border-radius: 6px;
-    margin-bottom: 4px;
+    padding: 7px 10px;
+    border-radius: 8px;
     cursor: pointer;
-    transition: background 0.2s;
   }}
-  .legend-item:hover {{ background: #21262d; }}
+  .legend-item:hover {{ background: rgba(255,255,255,0.06); }}
+  .legend-item.active {{ background: rgba(255,255,255,0.08); }}
   .legend-dot {{
-    width: 14px;
-    height: 14px;
+    width: 10px;
+    height: 10px;
     border-radius: 50%;
     flex-shrink: 0;
   }}
-  .legend-label {{ font-size: 13px; color: #e6edf3; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }}
-  .legend-count {{
-    margin-left: auto;
-    font-size: 11px;
-    color: #6e7681;
-    background: #21262d;
-    padding: 1px 6px;
-    border-radius: 10px;
-  }}
-
-  #search {{
-    width: 100%;
-    background: #0d1117;
-    border: 1px solid #30363d;
-    color: #e6edf3;
-    padding: 8px 10px;
-    border-radius: 6px;
+  .legend-label {{
+    flex: 1;
+    min-width: 0;
     font-size: 13px;
-    outline: none;
-    margin-bottom: 8px;
+    color: #e8eaed;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }}
-  #search:focus {{ border-color: #FF6B35; }}
+  .legend-count {{
+    font-size: 12px;
+    color: #8b93a3;
+    font-variant-numeric: tabular-nums;
+  }}
+  .browse-all {{
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 12px 18px;
+    border-top: 1px solid rgba(255,255,255,0.08);
+    color: #cfd5df;
+    font-size: 13px;
+    cursor: pointer;
+    background: transparent;
+    border-left: none;
+    border-right: none;
+    border-bottom: none;
+    width: 100%;
+    text-align: left;
+  }}
+  .browse-all:hover {{ background: rgba(255,255,255,0.05); }}
+  .browse-all svg {{
+    width: 16px;
+    height: 16px;
+    color: #9aa3b2;
+  }}
 
   #node-detail {{
-    background: #21262d;
-    border: 1px solid #30363d;
-    border-radius: 8px;
-    padding: 14px;
-    margin-top: 16px;
+    position: absolute;
+    top: 18px;
+    right: 18px;
+    z-index: 4;
+    width: min(300px, calc(100vw - 36px));
+    background: rgba(28, 33, 44, 0.96);
+    border: 1px solid rgba(255,255,255,0.08);
+    border-radius: 12px;
+    padding: 14px 16px;
+    box-shadow: 0 10px 36px rgba(0,0,0,0.4);
     display: none;
   }}
-  #node-detail h3 {{ font-size: 14px; font-weight: 600; color: #FF6B35; margin-bottom: 8px; }}
-  #node-detail p {{ font-size: 12px; color: #8b949e; line-height: 1.55; white-space: pre-wrap; }}
   #node-detail .node-type {{
     display: inline-block;
     padding: 2px 8px;
-    border-radius: 10px;
+    border-radius: 999px;
     font-size: 11px;
-    margin-bottom: 6px;
+    margin-bottom: 8px;
+  }}
+  #node-detail h3 {{
+    font-size: 15px;
+    font-weight: 600;
+    color: #f3f4f6;
+    margin-bottom: 8px;
+  }}
+  #node-detail p {{
+    font-size: 12px;
+    color: #9aa3b2;
+    line-height: 1.55;
+    white-space: pre-wrap;
+  }}
+  #detail-close {{
+    position: absolute;
+    top: 10px;
+    right: 12px;
+    background: transparent;
+    border: none;
+    color: #8b93a3;
+    font-size: 18px;
+    cursor: pointer;
+    line-height: 1;
   }}
 
   .controls {{
     position: absolute;
-    bottom: 20px;
-    left: 20px;
+    right: 18px;
+    bottom: 18px;
+    z-index: 4;
     display: flex;
     flex-direction: column;
     gap: 8px;
-    z-index: 2;
+    align-items: flex-end;
   }}
   .controls-row {{
     display: flex;
     gap: 8px;
     flex-wrap: wrap;
+    justify-content: flex-end;
   }}
   .ctrl-btn {{
-    background: #21262d;
-    border: 1px solid #30363d;
-    color: #e6edf3;
-    padding: 8px 14px;
-    border-radius: 6px;
+    background: rgba(28, 33, 44, 0.94);
+    border: 1px solid rgba(255,255,255,0.1);
+    color: #e8eaed;
+    padding: 8px 12px;
+    border-radius: 8px;
     cursor: pointer;
     font-size: 12px;
-    transition: all 0.2s;
+    box-shadow: 0 6px 18px rgba(0,0,0,0.28);
   }}
-  .ctrl-btn:hover {{ background: #30363d; border-color: #FF6B35; }}
+  .ctrl-btn:hover {{ border-color: rgba(255,255,255,0.22); background: rgba(40,46,60,0.96); }}
   .ctrl-btn.active {{
     background: #FF6B35;
     border-color: #FF6B35;
     color: #0d1117;
     font-weight: 700;
   }}
-  .ctrl-btn.active:hover {{
-    background: #ff8255;
-    border-color: #ff8255;
-    color: #0d1117;
-  }}
-  .ctrl-btn:disabled {{
-    opacity: 0.6;
-    cursor: wait;
-  }}
-
-  .stats-bar {{
-    position: absolute;
-    top: 16px;
-    left: 16px;
-    display: flex;
-    gap: 12px;
-    z-index: 2;
-  }}
-  .stat-chip {{
-    background: rgba(33,38,45,0.9);
-    border: 1px solid #30363d;
-    padding: 4px 12px;
-    border-radius: 20px;
-    font-size: 12px;
-    color: #8b949e;
-  }}
-  .stat-chip span {{ color: #FF6B35; font-weight: 700; }}
+  .ctrl-btn:disabled {{ opacity: 0.55; cursor: wait; }}
 </style>
 </head>
 <body>
+<div id="network-container">
+  <div id="mynetwork"></div>
 
-<div id="header">
-  <div>
-    <h1>{title}</h1>
-    <p>{subtitle}</p>
-  </div>
-</div>
-
-<div id="main">
-  <div id="network-container">
-    <div class="stats-bar">
-      <div class="stat-chip">노드 <span>{payload["nodes"]}</span></div>
-      <div class="stat-chip">엣지 <span>{payload["edges"]}</span></div>
-      <div class="stat-chip">그룹 <span>{payload["groups"]}</span></div>
-    </div>
-    <div id="mynetwork"></div>
-    <button
-      type="button"
-      id="sidebar-toggle"
-      aria-controls="sidebar"
-      aria-expanded="true"
-      aria-label="검색·그룹 범례 숨기기"
-      title="검색·그룹 범례 숨기기"
-      onclick="toggleSidebar()"
-    >
-      <svg class="icon-hide" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-        <rect x="3" y="4" width="18" height="16" rx="2"/>
-        <path d="M15 4v16"/>
-        <path d="M10 9l-3 3 3 3"/>
+  <div class="search-panel">
+    <div class="search-box">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <circle cx="11" cy="11" r="7"/>
+        <path d="m20 20-3.5-3.5"/>
       </svg>
-      <svg class="icon-show" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-        <rect x="3" y="4" width="18" height="16" rx="2"/>
-        <path d="M15 4v16"/>
-        <path d="M8 9l3 3-3 3"/>
-      </svg>
-    </button>
-    <div class="controls">
-      <div class="controls-row">
-        <button type="button" class="ctrl-btn pattern-btn active" data-pattern="pattern1" onclick="selectPattern('pattern1')" title="Force Atlas (현재)">Force Atlas</button>
-        <button type="button" class="ctrl-btn pattern-btn" data-pattern="pattern2" onclick="selectPattern('pattern2')" title="Neo4j Explore">Neo4j Explore</button>
-      </div>
-      <div class="controls-row">
-        <button class="ctrl-btn" onclick="network.fit()">전체 보기</button>
-        <button class="ctrl-btn" onclick="stabilize()">레이아웃 재정렬</button>
-        <button class="ctrl-btn" onclick="filterGroup(null)">필터 해제</button>
-      </div>
+      <input id="search" type="search" placeholder="Search entities..." autocomplete="off">
     </div>
   </div>
 
-  <div id="sidebar">
-    <div class="legend-title">검색</div>
-    <input id="search" type="search" placeholder="노드 이름 검색…" autocomplete="off">
+  <div id="node-detail">
+    <button type="button" id="detail-close" aria-label="닫기" onclick="hideDetail()">×</button>
+    <div class="node-type" id="detail-type"></div>
+    <h3 id="detail-title"></h3>
+    <p id="detail-desc"></p>
+  </div>
 
-    <div class="legend-title">그룹 범례</div>
+  <div class="legend-panel">
     <div id="legend"></div>
+    <button type="button" class="browse-all" onclick="filterGroup(null)">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true">
+        <path d="M4 7h16M4 12h16M4 17h16"/>
+      </svg>
+      Browse all
+    </button>
+  </div>
 
-    <div id="node-detail">
-      <div class="node-type" id="detail-type"></div>
-      <h3 id="detail-title"></h3>
-      <p id="detail-desc"></p>
+  <div class="controls">
+    <div class="controls-row">
+      <button type="button" class="ctrl-btn pattern-btn active" data-pattern="pattern1" onclick="selectPattern('pattern1')" title="Force Atlas (현재)">Force Atlas</button>
+      <button type="button" class="ctrl-btn pattern-btn" data-pattern="pattern2" onclick="selectPattern('pattern2')" title="Neo4j Explore">Neo4j Explore</button>
+      <button type="button" class="ctrl-btn pattern-btn" data-pattern="pattern3" onclick="selectPattern('pattern3')" title="Holistic View">Holistic View</button>
+    </div>
+    <div class="controls-row">
+      <button class="ctrl-btn" onclick="network.fit({{ animation: {{ duration: 400 }} }})">전체 보기</button>
+      <button class="ctrl-btn" onclick="stabilize()">레이아웃 재정렬</button>
+      <button class="ctrl-btn" onclick="filterGroup(null)">필터 해제</button>
     </div>
   </div>
 </div>
@@ -558,6 +486,7 @@ const rawNodes = DATA.rawNodes;
 const rawEdges = DATA.rawEdges;
 const nodeDescriptions = DATA.descriptions;
 const legend = DATA.legend;
+let activeGroup = null;
 
 function darkenColor(hex, factor) {{
   const r = Math.floor(parseInt(hex.slice(1,3), 16) * (1-factor));
@@ -572,21 +501,31 @@ function lightenColor(hex, factor) {{
   return `rgb(${{r}},${{g}},${{b}})`;
 }}
 
+function hideDetail() {{
+  document.getElementById('node-detail').style.display = 'none';
+}}
+
+function toggleLegend() {{
+  document.querySelector('.legend-panel').classList.toggle('is-hidden');
+}}
+
+function markLegendActive(group) {{
+  document.querySelectorAll('.legend-item').forEach(el => {{
+    el.classList.toggle('active', group != null && el.dataset.group === String(group));
+  }});
+}}
+
 const legendEl = document.getElementById('legend');
 legend.forEach(item => {{
   const div = document.createElement('div');
   div.className = 'legend-item';
+  div.dataset.group = item.id;
   div.onclick = () => filterGroup(item.id);
   div.innerHTML = `<div class="legend-dot" style="background:${{item.color}}"></div>` +
     `<span class="legend-label" title="${{item.label}}">${{item.label}}</span>` +
     `<span class="legend-count">${{item.count}}</span>`;
   legendEl.appendChild(div);
 }});
-const allItem = document.createElement('div');
-allItem.className = 'legend-item';
-allItem.onclick = () => filterGroup(null);
-allItem.innerHTML = `<div class="legend-dot" style="background:#555"></div><span class="legend-label">전체 보기</span>`;
-legendEl.appendChild(allItem);
 
 const maxDeg = Math.max(...rawNodes.map(n => n.degree || 1), 1);
 const visNodes = rawNodes.map(n => ({{
@@ -661,14 +600,18 @@ const options = {{
 }};
 
 const network = new vis.Network(container, networkData, options);
-container.style.outline = 'none';
 container.setAttribute('tabindex', '0');
-container.addEventListener('mousedown', () => {{ container.style.outline = 'none'; }});
 
-network.on("click", function(params) {{
-  if (params.nodes.length === 0) return;
+network.on('click', function(params) {{
+  if (params.nodes.length === 0) {{
+    hideDetail();
+    // empty canvas (not an edge hit): toggle legend visibility
+    if (params.edges.length === 0) toggleLegend();
+    return;
+  }}
   const nodeId = params.nodes[0];
   const node = rawNodes.find(n => n.id === nodeId);
+  if (!node) return;
   const leg = legend.find(l => l.id === node.group);
   const detail = document.getElementById('node-detail');
   const typeEl = document.getElementById('detail-type');
@@ -684,10 +627,10 @@ network.on("click", function(params) {{
   detail.style.display = 'block';
 }});
 
-network.on("hoverNode", () => {{ container.style.cursor = 'pointer'; }});
-network.on("blurNode", () => {{ container.style.cursor = 'default'; }});
+network.on('hoverNode', () => {{ container.style.cursor = 'pointer'; }});
+network.on('blurNode', () => {{ container.style.cursor = 'default'; }});
 
-network.once("stabilizationIterationsDone", function() {{
+network.once('stabilizationIterationsDone', function() {{
   if (DATA.hub) {{
     network.focus(DATA.hub, {{ scale: 0.85, animation: {{ duration: 800 }} }});
   }} else {{
@@ -696,13 +639,15 @@ network.once("stabilizationIterationsDone", function() {{
 }});
 
 function filterGroup(group) {{
+  activeGroup = group;
+  markLegendActive(group);
   if (!group) {{
     networkData.nodes.update(rawNodes.map(n => ({{ id: n.id, hidden: false, opacity: 1 }})));
     return;
   }}
   networkData.nodes.update(rawNodes.map(n => ({{
     id: n.id,
-    hidden: n.group !== group,
+    hidden: false,
     opacity: n.group === group ? 1 : 0.12
   }})));
 }}
@@ -724,44 +669,29 @@ function stabilize() {{
 
 function selectPattern(pattern) {{
   pattern = String(pattern || '');
-  if (pattern !== 'pattern1' && pattern !== 'pattern2') return;
-  if (pattern === 'pattern1') return; // already on Force Atlas
-  document.querySelectorAll('.pattern-btn').forEach(btn => {{
-    btn.disabled = true;
-  }});
+  if (pattern !== 'pattern1' && pattern !== 'pattern2' && pattern !== 'pattern3') return;
+  if (pattern === 'pattern1') return;
+  document.querySelectorAll('.pattern-btn').forEach(btn => {{ btn.disabled = true; }});
   if (window.parent && window.parent !== window) {{
     window.parent.postMessage({{ type: 'graph-pattern', pattern }}, '*');
   }}
 }}
 
-function toggleSidebar() {{
-  const sidebar = document.getElementById('sidebar');
-  const btn = document.getElementById('sidebar-toggle');
-  const collapsed = !sidebar.classList.contains('is-collapsed');
-  sidebar.classList.toggle('is-collapsed', collapsed);
-  document.body.classList.toggle('sidebar-collapsed', collapsed);
-  btn.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
-  const label = collapsed ? '검색·그룹 범례 보이기' : '검색·그룹 범례 숨기기';
-  btn.setAttribute('aria-label', label);
-  btn.title = label;
-  // Resize canvas after panel animation
-  setTimeout(() => {{
-    network.redraw();
-    network.fit({{ animation: {{ duration: 250 }} }});
-  }}, 240);
-}}
-
 document.getElementById('search').addEventListener('input', (ev) => {{
   const q = (ev.target.value || '').trim().toLowerCase();
   if (!q) {{
-    networkData.nodes.update(rawNodes.map(n => ({{ id: n.id, hidden: false }})));
+    networkData.nodes.update(rawNodes.map(n => ({{
+      id: n.id,
+      hidden: false,
+      opacity: (!activeGroup || n.group === activeGroup) ? 1 : 0.12
+    }})));
     return;
   }}
   const hits = [];
   networkData.nodes.update(rawNodes.map(n => {{
     const hit = (n.label || '').toLowerCase().includes(q) || String(n.id).toLowerCase().includes(q);
     if (hit) hits.push(n.id);
-    return {{ id: n.id, hidden: !hit }};
+    return {{ id: n.id, hidden: !hit, opacity: 1 }};
   }}));
   if (hits.length === 1) network.focus(hits[0], {{ scale: 1.1, animation: true }});
 }});

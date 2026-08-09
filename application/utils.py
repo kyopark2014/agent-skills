@@ -128,7 +128,7 @@ def user_graph_html_path(user_id: str | None) -> str:
     return os.path.join(SESSION_STORAGE_DIR, segment, "graph", "out", "graph.html")
 
 
-GRAPH_PATTERNS = ("pattern1", "pattern2")
+GRAPH_PATTERNS = ("pattern1", "pattern2", "pattern3")
 DEFAULT_GRAPH_PATTERN = "pattern1"
 
 _DEFAULT_USER_SETTINGS: dict[str, object] = {
@@ -143,9 +143,17 @@ def normalize_graph_pattern(value: object | None) -> str:
         "pattern1": "pattern1",
         "p1": "pattern1",
         "1": "pattern1",
+        "forceatlas": "pattern1",
         "pattern2": "pattern2",
         "p2": "pattern2",
         "2": "pattern2",
+        "neo4j": "pattern2",
+        "neo4jexplore": "pattern2",
+        "pattern3": "pattern3",
+        "p3": "pattern3",
+        "3": "pattern3",
+        "holistic": "pattern3",
+        "holisticview": "pattern3",
     }
     return aliases.get(raw, DEFAULT_GRAPH_PATTERN)
 
@@ -205,7 +213,7 @@ def is_knowledge_graph_enabled(user_id: str | None) -> bool:
 
 
 def get_graph_pattern(user_id: str | None) -> str:
-    """Selected Knowledge Graph HTML pattern (pattern1|pattern2)."""
+    """Selected Knowledge Graph HTML pattern (pattern1|pattern2|pattern3)."""
     return normalize_graph_pattern(
         load_user_settings(user_id).get("graph_pattern", DEFAULT_GRAPH_PATTERN)
     )

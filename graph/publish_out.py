@@ -37,7 +37,7 @@ def main() -> None:
     parser.add_argument(
         "--pattern",
         default=None,
-        help="HTML pattern: pattern1|pattern2 (default: user settings / pattern1)",
+        help="HTML pattern: pattern1|pattern2|pattern3 (default: user settings / pattern1)",
     )
     parser.add_argument("--min-nodes", type=int, default=1)
     parser.add_argument("--collect", action="store_true")

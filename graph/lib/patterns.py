@@ -1,4 +1,4 @@
-"""Resolve and dispatch Knowledge Graph HTML patterns (pattern1|pattern2)."""
+"""Resolve and dispatch Knowledge Graph HTML patterns (pattern1|2|3)."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from typing import Any
 
 import networkx as nx
 
-GRAPH_PATTERNS = ("pattern1", "pattern2")
+GRAPH_PATTERNS = ("pattern1", "pattern2", "pattern3")
 DEFAULT_GRAPH_PATTERN = "pattern1"
 
 
@@ -19,9 +19,17 @@ def normalize_graph_pattern(value: Any) -> str:
         "pattern1": "pattern1",
         "p1": "pattern1",
         "1": "pattern1",
+        "forceatlas": "pattern1",
         "pattern2": "pattern2",
         "p2": "pattern2",
         "2": "pattern2",
+        "neo4j": "pattern2",
+        "neo4jexplore": "pattern2",
+        "pattern3": "pattern3",
+        "p3": "pattern3",
+        "3": "pattern3",
+        "holistic": "pattern3",
+        "holisticview": "pattern3",
     }
     return aliases.get(raw, DEFAULT_GRAPH_PATTERN)
 
@@ -80,6 +88,10 @@ def write_pattern_html(
         from lib.pattern2_html import to_pattern2_html
 
         to_pattern2_html(G, communities, output_path, **kwargs)
+    elif pid == "pattern3":
+        from lib.pattern3_html import to_pattern3_html
+
+        to_pattern3_html(G, communities, output_path, **kwargs)
     else:
         from lib.pattern1_html import to_pattern1_html
 

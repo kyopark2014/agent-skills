@@ -85,7 +85,7 @@ export interface GraphStatus {
   next_eligible_at?: string | null;
 }
 
-export type GraphPattern = "pattern1" | "pattern2";
+export type GraphPattern = "pattern1" | "pattern2" | "pattern3";
 
 export interface SessionInfo {
   user_id: string;

@@ -157,9 +157,10 @@ agent-skills/graph/
 │   ├── tasks_db.py
 │   ├── corpus.py
 │   ├── out_graphs.py
-│   ├── patterns.py        # pattern1|pattern2 디스패치
-│   ├── pattern1_html.py   # 기본 Force Atlas (현재 UI)
+│   ├── patterns.py        # pattern1|2|3 디스패치
+│   ├── pattern1_html.py   # Force Atlas
 │   ├── pattern2_html.py   # Neo4j Explore 스타일
+│   ├── pattern3_html.py   # Holistic View (어두운 overview)
 │   └── rich_html.py       # pattern1 호환 래퍼
 ├── corpus/                # gitignore
 ├── graphify-out/          # gitignore (graph.json, cache/)
