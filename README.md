@@ -255,7 +255,7 @@ Knowledge Base RAG는 **업로드(Web UI / application)** 와 **검색(MCP `kb-r
 |------|------|------|
 | 업로드 API | [routes_rag.py](./application/api/routes_rag.py) | `/api/rag/upload` — 세션 `user_id`로 업로드 |
 | 업로드 오케스트레이션 | [rag_service.py](./application/services/rag_service.py) | S3 적재 + sidecar metadata + KB sync |
-| S3 유틸 | [utils.py](./application/utils.py) | `docs/{user_id}/{file_name}` 키로 업로드 |
+| S3 유틸 | [utils.py](./application/utils.py) | `docs/{projectName}/{user_id}/{file_name}` 키로 업로드 |
 | 검색 MCP | [mcp_server_retrieve.py](./application/mcp_server_retrieve.py), [mcp_retrieve.py](./application/mcp_retrieve.py) | Bedrock `Retrieve` + metadata filter |
 | MCP 등록 | [mcp_config.py](./application/mcp_config.py) (`kb-retriever` → `kb_retriever`) | `AGENTCORE_USER_ID`는 `chat.create_agent()`에서 주입 |
 
@@ -269,10 +269,10 @@ Knowledge Base RAG는 **업로드(Web UI / application)** 와 **검색(MCP `kb-r
 
 로그인 `user_id`(예: Google 이메일 `user@example.com`)가 그대로 사용됩니다.
 
-- 문서: `s3://{bucket}/docs/{user_id}/{file_name}`
-- metadata sidecar: `s3://{bucket}/docs/{user_id}/{file_name}.metadata.json`
+- 문서: `s3://{bucket}/docs/{projectName}/{user_id}/{file_name}`
+- metadata sidecar: `s3://{bucket}/docs/{projectName}/{user_id}/{file_name}.metadata.json`
 
-이메일에는 `/`가 없으므로 S3 폴더명과 metadata `owner`, 검색 필터의 `user_id` 포맷이 동일합니다. 업로드 후 Knowledge Base data source sync(`StartIngestionJob`)를 시작합니다.
+Knowledge Base data source는 `docs/{projectName}/` 접두사만 ingestion합니다. 이메일에는 `/`가 없으므로 S3 폴더명과 metadata `owner`, 검색 필터의 `user_id` 포맷이 동일합니다. 업로드 후 Knowledge Base data source sync(`StartIngestionJob`)를 시작합니다.
 
 ### Metadata filtering 소개
 

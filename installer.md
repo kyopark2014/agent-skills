@@ -50,7 +50,7 @@ vector_index_name = project_name
 - **설정**:
   - CORS 활성화 (GET, POST, PUT)
   - 퍼블릭 액세스 차단
-  - `docs/`, `artifacts/` 폴더 자동 생성
+  - `docs/{project_name}/` 폴더 자동 생성
 
 ### 2. IAM 역할
 
@@ -71,19 +71,21 @@ vector_index_name = project_name
 - `slackapikey`: Slack API 키
 
 ### 4. OpenSearch Serverless
-- **컬렉션**: Vector 검색용 서버리스 컬렉션
-- **정책**: 암호화, 네트워크, 데이터 액세스 정책
-- **인덱스**: KNN 벡터 검색 인덱스 (1024차원)
+- **컬렉션 이름**: `{project_name}` (프로젝트 전용)
+- **정책**: `enc-{project_name}-{region}`, `net-{project_name}-{region}`, `data-{project_name}`
+- **인덱스**: KNN 벡터 검색 인덱스 (1024차원, 이름=`{project_name}`)
 
 ### 5. Bedrock Knowledge Base
+- **이름**: `{project_name}` (프로젝트 전용)
 - **스토리지**: OpenSearch Serverless
 - **임베딩 모델**: Amazon Titan Embed Text v2 (1024차원)
-- **파싱 모델**: Claude Sonnet
+- **파싱 모델**: Claude Sonnet 4.6 (Foundation Model Parser)
 - **청킹**: Hierarchical (1500/300 토큰)
+- **데이터 소스**: S3 `docs/{project_name}/` 접두사
 
 ### 6. CloudFront (S3 오리진)
 - **Comment**: `CloudFront-for-rag-project`
-- **오리진**: S3 버킷 (`docs/`, `artifacts/` 등 정적 컨텐츠 공유용)
+- **오리진**: S3 버킷 (`docs/{project_name}/` 등 정적 컨텐츠 공유용)
 - **OAI**: S3 버킷 정책으로 CloudFront 접근 허용
 - **sharing_url**: `https://{cloudfront_domain}` → `application/config.json`에 저장
 
@@ -182,7 +184,7 @@ Note: CloudFront distribution may take 15-20 minutes to fully deploy
 ### 주의사항
 - `application/config.json` 파일이 자동으로 업데이트됩니다 (`sharing_url` 포함)
 - Gateway는 `us-east-1`에 생성되며, 애플리케이션 리전과 다를 수 있습니다
-- `docs/`, `artifacts/` 등 S3 정적 파일은 CloudFront URL로 공유됩니다
+- `docs/{project_name}/` 등 S3 정적 파일은 CloudFront URL로 공유됩니다
 
 ---
 

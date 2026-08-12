@@ -20,15 +20,21 @@ region = "us-west-2"
 AGENTCORE_GATEWAY_REGION = "us-east-1"
 AGENTCORE_WEBSEARCH_GATEWAY_NAME = "gateway-websearch"
 AGENTCORE_WEBSEARCH_TARGET_NAME = "websearch"
-vector_index_name = "rag-project"
+vector_index_name = project_name
 cloudfront_comment = "CloudFront-for-rag-project"
 oai_comment = f"OAI for {vector_index_name}"
 
 sts_client = boto3.client("sts", region_name=region)
 account_id = sts_client.get_caller_identity()["Account"]
 
-knowledge_base_name = vector_index_name
-knowledge_base_role_name = f"role-knowledge-base-for-{vector_index_name}-{region}"
+# Parsing model for Knowledge Base data source
+# Alternative: global.anthropic.claude-haiku-4-5-20251001-v1:0
+parsing_model_arn = (
+    f"arn:aws:bedrock:{region}:{account_id}:inference-profile/global.anthropic.claude-sonnet-4-6"
+)
+
+knowledge_base_name = project_name
+knowledge_base_role_name = f"role-knowledge-base-for-{project_name}-{region}"
 
 s3_client = boto3.client("s3", region_name=region)
 iam_client = boto3.client("iam", region_name=region)
@@ -114,18 +120,18 @@ def create_s3_bucket() -> str:
             VersioningConfiguration={"Status": "Suspended"}
         )
         
-        # Create docs and artifacts folders
-        logger.debug("Creating docs and artifacts folders")
-        for folder in ["docs/", "artifacts/"]:
-            try:
-                s3_client.put_object(
-                    Bucket=bucket_name,
-                    Key=folder,
-                    Body=b""
-                )
-                logger.debug(f"{folder} folder created successfully")
-            except ClientError as e:
-                logger.warning(f"Failed to create {folder} folder: {e}")
+        # Create docs/{project_name}/ folder (data source inclusion prefix)
+        docs_prefix = f"docs/{project_name}/"
+        logger.debug("Creating %s folder", docs_prefix)
+        try:
+            s3_client.put_object(
+                Bucket=bucket_name,
+                Key=docs_prefix,
+                Body=b""
+            )
+            logger.debug("%s folder created successfully", docs_prefix)
+        except ClientError as e:
+            logger.warning(f"Failed to create {docs_prefix} folder: {e}")
         
         logger.info(f"✓ S3 bucket created successfully: {bucket_name}")
         return bucket_name
@@ -133,19 +139,19 @@ def create_s3_bucket() -> str:
     except ClientError as e:
         if e.response["Error"]["Code"] in ["BucketAlreadyExists", "BucketAlreadyOwnedByYou"]:
             logger.warning(f"S3 bucket already exists: {bucket_name}")
-            # Create docs and artifacts folders if bucket already exists
-            logger.debug("Creating docs and artifacts folders in existing bucket")
-            for folder in ["docs/", "artifacts/"]:
-                try:
-                    s3_client.put_object(
-                        Bucket=bucket_name,
-                        Key=folder,
-                        Body=b""
-                    )
-                    logger.debug(f"{folder} folder created successfully")
-                except ClientError as folder_error:
-                    if folder_error.response["Error"]["Code"] != "NoSuchBucket":
-                        logger.warning(f"Failed to create {folder} folder: {folder_error}")
+            # Create docs/{project_name}/ folder if bucket already exists
+            docs_prefix = f"docs/{project_name}/"
+            logger.debug("Creating %s folder in existing bucket", docs_prefix)
+            try:
+                s3_client.put_object(
+                    Bucket=bucket_name,
+                    Key=docs_prefix,
+                    Body=b""
+                )
+                logger.debug("%s folder created successfully", docs_prefix)
+            except ClientError as folder_error:
+                if folder_error.response["Error"]["Code"] != "NoSuchBucket":
+                    logger.warning(f"Failed to create {docs_prefix} folder: {folder_error}")
             return bucket_name
         logger.error(f"Failed to create S3 bucket: {e}")
         raise
@@ -288,7 +294,7 @@ def create_knowledge_base_role() -> str:
             }
         ]
     }
-    attach_inline_policy(role_name, f"bedrock-invoke-policy-for-{vector_index_name}", bedrock_invoke_policy)
+    attach_inline_policy(role_name, f"bedrock-invoke-policy-for-{project_name}", bedrock_invoke_policy)
     
     s3_policy = {
         "Version": "2012-10-17",
@@ -300,7 +306,7 @@ def create_knowledge_base_role() -> str:
             }
         ]
     }
-    attach_inline_policy(role_name, f"knowledge-base-s3-policy-for-{vector_index_name}", s3_policy)
+    attach_inline_policy(role_name, f"knowledge-base-s3-policy-for-{project_name}", s3_policy)
     
     opensearch_policy = {
         "Version": "2012-10-17",
@@ -312,7 +318,7 @@ def create_knowledge_base_role() -> str:
             }
         ]
     }
-    attach_inline_policy(role_name, f"bedrock-agent-opensearch-policy-for-{vector_index_name}", opensearch_policy)
+    attach_inline_policy(role_name, f"bedrock-agent-opensearch-policy-for-{project_name}", opensearch_policy)
     
     bedrock_policy = {
         "Version": "2012-10-17",
@@ -330,7 +336,7 @@ def create_knowledge_base_role() -> str:
             }
         ]
     }
-    attach_inline_policy(role_name, f"bedrock-agent-bedrock-policy-for-{vector_index_name}", bedrock_policy)
+    attach_inline_policy(role_name, f"bedrock-agent-bedrock-policy-for-{project_name}", bedrock_policy)
     
     return role_arn
 
@@ -539,12 +545,12 @@ def _get_installer_iam_arn() -> str:
     return arn
 
 
-def _shared_opensearch_policy_names() -> Dict[str, str]:
-    """Policy names for the shared rag-project OpenSearch collection."""
+def _opensearch_policy_names() -> Dict[str, str]:
+    """Policy names for this project's OpenSearch collection."""
     return {
-        "enc": f"enc-{vector_index_name}-{region}",
-        "net": f"net-{vector_index_name}-{region}",
-        "data": f"data-{vector_index_name}",
+        "enc": f"enc-{project_name}-{region}",
+        "net": f"net-{project_name}-{region}",
+        "data": f"data-{project_name}",
     }
 
 
@@ -593,7 +599,7 @@ def _opensearch_data_access_principals(knowledge_base_role_arn: Optional[str] = 
 
 def _ensure_opensearch_security_policies(collection_name: str) -> None:
     """Create shared encryption/network policies when missing (e.g. after cleanup)."""
-    policy_names = _shared_opensearch_policy_names()
+    policy_names = _opensearch_policy_names()
     enc_policy_name = policy_names["enc"]
     net_policy_name = policy_names["net"]
 
@@ -610,7 +616,7 @@ def _ensure_opensearch_security_policies(collection_name: str) -> None:
         opensearch_client.create_security_policy(
             name=enc_policy_name,
             type="encryption",
-            description=f"opensearch encryption policy for {vector_index_name}",
+            description=f"opensearch encryption policy for {project_name}",
             policy=json.dumps(enc_policy),
         )
         logger.info(f"  Created encryption policy: {enc_policy_name}")
@@ -638,7 +644,7 @@ def _ensure_opensearch_security_policies(collection_name: str) -> None:
         opensearch_client.create_security_policy(
             name=net_policy_name,
             type="network",
-            description=f"opensearch network policy for {vector_index_name}",
+            description=f"opensearch network policy for {project_name}",
             policy=json.dumps(net_policy),
         )
         logger.info(f"  Created network policy: {net_policy_name}")
@@ -649,11 +655,10 @@ def _ensure_opensearch_security_policies(collection_name: str) -> None:
 
 
 def _find_opensearch_data_policy_name(collection_name: str) -> Optional[str]:
-    """Find the data access policy attached to a shared OpenSearch collection."""
+    """Find the data access policy attached to this project's OpenSearch collection."""
     candidates = [
-        f"data-{vector_index_name}",
-        f"data-agent-plugins",
         f"data-{project_name}",
+        f"data-{vector_index_name}",
     ]
     for name in candidates:
         try:
@@ -684,12 +689,12 @@ def _find_opensearch_data_policy_name(collection_name: str) -> Optional[str]:
     return None
 
 
-def _create_shared_opensearch_data_policy(
+def _create_opensearch_data_policy(
     collection_name: str,
     knowledge_base_role_arn: Optional[str] = None,
 ) -> str:
-    """Create the shared data access policy for an existing collection."""
-    data_policy_name = _shared_opensearch_policy_names()["data"]
+    """Create the data access policy for this project's OpenSearch collection."""
+    data_policy_name = _opensearch_policy_names()["data"]
     principals = _opensearch_data_access_principals(knowledge_base_role_arn)
     data_policy = _build_opensearch_data_policy_document(collection_name, principals)
     opensearch_client.create_access_policy(
@@ -707,16 +712,16 @@ def _ensure_opensearch_data_access_principals(
     collection_name: str,
     knowledge_base_role_arn: Optional[str] = None,
 ) -> None:
-    """Ensure shared collection data policy grants access to installer and KB role."""
+    """Ensure collection data policy grants access to installer and KB role."""
     policy_name = _find_opensearch_data_policy_name(collection_name)
     if not policy_name:
         logger.warning(
             f"  No data access policy found for collection {collection_name}; "
-            "recreating shared OpenSearch policies..."
+            "recreating OpenSearch policies..."
         )
         _ensure_opensearch_security_policies(collection_name)
         try:
-            _create_shared_opensearch_data_policy(collection_name, knowledge_base_role_arn)
+            _create_opensearch_data_policy(collection_name, knowledge_base_role_arn)
         except ClientError as e:
             if e.response["Error"]["Code"] != "ConflictException":
                 raise
@@ -766,7 +771,7 @@ def create_opensearch_collection(knowledge_base_role_arn: str = None) -> Dict[st
     logger.info("[4/6] Creating OpenSearch Serverless collection")
     
     collection_name = vector_index_name
-    policy_names = _shared_opensearch_policy_names()
+    policy_names = _opensearch_policy_names()
     enc_policy_name = policy_names["enc"]
     net_policy_name = policy_names["net"]
     data_policy_name = policy_names["data"]
@@ -814,7 +819,7 @@ def create_opensearch_collection(knowledge_base_role_arn: str = None) -> Dict[st
                             raise Exception(f"Timeout waiting for collection endpoint. Collection status: {status}")
                         time.sleep(10)
                 
-                # Update data access policy for shared collection
+                # Update data access policy for project collection
                 _ensure_opensearch_data_access_principals(collection_name, knowledge_base_role_arn)
                 
                 return {
@@ -1105,6 +1110,137 @@ def create_vector_index_in_opensearch(collection_endpoint: str, index_name: str)
         return False
 
 
+def _foundation_model_vector_ingestion_configuration() -> Dict:
+    """Vector ingestion config with Foundation Model parser."""
+    return {
+        "chunkingConfiguration": {
+            "chunkingStrategy": "HIERARCHICAL",
+            "hierarchicalChunkingConfiguration": {
+                "levelConfigurations": [
+                    {"maxTokens": 1500},
+                    {"maxTokens": 300},
+                ],
+                "overlapTokens": 60,
+            },
+        },
+        "parsingConfiguration": {
+            "parsingStrategy": "BEDROCK_FOUNDATION_MODEL",
+            "bedrockFoundationModelConfiguration": {
+                "modelArn": parsing_model_arn,
+            },
+        },
+    }
+
+
+def _data_source_parsing_strategy(details: Dict) -> Optional[str]:
+    parsing = (
+        details.get("dataSource", {})
+        .get("vectorIngestionConfiguration", {})
+        .get("parsingConfiguration", {})
+        or {}
+    )
+    return parsing.get("parsingStrategy")
+
+
+def ensure_data_source_with_foundation_model_parser(
+    bedrock_agent_client,
+    knowledge_base_id: str,
+    s3_bucket_name: str,
+) -> str:
+    """Create/update Foundation Model parser data source scoped to docs/{project_name}/."""
+    expected_bucket_arn = f"arn:aws:s3:::{s3_bucket_name}"
+    expected_prefix = f"docs/{project_name}/"
+    vector_ingestion = _foundation_model_vector_ingestion_configuration()
+    description = f"S3 data source with Foundation Model parser: {s3_bucket_name}"
+
+    data_sources = bedrock_agent_client.list_data_sources(
+        knowledgeBaseId=knowledge_base_id,
+        maxResults=100,
+    )
+    for ds in data_sources.get("dataSourceSummaries", []):
+        if ds["name"] != s3_bucket_name:
+            continue
+        ds_id = ds["dataSourceId"]
+        details = bedrock_agent_client.get_data_source(
+            knowledgeBaseId=knowledge_base_id,
+            dataSourceId=ds_id,
+        )
+        s3_cfg = (
+            details["dataSource"]
+            .get("dataSourceConfiguration", {})
+            .get("s3Configuration")
+            or {}
+        )
+        bucket_arn = s3_cfg.get("bucketArn", "")
+        prefixes = s3_cfg.get("inclusionPrefixes") or []
+        strategy = _data_source_parsing_strategy(details)
+
+        # Parsing strategy type cannot be changed in-place; recreate if not FM.
+        if strategy != "BEDROCK_FOUNDATION_MODEL":
+            logger.warning(
+                f"  Data source {ds_id} uses {strategy or 'DEFAULT'}; "
+                "recreating with BEDROCK_FOUNDATION_MODEL..."
+            )
+            try:
+                bedrock_agent_client.delete_data_source(
+                    knowledgeBaseId=knowledge_base_id,
+                    dataSourceId=ds_id,
+                )
+            except ClientError as e:
+                logger.warning(f"  Failed to delete data source {ds_id}: {e}")
+            break
+
+        if bucket_arn == expected_bucket_arn and expected_prefix in prefixes:
+            logger.info(
+                f"  Data source already exists with Foundation Model parser "
+                f"(prefix={expected_prefix}): {ds_id}"
+            )
+            return ds_id
+
+        logger.warning(
+            f"  Updating data source {ds_id} inclusionPrefixes "
+            f"{prefixes} -> {[expected_prefix]}"
+        )
+        bedrock_agent_client.update_data_source(
+            knowledgeBaseId=knowledge_base_id,
+            dataSourceId=ds_id,
+            name=s3_bucket_name,
+            description=description,
+            dataSourceConfiguration={
+                "type": "S3",
+                "s3Configuration": {
+                    "bucketArn": expected_bucket_arn,
+                    "inclusionPrefixes": [expected_prefix],
+                },
+            },
+            vectorIngestionConfiguration=vector_ingestion,
+        )
+        logger.info(f"  ✓ Data source updated: {ds_id}")
+        return ds_id
+
+    logger.info(
+        f"  Creating data source with Foundation Model parser "
+        f"(prefix={expected_prefix}, model={parsing_model_arn})..."
+    )
+    data_source_response = bedrock_agent_client.create_data_source(
+        knowledgeBaseId=knowledge_base_id,
+        name=s3_bucket_name,
+        description=description,
+        dataDeletionPolicy="RETAIN",
+        dataSourceConfiguration={
+            "type": "S3",
+            "s3Configuration": {
+                "bucketArn": expected_bucket_arn,
+                "inclusionPrefixes": [expected_prefix],
+            },
+        },
+        vectorIngestionConfiguration=vector_ingestion,
+    )
+    data_source_id = data_source_response["dataSource"]["dataSourceId"]
+    logger.info(f"  ✓ Data source created: {data_source_id}")
+    return data_source_id
+
+
 def create_knowledge_base_with_opensearch(opensearch_info: Dict[str, str], knowledge_base_role_arn: str, s3_bucket_name: str) -> str:
     """Create Knowledge Base with correct OpenSearch collection."""
     logger.info("[5/6] Creating Knowledge Base with OpenSearch collection")
@@ -1115,15 +1251,13 @@ def create_knowledge_base_with_opensearch(opensearch_info: Dict[str, str], knowl
         raise Exception("Failed to create vector index in OpenSearch collection")
     
     bedrock_agent_client = boto3.client("bedrock-agent", region_name=region)
-    # parsing_model_arn = f"arn:aws:bedrock:{region}:{account_id}:inference-profile/global.anthropic.claude-haiku-4-5-20251001-v1:0"
-    parsing_model_arn = f"arn:aws:bedrock:{region}:{account_id}:inference-profile/global.anthropic.claude-sonnet-4-6"
     
     # Check if Knowledge Base already exists
     try:
         logger.info("  Checking if Knowledge Base already exists...")
         kb_list = bedrock_agent_client.list_knowledge_bases()
         for kb in kb_list.get("knowledgeBaseSummaries", []):
-            if kb["name"] == knowledge_base_name:
+            if kb["name"] == project_name:
                 logger.warning(f"Knowledge Base already exists: {kb['knowledgeBaseId']}")
                 
                 # Verify it's using the correct OpenSearch collection
@@ -1136,10 +1270,14 @@ def create_knowledge_base_with_opensearch(opensearch_info: Dict[str, str], knowl
                     logger.warning(f"  Expected: {opensearch_info['arn']}")
 
                     delete_knowledge_base(kb["knowledgeBaseId"])
-                    break                    
-                else:
-                    logger.info(f"Knowledge Base is using correct OpenSearch collection")                
-                    return kb["knowledgeBaseId"]
+                    break
+
+                logger.info("Knowledge Base is using correct OpenSearch collection")
+                knowledge_base_id = kb["knowledgeBaseId"]
+                ensure_data_source_with_foundation_model_parser(
+                    bedrock_agent_client, knowledge_base_id, s3_bucket_name
+                )
+                return knowledge_base_id
         logger.info("  Knowledge Base does not exist. Creating new one...")
     except Exception as e:
         logger.debug(f"Error checking existing Knowledge Base: {e}")
@@ -1179,11 +1317,11 @@ def create_knowledge_base_with_opensearch(opensearch_info: Dict[str, str], knowl
     # Create Knowledge Base
     logger.debug(f"Creating Knowledge Base with OpenSearch collection: {opensearch_info['arn']}")
     response = bedrock_agent_client.create_knowledge_base(
-        name=knowledge_base_name,
+        name=project_name,
         description="Knowledge base based on OpenSearch",
         roleArn=knowledge_base_role_arn,
         tags={
-            knowledge_base_name: 'true'
+            project_name: 'true'
         },
         knowledgeBaseConfiguration={
             "type": "VECTOR",
@@ -1228,42 +1366,9 @@ def create_knowledge_base_with_opensearch(opensearch_info: Dict[str, str], knowl
         logger.debug(f"  Knowledge Base status: {status} (waiting...)")
         time.sleep(10)
     
-    # Create data source
-    logger.info("  Creating data source...")
-    data_source_response = bedrock_agent_client.create_data_source(
-        knowledgeBaseId=knowledge_base_id,
-        name=s3_bucket_name,
-        description=f"S3 data source: {s3_bucket_name}",
-        dataDeletionPolicy='RETAIN',
-        dataSourceConfiguration={
-            "type": "S3",
-            "s3Configuration": {
-                "bucketArn": f"arn:aws:s3:::{s3_bucket_name}",
-                "inclusionPrefixes": ["docs/"]
-            }
-        },
-        vectorIngestionConfiguration={
-            "chunkingConfiguration": {
-                "chunkingStrategy": "HIERARCHICAL",
-                "hierarchicalChunkingConfiguration": {
-                    "levelConfigurations": [
-                        {"maxTokens": 1500},
-                        {"maxTokens": 300}
-                    ],
-                    "overlapTokens": 60
-                }
-            },
-            "parsingConfiguration": {
-                "parsingStrategy": "BEDROCK_FOUNDATION_MODEL",
-                "bedrockFoundationModelConfiguration": {
-                    "modelArn": parsing_model_arn
-                }
-            }
-        }
+    ensure_data_source_with_foundation_model_parser(
+        bedrock_agent_client, knowledge_base_id, s3_bucket_name
     )
-    
-    data_source_id = data_source_response["dataSource"]["dataSourceId"]
-    logger.info(f"  ✓ Data source created: {data_source_id}")
     
     return knowledge_base_id
 

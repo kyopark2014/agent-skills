@@ -20,15 +20,15 @@ project_name = "agent-skills"
 region = "us-west-2"
 AGENTCORE_GATEWAY_REGION = "us-east-1"
 AGENTCORE_WEBSEARCH_GATEWAY_NAME = "gateway-websearch"
-vector_index_name = "rag-project"
+vector_index_name = project_name
 cloudfront_comment = "CloudFront-for-rag-project"
 oai_comment = f"OAI for {vector_index_name}"
 
 sts_client = boto3.client("sts", region_name=region)
 account_id = sts_client.get_caller_identity()["Account"]
 
-knowledge_base_name = vector_index_name
-knowledge_base_role_name = f"role-knowledge-base-for-{vector_index_name}-{region}"
+knowledge_base_name = project_name
+knowledge_base_role_name = f"role-knowledge-base-for-{project_name}-{region}"
 bucket_name = f"storage-for-rag-project-{account_id}-{region}"
 
 s3_client = boto3.client("s3", region_name=region)
@@ -357,11 +357,10 @@ def delete_opensearch_collection():
             if e.response["Error"]["Code"] != "ResourceNotFoundException":
                 logger.warning(f"  Could not delete collection: {e}")
         
-        # Delete data access policy (shared rag-project naming)
+        # Delete data access policy
         for data_policy_name in [
-            f"data-{vector_index_name}",
             f"data-{project_name}",
-            "data-agent-plugins",
+            f"data-{vector_index_name}",
         ]:
             try:
                 opensearch_client.delete_access_policy(
@@ -373,14 +372,10 @@ def delete_opensearch_collection():
                 if e.response["Error"]["Code"] != "ResourceNotFoundException":
                     logger.warning(f"  Could not delete data access policy {data_policy_name}: {e}")
 
-        # Delete encryption/network policies (shared + legacy project-specific names)
+        # Delete encryption/network policies
         policies = [
-            ("network", f"net-{vector_index_name}-{region}"),
-            ("encryption", f"enc-{vector_index_name}-{region}"),
             ("network", f"net-{project_name}-{region}"),
             ("encryption", f"enc-{project_name}-{region}"),
-            ("network", f"net-agent-plugins-{region}"),
-            ("encryption", f"enc-agent-plugins-{region}"),
         ]
         
         for policy_type, policy_name in policies:
@@ -605,7 +600,7 @@ def delete_secrets(delete_shared: bool = False):
 def delete_iam_roles(
     delete_agentcore_gateway_role: bool = True,
     delete_agentcore_memory_role: bool = True,
-    delete_knowledge_base_role: bool = False,
+    delete_knowledge_base_role: bool = True,
 ):
     """Delete IAM roles created by installer."""
     logger.info("[5/6] Deleting IAM roles")
@@ -614,7 +609,7 @@ def delete_iam_roles(
     if delete_knowledge_base_role:
         role_names.append(knowledge_base_role_name)
     else:
-        logger.info(f"  Keeping shared Knowledge Base IAM role ({knowledge_base_role_name})")
+        logger.info(f"  Keeping Knowledge Base IAM role ({knowledge_base_role_name})")
 
     role_names.append(f"role-agent-for-{project_name}-{region}")
 
@@ -728,8 +723,6 @@ def main():
     parser.add_argument("--delete-agentcore-gateway", action="store_true")
     parser.add_argument("--delete-s3-bucket", action="store_true")
     parser.add_argument("--delete-cloudfront", action="store_true")
-    parser.add_argument("--delete-opensearch", action="store_true")
-    parser.add_argument("--delete-knowledge-base", action="store_true")
     parser.add_argument(
         "--delete-shared-secrets",
         action="store_true",
@@ -743,7 +736,10 @@ def main():
         print("=" * 60)
         print(f"  Project:  {project_name}")
         print(f"  Region:   {region}")
-        print("  Always removed: AgentCore Memory, project IAM roles (agent, agentcore memory)")
+        print("  Always removed:")
+        print(f"    Knowledge Base:   {knowledge_base_name}")
+        print(f"    OpenSearch:       {vector_index_name}")
+        print("    AgentCore Memory, project IAM roles (KB, agent, agentcore memory)")
         print("  AgentCore gateway: prompted separately (default: keep)")
         print("  Shared API secrets: prompted separately (default: keep)")
         print(f"    ({', '.join(SHARED_API_SECRETS)})")
@@ -751,8 +747,6 @@ def main():
         print("Shared resources (prompted separately, default: keep):")
         print(f"  S3 bucket:        {bucket_name}")
         print(f"  CloudFront:       {cloudfront_comment}")
-        print(f"  OpenSearch:       {vector_index_name}")
-        print(f"  Knowledge Base:   {knowledge_base_name}")
         print("=" * 60)
         response = input("\nProceed with project-specific resource deletion? (yes/no): ")
         if response.lower() != "yes":
@@ -768,8 +762,6 @@ def main():
 
     delete_s3_bucket = resolve(args.delete_s3_bucket, f"\nDelete shared S3 bucket ({bucket_name})?")
     delete_cloudfront = resolve(args.delete_cloudfront, f"Delete shared CloudFront distribution ({cloudfront_comment})?")
-    delete_opensearch = resolve(args.delete_opensearch, f"Delete shared OpenSearch collection ({vector_index_name})?")
-    delete_knowledge_base = resolve(args.delete_knowledge_base, f"Delete shared Knowledge Base ({knowledge_base_name})?")
     delete_shared_secrets = resolve(
         args.delete_shared_secrets,
         "Delete shared API secrets (openweathermap, tavilyapikey, notionapikey, telegramapikey, discordapikey, slackapikey)?",
@@ -777,15 +769,8 @@ def main():
 
     start_time = time.time()
     try:
-        if delete_knowledge_base:
-            delete_knowledge_bases()
-        else:
-            logger.info(f"[skip] Knowledge Base retained (shared resource): {knowledge_base_name}")
-
-        if delete_opensearch:
-            delete_opensearch_collection()
-        else:
-            logger.info(f"[skip] OpenSearch collection retained (shared resource): {vector_index_name}")
+        delete_knowledge_bases()
+        delete_opensearch_collection()
 
         agentcore_memory_deleted = delete_agentcore_memory()
         agentcore_gateway_deleted = delete_agentcore_websearch_gateway(
@@ -795,13 +780,13 @@ def main():
         delete_iam_roles(
             delete_agentcore_gateway_role=agentcore_gateway_deleted,
             delete_agentcore_memory_role=agentcore_memory_deleted,
-            delete_knowledge_base_role=delete_knowledge_base,
+            delete_knowledge_base_role=True,
         )
         clear_config_json(
             delete_s3_bucket=delete_s3_bucket,
             delete_cloudfront=delete_cloudfront,
-            delete_opensearch=delete_opensearch,
-            delete_knowledge_base=delete_knowledge_base,
+            delete_opensearch=True,
+            delete_knowledge_base=True,
         )
 
         if delete_s3_bucket:

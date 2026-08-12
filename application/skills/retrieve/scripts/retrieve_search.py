@@ -25,12 +25,18 @@ app_dir = os.path.abspath(os.path.join(script_dir, "..", "..", ".."))
 config_path = os.path.join(app_dir, "config.json")
 
 NUMBER_OF_RESULTS = 5
-DOC_PREFIX = "docs/"
 
 
 def load_config():
     with open(config_path, "r", encoding="utf-8") as f:
         return json.load(f)
+
+
+def docs_prefix(config) -> str:
+    project_name = config.get("projectName")
+    if project_name:
+        return f"docs/{project_name}/"
+    return "docs/"
 
 
 def create_bedrock_client(config):
@@ -44,7 +50,7 @@ def create_bedrock_client(config):
 def update_knowledge_base_id(config):
     """Look up knowledge base ID by project name when the current ID is stale."""
     region = config.get('region', 'us-west-2')
-    project_name = config.get('projectName')
+    project_name = config.get('projectName') or config.get('knowledge_base_name')
 
     agent_client = boto3.client("bedrock-agent", region_name=region)
     kb_list = agent_client.list_knowledge_bases()
@@ -66,6 +72,7 @@ def retrieve(query):
     config = load_config()
     knowledge_base_id = config.get('knowledge_base_id')
     sharing_url = config.get('sharing_url', '')
+    doc_prefix = docs_prefix(config)
     client = create_bedrock_client(config)
 
     retrieval_params = {
@@ -109,7 +116,11 @@ def retrieve(query):
                 uri = location["s3Location"].get("uri", "")
                 name = uri.split("/")[-1]
                 encoded_name = parse.quote(name)
-                url = f"{sharing_url}/{DOC_PREFIX}{encoded_name}"
+                if "/docs/" in uri:
+                    relative = uri.split("/docs/", 1)[1]
+                    url = f"{sharing_url}/docs/{parse.quote(relative, safe='/')}"
+                else:
+                    url = f"{sharing_url}/{doc_prefix}{encoded_name}"
             elif "webLocation" in location:
                 url = location["webLocation"].get("url", "")
                 name = "WEB"

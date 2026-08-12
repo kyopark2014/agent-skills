@@ -267,6 +267,20 @@ def load_config(mcp_type):
                 }
             }
         }
+
+    elif mcp_type in ("graph memory", "mcp_graph_memory", "graph_search", "graph search", "knowledge graph"):
+        return {
+            "mcpServers": {
+                "graph memory": {
+                    "command": "python",
+                    "args": [f"{workingDir}/mcp_server_graph_memory.py"],
+                    "env": {
+                        "PYTHONPATH": workingDir,
+                        # AGENTCORE_USER_ID is injected at runtime in chat.create_agent()
+                    },
+                }
+            }
+        }
     
     elif mcp_type == "outlook":
         secret_name = f"outlook-mcp-user-email"
