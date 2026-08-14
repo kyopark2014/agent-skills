@@ -100,11 +100,19 @@ def _fingerprint_path(user_id: str) -> Path:
 
 def _compute_source_fingerprint(user_id: str) -> dict[str, Any]:
     """Return {message_count, max_created_at} for the user's tasks.db messages."""
-    from application.task_store_persistence import working_db_path
+    from application import task_store
+    from application.task_store_persistence import working_user_db_path
 
-    db_path = working_db_path()
+    db_path = working_user_db_path(user_id)
     message_count = 0
     max_created_at: str | None = None
+    try:
+        # Ensure per-user DB exists (lazy migrate) before fingerprinting.
+        task_store.ensure_user_db(user_id)
+        db_path = working_user_db_path(user_id)
+    except Exception:
+        logger.exception("Failed to ensure user DB for fingerprint %s", user_id)
+
     if os.path.isfile(db_path):
         try:
             with sqlite3.connect(db_path) as conn:
@@ -286,8 +294,20 @@ def _run_pipeline(user_id: str, force: bool = False) -> None:
             ]
             if force:
                 cmd.append("--full")
+            env = os.environ.copy()
+            try:
+                from application import task_store
+                from application.task_store_persistence import working_user_db_path
+
+                task_store.ensure_user_db(user_id)
+                env["TASKS_DB_PATH"] = working_user_db_path(user_id)
+            except Exception:
+                logger.exception(
+                    "Could not resolve per-user tasks DB for graph pipeline %s",
+                    user_id,
+                )
             logger.info("+ %s (cwd=%s)", " ".join(cmd), _GRAPH_DIR)
-            subprocess.check_call(cmd, cwd=str(_GRAPH_DIR))
+            subprocess.check_call(cmd, cwd=str(_GRAPH_DIR), env=env)
         fingerprint = _compute_source_fingerprint(user_id)
         _save_fingerprint(user_id, fingerprint)
         with _lock:
@@ -313,8 +333,18 @@ def _run_pipeline(user_id: str, force: bool = False) -> None:
         logger.exception("Graph pipeline failed for user=%s", user_id)
 
 
-def republish_graph_html(user_id: str, *, pattern: str | None = None) -> bool:
-    """Re-render out/graph.html from existing graph.json using the given pattern."""
+def republish_graph_html(
+    user_id: str,
+    *,
+    pattern: str | None = None,
+    sync_runtime: bool = False,  # reserved; no graph→runtime mirror in this app
+) -> bool:
+    """Re-render out/graph.html from existing graph.json using the given pattern.
+
+    Pattern switches only change the view HTML; full runtime mirroring is skipped
+    by default. Pass ``sync_runtime=True`` only when callers need AgentCore storage
+    updated (pipeline success paths already mirror when configured).
+    """
     user_id = (user_id or "").strip()
     if not user_id:
         return False
@@ -335,4 +365,6 @@ def republish_graph_html(user_id: str, *, pattern: str | None = None) -> bool:
         logger.info("No graph.json to republish for %s (pattern=%s)", user_id, pid)
         return False
     logger.info("Republished graph HTML for %s pattern=%s → %s", user_id, pid, written)
+    if sync_runtime:
+        logger.debug("sync_runtime requested but no graph→runtime mirror in this app")
     return True
