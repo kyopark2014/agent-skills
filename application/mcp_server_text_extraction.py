@@ -1,7 +1,14 @@
 """
-MCP server for extracting text from images using LLM (AWS Bedrock).
-Based on chat.py summarize_image and extract_text logic.
+Image → Markdown text extraction via AWS Bedrock multimodal.
+
+Used as:
+  - Library helpers for Wiki Sync Foundation Model Parser (``graph/pdf2text.py``)
+  - Optional FastMCP server when ``mcp`` is installed (agent tools)
+
+Based on chat.py summarize_image / extract_text logic.
 """
+from __future__ import annotations
+
 import base64
 import logging
 import os
@@ -14,7 +21,6 @@ import boto3
 from botocore.config import Config
 from langchain_aws import ChatBedrock
 from langchain_core.messages import HumanMessage
-from mcp.server.fastmcp import FastMCP
 from PIL import Image
 
 import info
@@ -35,50 +41,61 @@ profile = models[0]
 model_id = profile["model_id"]
 model_type = profile["model_type"]
 
+mcp = None
 try:
+    from mcp.server.fastmcp import FastMCP
+
     mcp = FastMCP(
         name="text_extraction",
         instructions=(
             "Extract text from images using an LLM. "
-            "Use extract_text_from_image when the user provides an image (base64 or file path) and wants to extract text from it."
+            "Use extract_text_from_image when the user provides an image "
+            "(base64 or file path) and wants to extract text from it."
         ),
     )
     logger.info("Text extraction MCP server initialized successfully")
 except Exception as e:
-    logger.error(f"Error initializing MCP: {str(e)}")
-    raise
+    # Wiki Sync / pdf2text only need the helpers below; MCP is optional.
+    logger.info("Text extraction MCP server not available (library mode): %s", e)
 
 
 def _get_chat():
     """Create ChatBedrock instance for text extraction."""
     stop_sequence = "\n\nHuman:" if model_type == "claude" else ""
-    max_tokens = 16384 if "claude-4" in model_id else 8192
+    mid = (model_id or "").lower()
+    if "claude-sonnet-5" in mid or "claude-5-sonnet" in mid or "claude-opus-5" in mid:
+        max_tokens = 128000
+    elif "claude-4" in mid or "claude-sonnet-4" in mid or "claude-opus-4" in mid:
+        max_tokens = 16384
+    else:
+        max_tokens = 8192
 
-    # bedrock   
     boto3_bedrock = boto3.client(
-        service_name='bedrock-runtime',
+        service_name="bedrock-runtime",
         region_name=bedrock_region,
         config=Config(
-            retries = {
-                'max_attempts': 30
-            },
-            read_timeout=300
-        )
+            retries={"max_attempts": 30},
+            read_timeout=300,
+        ),
     )
 
+    # Do not pass temperature/top_k: Claude 5.x (and some 4.x) reject them
+    # with ValidationException: "`temperature` is deprecated for this model."
     parameters = {
         "max_tokens": max_tokens,
-        "temperature": 0.1,
-        "top_k": 250,
         "stop_sequences": [stop_sequence],
     }
 
-    return ChatBedrock(
-        model_id=model_id,
-        client=boto3_bedrock,
-        model_kwargs=parameters,
-        region_name=bedrock_region,
-    )
+    chat_kwargs = {
+        "model_id": model_id,
+        "client": boto3_bedrock,
+        "model_kwargs": parameters,
+        "region_name": bedrock_region,
+    }
+    if model_type == "claude":
+        chat_kwargs["provider"] = "anthropic"
+
+    return ChatBedrock(**chat_kwargs)
 
 
 def _prepare_image_base64(
@@ -102,7 +119,6 @@ def _prepare_image_base64(
         img = img.resize((width, height))
 
     max_attempts = 5
-    base64_size = 0
     for attempt in range(max_attempts):
         buffer = BytesIO()
         img.save(buffer, format="PNG", optimize=True)
@@ -120,6 +136,36 @@ def _prepare_image_base64(
         logger.info(f"Resizing to {width}x{height} due to size limit")
 
     raise ValueError("이미지 크기가 너무 큽니다. 5MB 이하의 이미지를 사용해주세요.")
+
+
+def _content_to_text(content: object) -> str:
+    """Normalize LangChain/Bedrock message content to a plain string.
+
+    Newer Claude/Bedrock responses often return ``content`` as a list of blocks
+    (e.g. ``[{"type": "text", "text": "..."}]``). Using ``len(content) < 10`` on
+    that list treats a successful 1-block reply as failure.
+    """
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for item in content:
+            if isinstance(item, str):
+                parts.append(item)
+            elif isinstance(item, dict):
+                text = item.get("text")
+                if text:
+                    parts.append(str(text))
+                elif item.get("type") == "text" and item.get("text"):
+                    parts.append(str(item["text"]))
+            else:
+                text = getattr(item, "text", None)
+                if text:
+                    parts.append(str(text))
+        return "\n".join(parts).strip()
+    return str(content).strip()
 
 
 def _extract_text_with_llm(img_base64: str, prompt: Optional[str] = None) -> str:
@@ -144,13 +190,24 @@ def _extract_text_with_llm(img_base64: str, prompt: Optional[str] = None) -> str
         logger.info(f"LLM attempt: {attempt}")
         try:
             result = multimodal.invoke(messages)
-            extracted_text = result.content
+            raw = result.content
+            extracted_text = _content_to_text(raw)
+            logger.info(
+                "LLM content type=%s raw_len=%s text_len=%s",
+                type(raw).__name__,
+                len(raw) if hasattr(raw, "__len__") else "n/a",
+                len(extracted_text),
+            )
             break
         except Exception:
             err_msg = traceback.format_exc()
             logger.warning(f"LLM error: {err_msg}")
 
     if len(extracted_text) < 10:
+        logger.warning(
+            "LLM returned too little text (len=%s); marking as extraction failure",
+            len(extracted_text),
+        )
         extracted_text = "텍스트를 추출하지 못하였습니다."
 
     return extracted_text
@@ -163,7 +220,6 @@ def _parse_result(text: str) -> str:
     return text
 
 
-@mcp.tool()
 def extract_text_from_image(
     image_base64: Optional[str] = None,
     image_path: Optional[str] = None,
@@ -177,12 +233,17 @@ def extract_text_from_image(
     Args:
         image_base64: Base64-encoded image string (without data URL prefix)
         image_path: Path to image file (jpg, png, etc.)
-        prompt: Optional custom prompt for extraction. Default asks for markdown format with <result> tag.
+        prompt: Optional custom prompt for extraction. Default asks for markdown
+            format with <result> tag.
 
     Returns:
         Extracted text from the image in markdown format.
     """
-    logger.info(f"extract_text_from_image called: path={image_path}, prompt={'custom' if prompt else 'default'}")
+    logger.info(
+        "extract_text_from_image called: path=%s, prompt=%s",
+        image_path,
+        "custom" if prompt else "default",
+    )
 
     if not image_base64 and not image_path:
         return "Error: image_base64 또는 image_path 중 하나를 제공해주세요."
@@ -217,5 +278,13 @@ def extract_text_from_image(
         return f"Error: 이미지 텍스트 추출 중 오류 발생: {str(e)}"
 
 
+if mcp is not None:
+    mcp.tool()(extract_text_from_image)
+
+
 if __name__ == "__main__":
+    if mcp is None:
+        raise SystemExit(
+            "mcp package is required to run as a server: pip install mcp"
+        )
     mcp.run(transport="stdio")
