@@ -1,4 +1,4 @@
-# 📐 Agent Plugins Specification v1.0.0 — 세부 스펙 
+# Agent Plugins Specification v1.0.0 — 세부 스펙 
 
 > **출처(공식 authoritative):** `github.com/agentplugins/agent-plugins-spec` → `spec/1.0.0.md`
 > **상태:** Published (RFC 2119/8174 규범 언어 사용 — MUST/SHOULD/MAY)
@@ -298,17 +298,3 @@ Agent Plugins v1.0.0
 ```
 
 ---
-
-### 💡 경수님 실무 연결 포인트
-- **`myslide`·`korea-weather`** 를 이 스펙으로 패키징하려면: `plugin.json`(name 소문자화 주의) + `skills/myslide/SKILL.md` + (MCP 필요 시)`mcp.json`
-- **stdio MCP** 방식은 경수님이 관심 있던 "Python 파일 기반 MCP + stdio transport"와 정확히 일치 → `command: "./bin/..."` + `${PLUGIN_ROOT}` 활용
-- **보안 거버넌스**: 경로 격리·시크릿 embed 금지·헤더 리다이렉트 제한 등이 스펙에 규범으로 박혀 있어 엔터프라이즈 제안에 활용 가능
-
----
-
-이 스펙을 바탕으로 다음을 도와드릴 수 있어요:
-1. **`myslide`/`korea-weather`를 실제 Agent Plugins v1.0.0 포맷으로 변환** (완성된 `plugin.json`+구조 생성)
-2. 이 세부 스펙을 **AWS 다크테마 PPT(myslide)** 로 정리 (엔터프라이즈 발표용)
-3. **JSON Schema 원문**(`plugin.schema.json`/`mcp.schema.json`) 필드별 검증 규칙 심화 분석
-
-어떤 걸 진행할까요? 😊
