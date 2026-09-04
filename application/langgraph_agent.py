@@ -961,16 +961,17 @@ def buildChatAgentWithHistory(tools):
     return workflow.compile(checkpointer=chat.checkpointer)
 
 def load_multiple_mcp_server_parameters(mcp_json: dict):
+    """Build per-server configs compatible with langchain.mcp.MCPAdapter / MCPConfig."""
     mcpServers = mcp_json.get("mcpServers")
   
     server_info = {}
     if mcpServers is not None:
         for server_name, config in mcpServers.items():
-            if config.get("type") in ("streamable_http", "http"):
+            if config.get("type") in ("streamable_http", "http", "streamable-http"):
                 connection = {
-                    "transport": "streamable_http",
+                    "transport": "http",
                     "url": config.get("url"),
-                    "headers": config.get("headers", {})
+                    "headers": config.get("headers", {}),
                 }
                 if config.get("auth_type") == "aws_sigv4":
                     connection["auth"] = agentcore_sigv4_auth.AgentCoreSigV4Auth(
@@ -987,7 +988,7 @@ def load_multiple_mcp_server_parameters(mcp_json: dict):
                     "transport": "stdio",
                     "command": command,
                     "args": args,
-                    "env": env                    
+                    "env": env,
                 }
     return server_info
 

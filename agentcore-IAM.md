@@ -1,20 +1,20 @@
 # AgentCore에서 IAM 인증하기
 
-[agentcore_sigv4_auth.py](./application/agentcore_sigv4_auth.py)와 같이 AgentCoreSigV4Auth을 아래와 같이 정의합니다.
+[agentcore_sigv4_auth.py](./application/agentcore_sigv4_auth.py)와 같이 AgentCoreSigV4Auth을 아래와 같이 정의합니다. MCP Python SDK 2.x / `langchain.mcp` 클라이언트는 `httpx2`를 사용하므로 `httpx2.Auth`를 구현합니다.
 
 ```python
-import httpx
+import httpx2
 import boto3
 from botocore.auth import SigV4Auth
 from botocore.awsrequest import AWSRequest
 
 
-class AgentCoreSigV4Auth(httpx.Auth):
+class AgentCoreSigV4Auth(httpx2.Auth):
     def __init__(self, region: str, service: str = "bedrock-agentcore"):
         self.region = region
         self.service = service
 
-    def auth_flow(self, request: httpx.Request):
+    def auth_flow(self, request: httpx2.Request):
         credentials = boto3.Session().get_credentials().get_frozen_credentials()
         headers = dict(request.headers)
         body = request.content
@@ -34,33 +34,34 @@ class AgentCoreSigV4Auth(httpx.Auth):
         yield request
 ```
 
-LangGraph에서 MCP 정보를 아래와 같이 가져올때에 aws_sigv4에 대한 정보를 가져옵니다. [langgraph_agent.py](./application/langgraph_agent.py)을 참조합니다.
+LangGraph에서 MCP 정보를 아래와 같이 가져올때에 aws_sigv4에 대한 정보를 가져옵니다. [langgraph_agent.py](./application/langgraph_agent.py)을 참조합니다. 결과는 `langchain.mcp.MCPAdapter` / MCPConfig connection 형식입니다.
 
 ```python
 def load_multiple_mcp_server_parameters(mcp_json: dict):
+    """Build per-server configs compatible with langchain.mcp.MCPAdapter / MCPConfig."""
     mcpServers = mcp_json.get("mcpServers")
 
     server_info = {}
     if mcpServers is not None:
-        for server_name, cfg in mcpServers.items():
-            if cfg.get("type") in ("streamable_http", "http"):
+        for server_name, config in mcpServers.items():
+            if config.get("type") in ("streamable_http", "http", "streamable-http"):
                 connection = {
-                    "transport": "streamable_http",
-                    "url": cfg.get("url"),
-                    "headers": cfg.get("headers", {})
+                    "transport": "http",
+                    "url": config.get("url"),
+                    "headers": config.get("headers", {}),
                 }
-                if cfg.get("auth_type") == "aws_sigv4":
+                if config.get("auth_type") == "aws_sigv4":
                     connection["auth"] = agentcore_sigv4_auth.AgentCoreSigV4Auth(
-                        region=cfg.get("auth_region", "us-east-1"),
-                        service=cfg.get("auth_service", "bedrock-agentcore"),
+                        region=config.get("auth_region", "us-east-1"),
+                        service=config.get("auth_service", "bedrock-agentcore"),
                     )
                 server_info[server_name] = connection
             else:
                 server_info[server_name] = {
                     "transport": "stdio",
-                    "command": cfg.get("command", ""),
-                    "args": cfg.get("args", []),
-                    "env": cfg.get("env", {})
+                    "command": config.get("command", ""),
+                    "args": config.get("args", []),
+                    "env": config.get("env", {}),
                 }
     return server_info
 ```

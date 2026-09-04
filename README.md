@@ -75,7 +75,7 @@ flowchart TB
   subgraph MCP["MCP"]
     CFG[mcp_config.py]
     SRV["mcp_server_* / remote gateway"]
-    CLI[MultiServerMCPClient]
+    CLI[MCPAdapter]
   end
 
   subgraph AWS["AWS"]
@@ -222,6 +222,8 @@ Builtin tools 예: `execute_code`, `write_file`, `read_file`, `bash`, `upload_fi
 ## MCP
 
 선택 MCP는 `mcp_config.load_selected_config` → stdio 또는 AgentCore Gateway(`websearch`, SigV4)로 연결됩니다. 목록은 [application/mcp.list](./application/mcp.list)를 참고하세요.
+
+커스텀 서버는 [MCP Python SDK](https://github.com/modelcontextprotocol/python-sdk) **2.1.1+**의 `MCPServer`(`mcp.server.mcpserver`)로 구현되어 있고, Agent 쪽 클라이언트는 `langchain.mcp.MCPAdapter`입니다 (`langchain[mcp]>=1.4.0`, `mcp>=2.1.1`).
 
 대표적인 MCP:
 

@@ -153,10 +153,10 @@ flowchart TB
     LSC[load_selected_config]
   end
 
-  subgraph LG["LangGraph · langgraph_agent.py"]
+  subgraph LG["LangGraph · chat.py / langgraph_agent.py"]
     LMS[load_multiple_mcp_server_parameters]
     AUTH[AgentCoreSigV4Auth]
-    MSC[MultiServerMCPClient]
+    MSC[MCPAdapter]
     TN[ToolNode]
   end
 
@@ -170,7 +170,7 @@ flowchart TB
   GURL -->|bedrock-agentcore-control| GW
 
   LSC --> LMS
-  LMS -->|streamable_http + SigV4| AUTH
+  LMS -->|http + SigV4| AUTH
   AUTH --> MSC
   MSC -->|MCP over HTTP| GW
   GW --> WS
@@ -182,20 +182,20 @@ flowchart TB
 |----------|------|------|
 | UI 선택 | [server.py](./application/server.py) / Web UI | Task 설정의 MCP에 `websearch` 포함 |
 | MCP 설정 | [mcp_config.py](./application/mcp_config.py) | Gateway URL 조회 및 `streamable_http` + SigV4 메타데이터 반환 |
-| MCP 클라이언트 | [langgraph_agent.py](./application/langgraph_agent.py) | `MultiServerMCPClient`용 connection dict 생성, SigV4 auth 주입 |
-| SigV4 인증 | [agentcore_sigv4_auth.py](./application/agentcore_sigv4_auth.py) | httpx 요청에 `bedrock-agentcore` 서비스 SigV4 서명 |
+| MCP 클라이언트 | [langgraph_agent.py](./application/langgraph_agent.py) | `langchain.mcp.MCPAdapter` / MCPConfig용 connection dict 생성, SigV4 auth 주입 |
+| SigV4 인증 | [agentcore_sigv4_auth.py](./application/agentcore_sigv4_auth.py) | httpx2 요청에 `bedrock-agentcore` 서비스 SigV4 서명 |
 | Agent 실행 | [chat.py](./application/chat.py) | `run_langgraph_agent()` → `create_agent()` 경로로 MCP·Skill 통합 |
 
 | MCP | transport | 인증 | 비고 |
 |-----|-----------|------|------|
-| **websearch** | `streamable_http` | AWS SigV4 (`us-east-1`) | AgentCore 관리형 Web Search |
+| **websearch** | `streamable_http` → 클라이언트 `http` | AWS SigV4 (`us-east-1`) | AgentCore 관리형 Web Search |
 | tavily | stdio | Tavily API Key | Secrets Manager (`tavilyapikey`) |
 | web_fetch | stdio | 없음 | URL 본문 fetch (npx) |
 | knowledge base | stdio | IAM | OpenSearch Serverless RAG |
 
 ## Agent에서의 사용 흐름
 
-Web UI Task 설정에서 MCP 목록에 `"websearch"`가 포함되면, AgentCore Runtime의 `create_agent()` 경로로 전달됩니다. Agent 생성 시 `load_selected_config()`로 MCP 설정을 병합하고, `MultiServerMCPClient`가 도구 목록을 LangGraph `ToolNode`에 등록합니다. Skill과 함께 선택하면 `websearch`로 수집한 정보를 Skill 워크플로(예: `graphify`, `myslide`)와 함께 활용할 수 있습니다.
+Web UI Task 설정에서 MCP 목록에 `"websearch"`가 포함되면, AgentCore Runtime의 `create_agent()` 경로로 전달됩니다. Agent 생성 시 `load_selected_config()`로 MCP 설정을 병합하고, `langchain.mcp.MCPAdapter`가 도구 목록을 LangGraph `ToolNode`에 등록합니다. Skill과 함께 선택하면 `websearch`로 수집한 정보를 Skill 워크플로(예: `graphify`, `myslide`)와 함께 활용할 수 있습니다.
 
 기본 MCP 선택은 `config.json`의 `default_mcp_servers`와 `application/mcp.list`를 따릅니다.
 
@@ -272,49 +272,54 @@ elif mcp_type == "websearch":
 
 ## LangGraph MCP 클라이언트 연동
 
-[langgraph_agent.py](./application/langgraph_agent.py)의 `load_multiple_mcp_server_parameters()`는 `mcp_config` 출력을 [langchain-mcp-adapters](https://reference.langchain.com/python/langchain-mcp-adapters/client/MultiServerMCPClient) 형식으로 변환합니다. `streamable_http` 타입이면서 `auth_type == "aws_sigv4"`인 경우 SigV4 auth 객체를 connection에 붙입니다.
+[langgraph_agent.py](./application/langgraph_agent.py)의 `load_multiple_mcp_server_parameters()`는 `mcp_config` 출력을 [langchain.mcp.MCPAdapter](https://docs.langchain.com/oss/python/langchain/mcp) / FastMCP `MCPConfig` 형식으로 변환합니다. `streamable_http`/`http`/`streamable-http` 타입이면서 `auth_type == "aws_sigv4"`인 경우 SigV4 auth 객체를 connection에 붙입니다. MCP Python SDK 2.x 클라이언트는 `httpx2`를 쓰므로 auth도 `httpx2.Auth`여야 합니다.
 
 ```python
 def load_multiple_mcp_server_parameters(mcp_json: dict):
+    """Build per-server configs compatible with langchain.mcp.MCPAdapter / MCPConfig."""
     mcpServers = mcp_json.get("mcpServers")
     server_info = {}
     if mcpServers is not None:
-        for server_name, cfg in mcpServers.items():
-            if cfg.get("type") in ("streamable_http", "http"):
+        for server_name, config in mcpServers.items():
+            if config.get("type") in ("streamable_http", "http", "streamable-http"):
                 connection = {
-                    "transport": "streamable_http",
-                    "url": cfg.get("url"),
-                    "headers": cfg.get("headers", {})
+                    "transport": "http",
+                    "url": config.get("url"),
+                    "headers": config.get("headers", {}),
                 }
-                if cfg.get("auth_type") == "aws_sigv4":
+                if config.get("auth_type") == "aws_sigv4":
                     connection["auth"] = agentcore_sigv4_auth.AgentCoreSigV4Auth(
-                        region=cfg.get("auth_region", "us-east-1"),
-                        service=cfg.get("auth_service", "bedrock-agentcore"),
+                        region=config.get("auth_region", "us-east-1"),
+                        service=config.get("auth_service", "bedrock-agentcore"),
                     )
                 server_info[server_name] = connection
             else:
                 server_info[server_name] = {
                     "transport": "stdio",
-                    "command": cfg.get("command", ""),
-                    "args": cfg.get("args", []),
-                    "env": cfg.get("env", {}),
+                    "command": config.get("command", ""),
+                    "args": config.get("args", []),
+                    "env": config.get("env", {}),
                 }
     return server_info
 ```
 
-[chat.py](./application/chat.py)의 `create_agent()`는 이 connection dict로 `MultiServerMCPClient`를 만들고 `get_tools()`로 LangGraph 도구를 등록합니다.
+[chat.py](./application/chat.py)의 `create_agent()`는 서버마다 `MCPAdapter`를 만들고 `list_tools()`로 LangGraph 도구를 등록합니다. 서버를 하나씩 열어 도구 이름에 `{server}_` 접두사가 붙지 않게 합니다.
 
 ```python
+from langchain.mcp import MCPAdapter
+
 mcp_json = mcp_config.load_selected_config(mcp_servers)
 server_params = langgraph_agent.load_multiple_mcp_server_parameters(mcp_json)
-client = MultiServerMCPClient(server_params)
-mcp_tools = await client.get_tools()
-tools.append(mcp_tools)
+
+for server_name, params in server_params.items():
+    async with MCPAdapter({"mcpServers": {server_name: params}}) as adapter:
+        mcp_tools = await adapter.list_tools()
+    tools.extend(mcp_tools)
 ```
 
 ## SigV4 인증
 
-websearch MCP는 API Key나 Bearer 토큰 대신 **실행 환경의 IAM identity로 HTTP 요청 자체를 SigV4 서명**합니다. [agentcore_sigv4_auth.py](./application/agentcore_sigv4_auth.py)는 httpx `Auth` 구현체이며, boto3 세션의 현재 IAM 자격 증명으로 Gateway MCP URL에 대한 요청을 `bedrock-agentcore` 서비스 SigV4로 서명합니다. Gateway IAM 정책·역할 설정은 [agentcore-IAM.md](./agentcore-IAM.md)를 참조하세요.
+websearch MCP는 API Key나 Bearer 토큰 대신 **실행 환경의 IAM identity로 HTTP 요청 자체를 SigV4 서명**합니다. [agentcore_sigv4_auth.py](./application/agentcore_sigv4_auth.py)는 httpx2 `Auth` 구현체이며, boto3 세션의 현재 IAM 자격 증명으로 Gateway MCP URL에 대한 요청을 `bedrock-agentcore` 서비스 SigV4로 서명합니다. Gateway IAM 정책·역할 설정은 [agentcore-IAM.md](./agentcore-IAM.md)를 참조하세요.
 
 ### 인증 흐름
 
@@ -322,14 +327,14 @@ websearch MCP는 API Key나 Bearer 토큰 대신 **실행 환경의 IAM identity
 sequenceDiagram
     participant Config as mcp_config
     participant Loader as load_multiple_mcp_server_parameters
-    participant Client as MultiServerMCPClient
+    participant Client as MCPAdapter
     participant Auth as AgentCoreSigV4Auth
     participant Boto3 as boto3.Session
     participant Gateway as AgentCore Gateway (HTTP)
 
     Config->>Loader: auth_type=aws_sigv4 설정
     Loader->>Client: connection["auth"] = AgentCoreSigV4Auth(...)
-    Client->>Gateway: httpx HTTP 요청
+    Client->>Gateway: httpx2 HTTP 요청
     Auth->>Boto3: get_credentials()
     Boto3-->>Auth: access_key, secret_key, token
     Auth->>Auth: SigV4Auth로 Authorization 헤더 생성
@@ -340,13 +345,13 @@ sequenceDiagram
 |------|----------|------|
 | 1. 설정 | [mcp_config.py](./application/mcp_config.py) | `auth_type`, `auth_region`, `auth_service` 메타데이터 반환 |
 | 2. 연결 | [langgraph_agent.py](./application/langgraph_agent.py) | `auth_type == "aws_sigv4"`일 때 `AgentCoreSigV4Auth` 인스턴스를 connection에 연결 |
-| 3. 클라이언트 | `MultiServerMCPClient` | langchain-mcp-adapters가 내부 httpx 클라이언트에 `auth` 객체 연결 |
+| 3. 클라이언트 | `MCPAdapter` | `langchain.mcp`가 내부 httpx2 클라이언트에 `auth` 객체 연결 |
 | 4. 서명 | [agentcore_sigv4_auth.py](./application/agentcore_sigv4_auth.py) | 요청마다 boto3 credential으로 SigV4 서명 후 헤더 주입 |
 | 5. 검증 | AgentCore Gateway | IAM으로 `Authorization` 헤더 검증 (`authorizerType: AWS_IAM`) |
 
 ### 1단계: connection에 auth 객체 연결
 
-[langgraph_agent.py](./application/langgraph_agent.py)의 `load_multiple_mcp_server_parameters()`는 MCP 서버가 `streamable_http`/`http` 타입이고 `auth_type: "aws_sigv4"`인 경우에만 `connection` 딕셔너리에 `auth` 키를 추가합니다.
+[langgraph_agent.py](./application/langgraph_agent.py)의 `load_multiple_mcp_server_parameters()`는 MCP 서버가 `streamable_http`/`http`/`streamable-http` 타입이고 `auth_type: "aws_sigv4"`인 경우에만 `connection` 딕셔너리에 `auth` 키를 추가합니다. 클라이언트 transport는 MCPConfig 호환을 위해 `http`로 정규화됩니다.
 
 ```python
 if cfg.get("auth_type") == "aws_sigv4":
@@ -363,11 +368,11 @@ if cfg.get("auth_type") == "aws_sigv4":
 
 ### 2단계: AWS Credential 획득 및 SigV4 서명
 
-MCP 클라이언트가 Gateway URL로 HTTP 요청을 보낼 때마다 httpx가 `AgentCoreSigV4Auth.auth_flow()`를 호출합니다.
+MCP 클라이언트가 Gateway URL로 HTTP 요청을 보낼 때마다 httpx2가 `AgentCoreSigV4Auth.auth_flow()`를 호출합니다.
 
 ```python
-class AgentCoreSigV4Auth(httpx.Auth):
-    def auth_flow(self, request: httpx.Request):
+class AgentCoreSigV4Auth(httpx2.Auth):
+    def auth_flow(self, request: httpx2.Request):
         credentials = boto3.Session().get_credentials().get_frozen_credentials()
         headers = dict(request.headers)
         body = request.content
@@ -402,7 +407,7 @@ class AgentCoreSigV4Auth(httpx.Auth):
 
 #### SigV4 서명 과정
 
-1. httpx가 Gateway로 보낼 HTTP 요청(method, URL, body, headers)을 `botocore.awsrequest.AWSRequest`로 감쌉니다.
+1. httpx2가 Gateway로 보낼 HTTP 요청(method, URL, body, headers)을 `botocore.awsrequest.AWSRequest`로 감쌉니다.
 2. `botocore.auth.SigV4Auth(credentials, "bedrock-agentcore", "us-east-1").add_auth()`가 AWS Signature Version 4 서명을 계산합니다.
 3. 서명 결과가 `Authorization`, `X-Amz-Date`, `X-Amz-Security-Token`(임시 credential인 경우) 등의 헤더로 요청에 추가됩니다.
 4. 서명된 요청이 AgentCore Gateway(`authorizerType: AWS_IAM`)로 전송되고, Gateway가 IAM으로 서명을 검증합니다.
@@ -474,7 +479,7 @@ uvicorn application.server:app --host 0.0.0.0 --port 8501
 | [agentcore-IAM.md](./agentcore-IAM.md) | SigV4 인증 및 Gateway IAM 정책 상세 |
 | [application/mcp_config.py](./application/mcp_config.py) | websearch MCP 정의, Gateway URL 조회 |
 | [application/langgraph_agent.py](./application/langgraph_agent.py) | SigV4 connection 변환 |
-| [application/agentcore_sigv4_auth.py](./application/agentcore_sigv4_auth.py) | httpx SigV4 auth |
+| [application/agentcore_sigv4_auth.py](./application/agentcore_sigv4_auth.py) | httpx2 SigV4 auth |
 | [application/server.py](./application/server.py) | FastAPI Web UI 진입점 |
 | [application/web/](./application/web/) | React SPA |
 | [application/chat.py](./application/chat.py) | LangGraph Agent 생성 및 MCP 도구 등록 |
