@@ -146,18 +146,12 @@ def _upsert_tool_event(tool_events: list[dict[str, Any]], mapped: dict[str, Any]
             if tool_name:
                 for i in range(len(tool_events) - 1, -1, -1):
                     existing = tool_events[i]
-                    if existing.get("type") != "tool" or existing.get("tool") != tool_name:
-                        continue
-                    existing_id = str(existing.get("toolUseId") or "")
-                    # Only upgrade placeholder ids (missing or equal to tool name).
-                    # Real toolUseIds must stay distinct — same tool can run twice.
-                    if existing_id and existing_id != tool_name:
-                        continue
-                    if mapped.get("toolUseId") and mapped["toolUseId"] != tool_name:
-                        tool_events[i] = mapped
-                    else:
-                        tool_events[i] = {**existing, **mapped}
-                    return
+                    if existing.get("type") == "tool" and existing.get("tool") == tool_name:
+                        if mapped.get("toolUseId") and mapped["toolUseId"] != tool_name:
+                            tool_events[i] = mapped
+                        else:
+                            tool_events[i] = {**existing, **mapped}
+                        return
     tool_events.append(mapped)
 
 
@@ -651,13 +645,10 @@ def chat_stream(task_id: str, body: ChatRequest, request: Request):
                     "Agent finished after cancel; skip server persist "
                     "(client stop message)"
                 )
-                # Keep AI text only in tool_events timeline. Putting it in
-                # content makes the client render Tool cards then a trailing
-                # blob when done(cancelled) races ahead of AbortError.
                 yield _sse_event(
                     {
                         "type": "done",
-                        "content": "",
+                        "content": final_content,
                         "images": images,
                         "tool_events": events,
                         "cancelled": True,
