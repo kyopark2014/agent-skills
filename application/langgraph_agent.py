@@ -752,16 +752,27 @@ def _supports_bedrock_prompt_caching(model_type: str | None) -> bool:
 
 
 def _supports_gpt_explicit_caching(model_type: str | None, model_id: str | None) -> bool:
+    """Explicit GPT prompt cache is Mantle Responses-only (GPT-5.5 path).
+
+    GPT-5.6 / Astra use Bedrock Converse inference profiles (`us.openai.*`) and
+    do not accept Mantle ``prompt_cache_*`` bind options.
+    """
     if _bedrock_cache_disabled():
         return False
     if model_type != "openai":
         return False
     mid = (model_id or "").lower()
-    match = re.search(r"openai\.gpt-(\d+)\.(\d+)", mid)
-    if not match:
+    if mid.startswith("us.openai.") or mid.startswith("global.openai."):
         return False
-    major, minor = int(match.group(1)), int(match.group(2))
-    return (major, minor) >= (5, 6)
+    # openai.gpt-5.6+ on Mantle Responses (legacy / remaining Mantle GPT)
+    match = re.search(r"openai\.gpt-(\d+)\.(\d+)", mid)
+    if match:
+        major, minor = int(match.group(1)), int(match.group(2))
+        return (major, minor) >= (5, 6)
+    named = re.search(r"openai\.gpt-(\d+)(?:-|$)", mid)
+    if named:
+        return int(named.group(1)) >= 6
+    return False
 
 
 def _gpt_prompt_cache_key(config: dict, tools: list | None) -> str:
