@@ -47,6 +47,9 @@ WORKING_DIR = os.path.dirname(os.path.abspath(__file__))
 # Per-user artifacts/skills under SESSION_STORAGE_DIR (set via set_user_workspace).
 ARTIFACTS_DIR = utils.get_user_artifacts_dir("default")
 USER_SKILLS_DIR = utils.get_user_skills_dir("default")
+# Active user for S3 keys: artifacts/{user_id}/... (set via set_user_artifacts).
+CURRENT_USER_ID: str | None = None
+_ALLOWED_S3_PREFIXES = ("artifacts/", "images/", "docs/")
 
 _py_ver = f"{sys.version_info.major}.{sys.version_info.minor}"
 _user_bin = os.path.expanduser(f"~/Library/Python/{_py_ver}/bin")
@@ -90,7 +93,8 @@ _EXCLUDED_SNAPSHOT_DIRS = frozenset({
 
 def set_user_artifacts(user_id: str | None) -> str:
     """Point ARTIFACTS_DIR at {SESSION_STORAGE_DIR}/{user_id}/artifacts."""
-    global ARTIFACTS_DIR
+    global ARTIFACTS_DIR, CURRENT_USER_ID
+    CURRENT_USER_ID = user_id
     artifacts_dir = utils.ensure_user_artifacts_dir(user_id)
     ARTIFACTS_DIR = artifacts_dir
     exec_globals = globals().get("_exec_globals")
@@ -122,6 +126,137 @@ def set_user_workspace(user_id: str | None) -> tuple[str, str]:
     return artifacts_dir, skills_dir
 
 
+def _current_user_segment() -> str | None:
+    """Sanitized user_id segment for local/S3 paths, or None."""
+    return utils.sanitize_user_path_segment(CURRENT_USER_ID)
+
+
+def _strip_to_allowed_prefix(normalized: str) -> str:
+    """Drop leading junk before artifacts/|images/|docs/ (e.g. app/artifacts/x)."""
+    for prefix in _ALLOWED_S3_PREFIXES:
+        idx = normalized.find(prefix)
+        if idx != -1:
+            return normalized[idx:]
+    if normalized == "artifacts":
+        return "artifacts/"
+    return normalized
+
+
+def _s3_key_with_user(prefix: str, rest: str) -> str:
+    """Build ``{prefix}/{user_id}/{rest}`` (or without user when unknown)."""
+    rest = (rest or "").lstrip("/")
+    user = _current_user_segment()
+    if user:
+        if rest == user or rest.startswith(f"{user}/"):
+            return f"{prefix}/{rest}" if rest else f"{prefix}/{user}/"
+        return f"{prefix}/{user}/{rest}" if rest else f"{prefix}/{user}/"
+    return f"{prefix}/{rest}" if rest else f"{prefix}/"
+
+
+def _public_url_for_key(key: str) -> str:
+    """Build a CloudFront/sharing URL with each path segment quoted."""
+    base = (sharing_url or "").rstrip("/")
+    quoted = "/".join(quote(seg) for seg in key.split("/") if seg != "")
+    return f"{base}/{quoted}"
+
+
+def _s3_key_for_upload(filepath: str, full_path: str) -> str:
+    """Map a local file onto ``artifacts|images|docs/{user_id}/...`` S3 key."""
+    normalized = _strip_to_allowed_prefix(
+        filepath.replace("\\", "/").lstrip("./")
+    )
+
+    for prefix in ("artifacts", "images", "docs"):
+        head = f"{prefix}/"
+        if normalized.startswith(head) or normalized == prefix:
+            rest = "" if normalized == prefix else normalized[len(head) :]
+            return _s3_key_with_user(prefix, rest)
+
+    try:
+        artifacts_real = os.path.realpath(ARTIFACTS_DIR)
+        full_real = os.path.realpath(full_path)
+        if os.path.commonpath([full_real, artifacts_real]) == artifacts_real:
+            rel = os.path.relpath(full_real, artifacts_real).replace("\\", "/")
+            return _s3_key_with_user("artifacts", "" if rel == "." else rel)
+    except (OSError, ValueError):
+        pass
+
+    # Absolute / WORKING_DIR-relative under SESSION_STORAGE_DIR/{user}/artifacts/...
+    try:
+        session_root = os.path.realpath(utils.SESSION_STORAGE_DIR)
+        full_real = os.path.realpath(full_path)
+        if os.path.commonpath([full_real, session_root]) == session_root:
+            rel = os.path.relpath(full_real, session_root).replace("\\", "/")
+            parts = rel.split("/")
+            if len(parts) >= 2 and parts[1] == "artifacts":
+                user_seg = parts[0]
+                rest = "/".join(parts[2:])
+                if user_seg:
+                    return (
+                        f"artifacts/{user_seg}/{rest}"
+                        if rest
+                        else f"artifacts/{user_seg}/"
+                    )
+    except (OSError, ValueError):
+        pass
+
+    return normalized.lstrip("/")
+
+
+def _upload_file_to_project_s3(filepath: str, full_path: str | None = None) -> str:
+    """Upload a local file to the project S3 bucket; return the object key."""
+    import boto3
+
+    s3_bucket = config.get("s3_bucket")
+    if not s3_bucket:
+        raise RuntimeError("S3 bucket is not configured.")
+
+    resolved = full_path or _resolve_workdir_path(filepath)
+    if not os.path.exists(resolved):
+        raise FileNotFoundError(f"File not found: {filepath} (resolved: {resolved})")
+
+    key = _s3_key_for_upload(filepath, resolved)
+    if not key.startswith(_ALLOWED_S3_PREFIXES):
+        raise ValueError(
+            "Upload rejected: S3 key must start with "
+            f"{', '.join(_ALLOWED_S3_PREFIXES)} (got {key!r})"
+        )
+
+    content_type = utils.get_contents_type(key)
+    s3 = boto3.client("s3", region_name=config.get("region", "us-west-2"))
+    with open(resolved, "rb") as f:
+        s3.put_object(
+            Bucket=s3_bucket,
+            Key=key,
+            Body=f.read(),
+            ContentType=content_type,
+        )
+    logger.info("uploaded artifact to s3://%s/%s", s3_bucket, key)
+    return key
+
+
+def _ensure_artifacts_uploaded(relative_paths: list) -> None:
+    """Push newly created artifact files to project S3 when sharing_url is set.
+
+    Local files live under ``.session_storage/{user}/artifacts/``. CloudFront
+    serves the project S3 bucket (``artifacts/{user}/...``), so UI URLs 403
+    unless we also put_object there before returning sharing_url links.
+    """
+    if not sharing_url or not config.get("s3_bucket"):
+        return
+    for rel in relative_paths:
+        try:
+            full = _abs_path_for_snapshot_key(rel)
+            if not os.path.isfile(full):
+                full = _resolve_workdir_path(str(rel))
+            if not os.path.isfile(full):
+                logger.warning("skip S3 upload; local artifact missing: %s", rel)
+                continue
+            _upload_file_to_project_s3(str(rel), full)
+        except Exception as e:
+            logger.warning("auto-upload failed for %s: %s", rel, e)
+
+
 def _expand_user_skills_token(raw: str) -> str:
     """Expand $USER_SKILLS_DIR / ${USER_SKILLS_DIR} using the current workspace path."""
     if not USER_SKILLS_DIR or "$" not in raw:
@@ -147,14 +282,43 @@ def _resolve_workdir_path(filepath: str) -> str:
     """Resolve filepath; map relative artifacts/ onto ARTIFACTS_DIR; allow USER_SKILLS_DIR."""
     if not filepath:
         return filepath
+
     filepath = _expand_user_skills_token(filepath)
+
+    def _artifacts_candidate(suffix: str) -> str:
+        return os.path.join(ARTIFACTS_DIR, suffix) if suffix else ARTIFACTS_DIR
+
     if os.path.isabs(filepath):
+        if _path_is_under(filepath, USER_SKILLS_DIR):
+            return filepath
+        if os.path.exists(filepath):
+            return filepath
+        basename = os.path.basename(filepath.rstrip("/"))
+        if basename:
+            candidate = _artifacts_candidate(basename)
+            if os.path.exists(candidate):
+                return candidate
         return filepath
-    normalized = filepath.replace("\\", "/").lstrip("./")
+
+    normalized = _strip_to_allowed_prefix(filepath.replace("\\", "/").lstrip("./"))
+
     if normalized == "artifacts" or normalized.startswith("artifacts/"):
         suffix = normalized[len("artifacts") :].lstrip("/")
-        return os.path.join(ARTIFACTS_DIR, suffix) if suffix else ARTIFACTS_DIR
-    return os.path.join(WORKING_DIR, filepath)
+        user = _current_user_segment()
+        if user and (suffix == user or suffix.startswith(f"{user}/")):
+            suffix = suffix[len(user) :].lstrip("/")
+        return _artifacts_candidate(suffix)
+
+    primary = os.path.join(WORKING_DIR, filepath)
+    if os.path.exists(primary):
+        return primary
+
+    basename = os.path.basename(normalized.rstrip("/"))
+    if basename:
+        candidate = _artifacts_candidate(basename)
+        if os.path.exists(candidate):
+            return candidate
+    return primary
 
 
 def _working_dir_files_mtime_snapshot() -> dict:
@@ -162,7 +326,8 @@ def _working_dir_files_mtime_snapshot() -> dict:
 
     Code often writes under artifacts/ but may also write to the working dir root;
     scanning only artifacts/ missed those files and left download lists empty.
-    Other users' session folders are excluded; the active ARTIFACTS_DIR is scanned.
+    Active ARTIFACTS_DIR entries are keyed as ``artifacts/{user}/...`` so UI
+    URLs map to CloudFront/S3 object keys (not ``.session_storage/...``).
     """
     snap = {}
     if not os.path.isdir(WORKING_DIR):
@@ -177,15 +342,25 @@ def _working_dir_files_mtime_snapshot() -> dict:
             except OSError:
                 pass
     if os.path.isdir(ARTIFACTS_DIR):
+        user = _current_user_segment()
         for dirpath, dirnames, filenames in os.walk(ARTIFACTS_DIR):
             dirnames[:] = [d for d in dirnames if d not in _EXCLUDED_SNAPSHOT_DIRS]
             for fn in filenames:
                 full = os.path.join(dirpath, fn)
                 try:
-                    try:
-                        rel = os.path.relpath(full, WORKING_DIR)
-                    except ValueError:
-                        rel = full
+                    rel_art = os.path.relpath(full, ARTIFACTS_DIR).replace("\\", "/")
+                    if user:
+                        rel = (
+                            f"artifacts/{user}/{rel_art}"
+                            if rel_art != "."
+                            else f"artifacts/{user}/"
+                        )
+                    else:
+                        rel = (
+                            f"artifacts/{rel_art}"
+                            if rel_art != "."
+                            else "artifacts/"
+                        )
                     snap[rel] = os.path.getmtime(full)
                 except OSError:
                     pass
@@ -290,15 +465,55 @@ def _touched_artifact_paths(before: dict, after: dict) -> list:
 
 
 def _paths_for_ui(relative_paths: list) -> list:
-    """Return public URLs if sharing_url is set, otherwise absolute local paths."""
+    """Return public URLs if sharing_url is set, otherwise absolute local paths.
+
+    When sharing_url is set, local artifacts are uploaded to the project S3
+    bucket first so CloudFront keys actually exist (``.session_storage/...``
+    paths are not valid CloudFront object keys).
+    """
+    if sharing_url:
+        _ensure_artifacts_uploaded(relative_paths)
+
     out = []
-    base = sharing_url.rstrip("/") if sharing_url else ""
     for rel in relative_paths:
-        if base:
-            out.append(f"{base}/{quote(rel)}")
+        key = _strip_to_allowed_prefix(str(rel).replace("\\", "/").lstrip("./"))
+        # Map session-storage relative paths onto artifacts/{user}/...
+        if not (key.startswith(_ALLOWED_S3_PREFIXES) or key in ("artifacts", "images", "docs")):
+            try:
+                full = _abs_path_for_snapshot_key(rel)
+                key = _s3_key_for_upload(str(rel), full)
+            except Exception:
+                pass
+
+        if key.startswith(_ALLOWED_S3_PREFIXES) or key in ("artifacts", "images", "docs"):
+            for prefix in ("artifacts", "images", "docs"):
+                head = f"{prefix}/"
+                if key == prefix:
+                    key = _s3_key_with_user(prefix, "")
+                    break
+                if key.startswith(head):
+                    key = _s3_key_with_user(prefix, key[len(head) :])
+                    break
+            if sharing_url:
+                out.append(_public_url_for_key(key))
+            else:
+                out.append(_resolve_workdir_path(key))
+            continue
+
+        if sharing_url:
+            out.append(_public_url_for_key(str(rel).replace("\\", "/").lstrip("./")))
         else:
             out.append(os.path.abspath(os.path.join(WORKING_DIR, rel)))
     return out
+
+
+def _abs_path_for_snapshot_key(rel: str) -> str:
+    """Resolve a snapshot key (WORKING_DIR-relative or artifacts/{user}/...) to absolute."""
+    key = str(rel).replace("\\", "/")
+    if key.startswith(_ALLOWED_S3_PREFIXES) or os.path.isabs(key):
+        return os.path.abspath(_resolve_workdir_path(key))
+    return os.path.abspath(os.path.join(WORKING_DIR, rel))
+
 
 def _ensure_matplotlib_runtime():
     """Use non-interactive Agg backend, prefer CJK-capable fonts, silence headless/show noise."""
@@ -497,9 +712,7 @@ def execute_code(code: str) -> str:
         ]
         other_rels = [r for r in touched if r not in artifact_rels]
         if other_rels:
-            lines = "\n".join(
-                os.path.abspath(os.path.join(WORKING_DIR, r)) for r in other_rels
-            )
+            lines = "\n".join(_abs_path_for_snapshot_key(r) for r in other_rels)
             result += f"\n[artifacts]\n{lines}"
 
         if artifact_rels:
@@ -545,9 +758,20 @@ def write_file(filepath: str, content: str = "") -> str:
         with open(full_path, "w", encoding="utf-8") as f:
             f.write(content)
 
-        rel = os.path.relpath(full_path, WORKING_DIR)
+        try:
+            artifacts_real = os.path.realpath(ARTIFACTS_DIR)
+            full_real = os.path.realpath(full_path)
+            if os.path.commonpath([full_real, artifacts_real]) == artifacts_real:
+                rel_art = os.path.relpath(full_real, artifacts_real).replace("\\", "/")
+                ui_key = _s3_key_with_user(
+                    "artifacts", "" if rel_art == "." else rel_art
+                )
+            else:
+                ui_key = os.path.relpath(full_path, WORKING_DIR).replace("\\", "/")
+        except (OSError, ValueError):
+            ui_key = os.path.relpath(full_path, WORKING_DIR).replace("\\", "/")
         result_msg = f"File saved: {filepath}"
-        payload = {"output": result_msg, "path": _paths_for_ui([rel])}
+        payload = {"output": result_msg, "path": _paths_for_ui([ui_key])}
         return json.dumps(payload, ensure_ascii=False)
     except Exception as e:
         return f"Failed to save file: {str(e)}"
@@ -578,37 +802,24 @@ def upload_file_to_s3(filepath: str) -> str:
     """Upload a local file to S3 and return the download URL.
 
     Args:
-        filepath: Absolute path or path relative to WORKING_DIR
-            (e.g. 'artifacts/report.pdf' → active user's ARTIFACTS_DIR).
+        filepath: Absolute path, or a path under artifacts/ (mapped to the
+            active user's ARTIFACTS_DIR). Examples:
+            'artifacts/report.pdf', ARTIFACTS_DIR + '/report.pdf'.
+            Uploaded object key is artifacts/{user_id}/...
 
     Returns:
         The download URL, or an error message.
     """
     logger.info(f"###### upload_file_to_s3: {filepath} ######")
     try:
-        import boto3
-        from urllib import parse as url_parse
-
-        s3_bucket = config.get("s3_bucket")
-        if not s3_bucket:
-            return "S3 bucket is not configured."
-
-        full_path = _resolve_workdir_path(filepath)
-        if not os.path.exists(full_path):
-            return f"File not found: {filepath}"
-
-        s3_key = os.path.relpath(full_path, WORKING_DIR).replace("\\", "/")
-        content_type = utils.get_contents_type(s3_key)
-        s3 = boto3.client("s3", region_name=config.get("region", "us-west-2"))
-
-        with open(full_path, "rb") as f:
-            s3.put_object(Bucket=s3_bucket, Key=s3_key, Body=f.read(), ContentType=content_type)
-
+        key = _upload_file_to_project_s3(filepath)
         if sharing_url:
-            url = f"{sharing_url}/{url_parse.quote(s3_key)}"
-            return f"Upload complete: {url}"
-        return f"Upload complete: {chat.s3_uri_to_console_url(f"s3://{s3_bucket}/{s3_key}", config.get("region", "us-west-2"))}"
-
+            return f"Upload complete: {_public_url_for_key(key)}"
+        s3_bucket = config.get("s3_bucket")
+        return (
+            "Upload complete: "
+            f"{chat.s3_uri_to_console_url(f's3://{s3_bucket}/{key}', config.get('region', 'us-west-2'))}"
+        )
     except Exception as e:
         return f"Upload failed: {str(e)}"
 
