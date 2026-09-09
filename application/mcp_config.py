@@ -391,6 +391,19 @@ def load_config(mcp_type):
                 }
             }
         }
+
+    elif mcp_type in ("mac-operator", "macos_automator", "macos-automator"):
+        return {
+            "mcpServers": {
+                "mac-operator": {
+                    "command": "python",
+                    "args": [f"{workingDir}/mcp_server_mac_operator.py"],
+                    "env": {
+                        "PYTHONPATH": workingDir,
+                    },
+                }
+            }
+        }
     
     elif mcp_type == "aws_slack":
         return {

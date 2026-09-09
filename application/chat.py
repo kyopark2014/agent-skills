@@ -2033,19 +2033,40 @@ def get_tool_info(tool_name, tool_content):
     return content, urls, tool_references
 
 
-def append_tool_guidance_to_prompt(system_prompt: str, mcp_servers: list) -> str:
-    """Append tool-specific usage guidance to the system prompt based on selected MCP servers.
-
-    Add new guidance rules here as MCP servers are introduced.
-    """
-    if not mcp_servers:
-        return system_prompt
-
-    selected = {name.lower() for name in mcp_servers}
+def append_tool_guidance_to_prompt(
+    system_prompt: str,
+    mcp_servers: list,
+    skill_list: list | None = None,
+) -> str:
+    """Append tool-specific usage guidance based on selected MCP servers / skills."""
+    selected = {str(name).lower() for name in (mcp_servers or []) if name}
+    selected_skills = {str(name).lower() for name in (skill_list or []) if name}
     extras: list[str] = []
 
     if "memory" in selected:
         extras.append(skill.MEMORY_RECALL_GUIDANCE)
+
+    if (
+        "mac-operator" in selected
+        or "macos_automator" in selected
+        or "macos-automator" in selected
+        or "mac-operator" in selected_skills
+    ):
+        extras.append(
+            "macOS 네이티브 앱 조작은 mac-operator skill을 사용하세요. "
+            "먼저 `python skills/mac-operator/scripts/mac_operator.py tips --search ...` 로 tip을 찾고, "
+            "`execute --kb ...` 또는 `open \"AppName\"` 으로 실행하세요. "
+            "MCP 도구 get_scripting_tips / execute_script가 있으면 동일하게 사용 가능합니다. "
+            "픽셀 도형 그리기·스크린샷 검증은 computer-use를 이어서 사용하세요. "
+            "앱 종료·파일 삭제 등 파괴적 동작은 사용자 확인 후 실행하세요."
+        )
+
+    if "computer-use" in selected_skills:
+        extras.append(
+            "데스크톱 GUI(클릭·드래그·스크린샷)는 computer-use skill 스크립트 "
+            "`python skills/computer-use/scripts/computer_use.py` 를 사용하세요. "
+            "앱 실행만 필요하면 mac-operator `open`을 먼저 쓰세요."
+        )
 
     parallel_tools: list[str] = []
     if "wiki" in selected:
@@ -2074,6 +2095,29 @@ def append_tool_guidance_to_prompt(system_prompt: str, mcp_servers: list) -> str
     return system_prompt + "\n" + "\n".join(extras)
 
 
+# Skills that should automatically load a matching MCP server.
+_SKILL_AUTO_MCP = {
+    "mac-operator": "mac-operator",
+}
+
+
+def expand_mcp_servers_for_skills(mcp_servers: list, skill_list: list) -> list:
+    """If a skill embeds an MCP (e.g. mac-operator), attach that MCP automatically."""
+    merged: list[str] = []
+    seen: set[str] = set()
+    for name in list(mcp_servers or []) + [
+        _SKILL_AUTO_MCP[s]
+        for s in (skill_list or [])
+        if s in _SKILL_AUTO_MCP
+    ]:
+        key = str(name).strip()
+        if not key or key.lower() in seen:
+            continue
+        seen.add(key.lower())
+        merged.append(key)
+    return merged
+
+
 async def create_agent(
     mcp_servers: list,
     skill_list: list,
@@ -2088,7 +2132,14 @@ async def create_agent(
     # builtin tools
     tools = langgraph_agent.get_builtin_tools()
     logger.info(f"builtin_tools count: {len(tools)}")
-        
+
+    skill_list = [str(s).strip() for s in (skill_list or []) if str(s).strip()]
+    mcp_servers = expand_mcp_servers_for_skills(
+        [str(s).strip() for s in (mcp_servers or []) if str(s).strip()],
+        skill_list,
+    )
+    logger.info(f"mcp_servers after skill auto-attach: {mcp_servers}")
+
     # mcp
     mcp_json = mcp_config.load_selected_config(mcp_servers)
     # logger.info(f"mcp_json: {mcp_json}")
@@ -2140,7 +2191,9 @@ async def create_agent(
 
     tool_list = [tool.name for tool in tools] if tools else []
     logger.info(f"tool_list: {tool_list}")
-    system_prompt = append_tool_guidance_to_prompt(system_prompt, mcp_servers)
+    system_prompt = append_tool_guidance_to_prompt(
+        system_prompt, mcp_servers, skill_list=skill_list
+    )
 
     if not tools:
         logger.warning("No tools available, using general conversation mode")
