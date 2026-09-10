@@ -36,7 +36,7 @@ config = utils.load_config()
 sharing_url = config["sharing_url"] if "sharing_url" in config else None
 s3_prefix = "docs"
 
-import io, os, sys, json, traceback
+import io, os, sys, json, traceback, fnmatch
 import subprocess as _subprocess, pathlib as _pathlib, shutil as _shutil
 import tempfile as _tempfile, glob as _glob, datetime as _datetime
 import math as _math, re as _re, requests as _requests
@@ -638,6 +638,143 @@ def get_current_time(format: str=f"%Y-%m-%d %H:%M:%S")->str:
     
     return timestr
 
+
+_GREP_MAX_FILE_BYTES = 1_000_000
+_GREP_LINE_DISPLAY_MAX = 400
+
+
+def _grep_display_path(full_path: str) -> str:
+    """Prefer a workspace-relative path for grep hit lines."""
+    full_real = os.path.realpath(full_path)
+    try:
+        artifacts_real = os.path.realpath(ARTIFACTS_DIR)
+        if os.path.commonpath([full_real, artifacts_real]) == artifacts_real:
+            rel = os.path.relpath(full_real, artifacts_real).replace("\\", "/")
+            user = _current_user_segment()
+            if user:
+                return (
+                    f"artifacts/{user}/{rel}" if rel != "." else f"artifacts/{user}/"
+                )
+            return f"artifacts/{rel}" if rel != "." else "artifacts/"
+    except (OSError, ValueError):
+        pass
+    try:
+        work_real = os.path.realpath(WORKING_DIR)
+        if os.path.commonpath([full_real, work_real]) == work_real:
+            return os.path.relpath(full_real, work_real).replace("\\", "/")
+    except (OSError, ValueError):
+        pass
+    if USER_SKILLS_DIR:
+        try:
+            skills_real = os.path.realpath(USER_SKILLS_DIR)
+            if os.path.commonpath([full_real, skills_real]) == skills_real:
+                rel = os.path.relpath(full_real, skills_real).replace("\\", "/")
+                return (
+                    f"$USER_SKILLS_DIR/{rel}" if rel != "." else "$USER_SKILLS_DIR"
+                )
+        except (OSError, ValueError):
+            pass
+    return full_path
+
+
+def _iter_grep_files(root: str, glob_pat: str):
+    if os.path.isfile(root):
+        yield root
+        return
+    if not os.path.isdir(root):
+        return
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames if d not in _EXCLUDED_SNAPSHOT_DIRS]
+        for fn in filenames:
+            if glob_pat and not fnmatch.fnmatch(fn, glob_pat):
+                continue
+            yield os.path.join(dirpath, fn)
+
+
+@tool
+def grep(
+    pattern: str,
+    path: str = ".",
+    glob: str = "",
+    case_insensitive: bool = False,
+    max_results: int = 50,
+) -> str:
+    """Search file contents with a regular expression (like ripgrep/grep).
+
+    Prefer this over bash for finding text in the workspace. Use read_file
+    to inspect a specific match afterward.
+
+    Args:
+        pattern: Python regex search pattern.
+        path: File or directory relative to WORKING_DIR, under artifacts/, or absolute.
+            Default "." searches WORKING_DIR.
+        glob: Optional filename filter, e.g. "*.py", "*.md".
+        case_insensitive: If True, ignore case.
+        max_results: Maximum matching lines to return (default 50).
+
+    Returns:
+        Lines as "path:line_number:content", or a short message if nothing matched.
+    """
+    logger.info(
+        "###### grep pattern=%r path=%r glob=%r ci=%s max=%s ######",
+        pattern,
+        path,
+        glob,
+        case_insensitive,
+        max_results,
+    )
+    if not pattern:
+        return "Error: pattern is required."
+
+    try:
+        flags = re.IGNORECASE if case_insensitive else 0
+        compiled = re.compile(pattern, flags)
+    except re.error as e:
+        return f"Invalid regex pattern: {e}"
+
+    try:
+        max_results = max(1, min(int(max_results), 500))
+    except (TypeError, ValueError):
+        max_results = 50
+
+    root = _resolve_workdir_path(path or ".")
+    if not os.path.exists(root):
+        return f"Path not found: {path}"
+
+    hits: list[str] = []
+    truncated = False
+    for full in _iter_grep_files(root, glob or ""):
+        try:
+            if os.path.getsize(full) > _GREP_MAX_FILE_BYTES:
+                continue
+            with open(full, "rb") as bf:
+                sample = bf.read(8192)
+                if b"\x00" in sample:
+                    continue
+            with open(full, "r", encoding="utf-8", errors="replace") as f:
+                display = _grep_display_path(full)
+                for lineno, line in enumerate(f, 1):
+                    if compiled.search(line):
+                        text = line.rstrip("\n\r")
+                        if len(text) > _GREP_LINE_DISPLAY_MAX:
+                            text = text[:_GREP_LINE_DISPLAY_MAX] + "…"
+                        hits.append(f"{display}:{lineno}:{text}")
+                        if len(hits) >= max_results:
+                            truncated = True
+                            break
+        except OSError:
+            continue
+        if truncated:
+            break
+
+    if not hits:
+        return f"No matches for pattern {pattern!r} under {path}"
+    out = "\n".join(hits)
+    if truncated:
+        out += f"\n… truncated at {max_results} results"
+    return out
+
+
 @tool
 def execute_code(code: str) -> str:
     """Execute Python code and return stdout/stderr output.
@@ -850,9 +987,9 @@ def get_builtin_tools() -> list:
     """Return the list of built-in tools for the skill-aware agent."""
 
     if sharing_url:
-        return [execute_code, write_file, read_file, bash, upload_file_to_s3, get_current_time]
+        return [execute_code, write_file, read_file, grep, bash, upload_file_to_s3, get_current_time]
     else:
-        return [execute_code, write_file, read_file, bash, get_current_time]
+        return [execute_code, write_file, read_file, grep, bash, get_current_time]
 
 def _assistant_text_content(msg: AIMessage) -> str:
     content = msg.content
