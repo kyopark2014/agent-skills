@@ -2087,6 +2087,16 @@ def append_tool_guidance_to_prompt(
             "aws와 관련된 내용이 있다면, search_documentation tool을 이용해 필요한 정보를 수집하세요."
         )
 
+    if "use-vault" in selected:
+        uid = (user_id or "").strip() or "default"
+        extras.append(
+            "ob-docs vault 작업은 use-vault MCP 도구(vault_read, vault_search, "
+            "vault_write, vault_append 등)를 사용하세요. "
+            f'모든 도구 호출에 actor_id="{uid}" 를 반드시 전달하세요 '
+            "(계정 로그인 email). 닉네임·표시 이름을 쓰지 마세요. "
+            "경로는 vault 상대경로(예: Meeting/Note.md)이며 YAML frontmatter는 넣지 마세요."
+        )
+
     if not extras:
         return system_prompt
 

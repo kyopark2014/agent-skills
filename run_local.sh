@@ -36,6 +36,17 @@ else
   echo "    lsof not found; skipping port check"
 fi
 
-echo "==> Starting uvicorn on 0.0.0.0:${PORT}"
+# Prefer python3.13: PATH `uvicorn` / `python3` often point at Homebrew 3.14,
+# while pip (aliased to pip3.13) installs into 3.13 site-packages.
+if command -v python3.13 >/dev/null 2>&1; then
+  PYTHON=python3.13
+elif command -v python3 >/dev/null 2>&1; then
+  PYTHON=python3
+else
+  echo "ERROR: python3 not found" >&2
+  exit 1
+fi
+
+echo "==> Starting uvicorn on 0.0.0.0:${PORT} (${PYTHON})"
 echo "    Open http://localhost:${PORT}"
-exec uvicorn application.server:app --host 0.0.0.0 --port "${PORT}"
+exec "${PYTHON}" -m uvicorn application.server:app --host 0.0.0.0 --port "${PORT}"

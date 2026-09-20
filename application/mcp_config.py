@@ -80,6 +80,37 @@ def get_agentcore_gateway_mcp_url(gateway_name: str, gateway_region: str) -> str
         logger.error(f"Error resolving AgentCore gateway URL for {gateway_name}: {e}")
 
     return None
+
+
+def get_use_vault_mcp_url() -> str | None:
+    """Streamable-HTTP URL for ob-docs use-vault AgentCore Runtime MCP (IAM SigV4)."""
+    configured = (
+        config.get("use_vault_mcp_url")
+        or os.environ.get("use_vault_mcp_url")
+        or os.environ.get("USE_VAULT_MCP_URL")
+        or ""
+    ).strip()
+    if configured:
+        return configured
+
+    arn = (
+        config.get("use_vault_mcp_runtime_arn")
+        or os.environ.get("use_vault_mcp_runtime_arn")
+        or ""
+    ).strip()
+    if not arn:
+        return None
+    r = (
+        config.get("use_vault_mcp_region")
+        or config.get("region")
+        or region
+        or "us-west-2"
+    )
+    encoded = arn.replace(":", "%3A").replace("/", "%2F")
+    return (
+        f"https://bedrock-agentcore.{r}.amazonaws.com/runtimes/"
+        f"{encoded}/invocations?qualifier=DEFAULT"
+    )
     
 def load_config(mcp_type):
     # Display-name aliases (aligned with agentic-work mcp.list)
@@ -440,6 +471,32 @@ def load_config(mcp_type):
                     "url": gateway_url,
                     "auth_type": "aws_sigv4",
                     "auth_region": "us-east-1",
+                    "auth_service": "bedrock-agentcore",
+                }
+            }
+        }
+
+    elif mcp_type == "use-vault":
+        mcp_url = get_use_vault_mcp_url()
+        if not mcp_url:
+            logger.info(
+                "use-vault MCP skipped: use_vault_mcp_url / "
+                "use_vault_mcp_runtime_arn not configured."
+            )
+            return {}
+        auth_region = (
+            config.get("use_vault_mcp_region")
+            or config.get("region")
+            or region
+            or "us-west-2"
+        )
+        return {
+            "mcpServers": {
+                "use-vault": {
+                    "type": "streamable_http",
+                    "url": mcp_url,
+                    "auth_type": "aws_sigv4",
+                    "auth_region": auth_region,
                     "auth_service": "bedrock-agentcore",
                 }
             }
