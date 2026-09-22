@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
-"""HTTP client helpers for ob-docs vault API.
+"""HTTP client helpers for ob-note vault API.
 
-ob-docs is a standalone site (default ``https://vault.my-agentic-ai.click``).
+ob-note is a standalone site (default ``https://vault.my-agentic-ai.click``).
 APIs live at ``/api/...`` (not the legacy ``/vault/api/...`` prefix).
 
 Auth order (production AgentCore cannot read session-signing-key):
   1. VAULT_AGENT_TOKEN / Secrets Manager ``{project}/vault-agent-token``
-     or ``ob-docs/vault-agent-token``
+     or ``ob-note/vault-agent-token`` / legacy ``ob-docs/vault-agent-token``
      → ``Authorization: VaultAgent v1.<payload>.<sig>``
   2. SESSION_SIGNING_KEY (local / app ECS) → Bearer session cookie token
-  3. Loopback + no key → unauthenticated (ob-docs ALLOW_LOCAL_AUTH_BYPASS)
+  3. Loopback + no key → unauthenticated (ob-note ALLOW_LOCAL_AUTH_BYPASS)
 """
 
 from __future__ import annotations
@@ -106,7 +106,7 @@ DEFAULT_OB_DOCS_URL = "https://vault.my-agentic-ai.click"
 
 
 def vault_base_url() -> str:
-    """ob-docs public base URL (site root — not agentic-work CloudFront)."""
+    """ob-note public base URL (site root — not agentic-work CloudFront)."""
     explicit = (
         (os.environ.get("OB_DOCS_URL") or "").strip()
         or (os.environ.get("VAULT_API_URL") or "").strip()
@@ -121,8 +121,55 @@ def vault_base_url() -> str:
     if dedicated:
         return dedicated.rstrip("/")
 
-    # Do not fall back to agentic-work sharing_url (cowork…): that is not ob-docs.
+    # Do not fall back to agentic-work sharing_url (cowork…): that is not ob-note.
     return DEFAULT_OB_DOCS_URL
+
+
+def note_deep_link(path: str) -> Optional[str]:
+    """Private deep link that opens a note after login (not a public /s/ share).
+
+    Example:
+      Cloud/AWS Azure GCP 가격 비교.md
+      → https://vault.my-agentic-ai.click/?note=Cloud%2FAWS+Azure+GCP+%EA%B0%80%EA%B2%A9+%EB%B9%84%EA%B5%90.md
+    """
+    cleaned = (path or "").replace("\\", "/").lstrip("/").strip()
+    if not cleaned:
+        return None
+    if any(seg == ".." for seg in cleaned.split("/")):
+        return None
+    base = vault_base_url().rstrip("/")
+    # quote_plus: spaces → +, "/" → %2F (matches ob-note address-bar links)
+    return f"{base}/?{urllib.parse.urlencode({'note': cleaned})}"
+
+
+def attach_note_urls(payload: Any) -> Any:
+    """Recursively add ``url`` (and ``from_url``) deep-link fields for ``*.md`` paths."""
+    if isinstance(payload, list):
+        return [attach_note_urls(item) for item in payload]
+    if not isinstance(payload, dict):
+        return payload
+
+    out: dict[str, Any] = {k: attach_note_urls(v) for k, v in payload.items()}
+
+    path_val = out.get("path")
+    if isinstance(path_val, str) and path_val.strip().lower().endswith(".md"):
+        url = note_deep_link(path_val.strip())
+        if url:
+            out["url"] = url
+
+    to_val = out.get("to") or out.get("to_path")
+    if isinstance(to_val, str) and to_val.strip().lower().endswith(".md"):
+        url = note_deep_link(to_val.strip())
+        if url:
+            out["url"] = url
+
+    from_val = out.get("from") or out.get("from_path")
+    if isinstance(from_val, str) and from_val.strip().lower().endswith(".md"):
+        url = note_deep_link(from_val.strip())
+        if url:
+            out["from_url"] = url
+
+    return out
 
 
 def resolve_user_id(cli_user_id: Optional[str] = None) -> str:
@@ -168,12 +215,12 @@ def _get_secret_string(secret_id: str) -> tuple[Optional[str], Optional[str]]:
 
 
 def _vault_agent_token() -> tuple[Optional[bytes], list[str]]:
-    """Load HMAC key shared with ob-docs VaultAgent auth.
+    """Load HMAC key shared with ob-note VaultAgent auth.
 
     Tries (in order):
       1. VAULT_AGENT_TOKEN env
       2. ``{agentic-work}/vault-agent-token`` (Runtime IAM already allows)
-      3. ``ob-docs/vault-agent-token`` (same value should be provisioned)
+      3. ``ob-note/vault-agent-token`` then legacy ``ob-docs/vault-agent-token``
     """
     errors: list[str] = []
     env = (os.environ.get("VAULT_AGENT_TOKEN") or "").strip()
@@ -185,7 +232,8 @@ def _vault_agent_token() -> tuple[Optional[bytes], list[str]]:
     if override:
         secret_ids.append(override)
     secret_ids.append(f"{_project_name()}/vault-agent-token")
-    secret_ids.append("ob-docs/vault-agent-token")
+    secret_ids.append("ob-note/vault-agent-token")
+    secret_ids.append("ob-docs/vault-agent-token")  # legacy fallback
 
     seen: set[str] = set()
     for secret_id in secret_ids:
@@ -283,7 +331,7 @@ def _auth_headers(user_id: str, *, require_auth: bool = True) -> dict[str, str]:
     raise RuntimeError(
         "Vault auth unavailable. Need VAULT_AGENT_TOKEN "
         f"(Secrets Manager `{_project_name()}/vault-agent-token` or "
-        "`ob-docs/vault-agent-token`) for AgentCore, or SESSION_SIGNING_KEY "
+        "`ob-note/vault-agent-token`) for AgentCore, or SESSION_SIGNING_KEY "
         f"for local/app. Details: {detail}"
     )
 
@@ -328,8 +376,9 @@ def api_request(
             parsed = detail
         raise RuntimeError(f"HTTP {exc.code} {method.upper()} {path}: {parsed}") from exc
     except urllib.error.URLError as exc:
-        raise RuntimeError(f"Failed to reach ob-docs at {base}: {exc}") from exc
+        raise RuntimeError(f"Failed to reach ob-note at {base}: {exc}") from exc
 
 
-def print_json(payload: Any) -> None:
-    print(json.dumps(payload, ensure_ascii=False, indent=2))
+def print_json(payload: Any, *, with_urls: bool = True) -> None:
+    data = attach_note_urls(payload) if with_urls else payload
+    print(json.dumps(data, ensure_ascii=False, indent=2))

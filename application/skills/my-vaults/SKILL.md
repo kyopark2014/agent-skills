@@ -1,11 +1,11 @@
 ---
 name: my-vaults
-description: ob-docs(Obsidian형 vault)에 저장된 마크다운 노트를 조회·검색·생성·수정합니다. 사용자가 "vault", "내 노트", "ob-docs", "위키링크", "백링크", "노트 찾아줘", "메모 저장", "vault에 적어줘", "지식베이스" 등을 요청할 때 사용합니다.
+description: ob-note(Obsidian형 vault)에 저장된 마크다운 노트를 조회·검색·생성·수정합니다. 사용자가 "vault", "내 노트", "ob-docs", "위키링크", "백링크", "노트 찾아줘", "메모 저장", "vault에 적어줘", "지식베이스" 등을 요청할 때 사용합니다.
 ---
 
-# my-vaults (ob-docs)
+# my-vaults (ob-note)
 
-standalone **ob-docs** (`https://vault.my-agentic-ai.click`) vault를 API로 읽고 씁니다.  
+standalone **ob-note** (`https://vault.my-agentic-ai.click`) vault를 API로 읽고 씁니다.  
 노트는 `.md`가 Source of Truth입니다. 임의 HTTP를 새로 짜지 말고 아래 스크립트를 실행하세요.
 
 계정(`USER_ID` / email)마다 S3·디스크가 `vault/{userId}/…`로 분리됩니다.  
@@ -35,7 +35,8 @@ application working directory 기준 전체 경로를 사용하세요.
 1. **반드시 스크립트로** 조회·수정하세요. `curl`로 ad-hoc API를 새로 작성하지 마세요.
 2. 경로는 vault 상대경로입니다. 예: `AI/Ontology.md`, `Meeting/Weekly-Sync.md`
 3. 덮어쓰기 전에 `read`로 현재 내용을 확인하세요. 부분 추가는 `append`를 우선 사용하세요.
-4. 출력은 JSON입니다. 사용자에게는 한국어로 요약하고, 본문이 길면 핵심만 인용하세요.
+4. 출력은 JSON입니다. 사용자에게는 한국어로 요약하고, 본문이 길면 핵심만 인용하세요.  
+   **노트 path를 말할 때는 JSON의 `url`(deep link)을 함께 전달하세요.** (아래 [Note deep links](#note-deep-links))
 5. 인증은 스크립트가 `USER_ID`/`CURRENT_USER_ID`와 vault-agent-token으로 처리합니다. 쿠키를 수동으로 만들지 마세요.
 6. **노트 본문 형식**: YAML frontmatter(`---` … `title`/`date`/`tags`/`aliases`/`status` … `---`)를 **넣지 마세요**. 새 노트·덮어쓰기는 상단을 `# 제목` 한 줄로 시작하고 바로 본문을 이어서 쓰세요.
 7. **새 노트는 vault 루트에 두지 마세요.** 주제 폴더 아래(`Category/Note.md`)에만 저장합니다. 아래 [Folder Organization](#folder-organization)을 따르세요.
@@ -213,19 +214,19 @@ print(r.stdout)
 
 공통 옵션: `--user-id` (기본은 환경변수 `USER_ID` / `CURRENT_USER_ID`)
 
-API는 ob-docs 사이트 루트의 `/api/...` 입니다 (구 `/vault/api/...` 아님).
+API는 ob-note 사이트 루트의 `/api/...` 입니다 (구 `/vault/api/...` 아님).
 
 ## Environment
 
 | 변수 | 기본 | 설명 |
 | --- | --- | --- |
-| `OB_DOCS_URL` / `VAULT_API_URL` | `https://vault.my-agentic-ai.click` | ob-docs base URL (agentic `sharing_url`/cowork 도메인 사용 금지) |
+| `OB_DOCS_URL` / `VAULT_API_URL` | `https://vault.my-agentic-ai.click` | ob-note base URL (agentic `sharing_url`/cowork 도메인 사용 금지) |
 | `USER_ID` / `CURRENT_USER_ID` | `local-dev` | 세션 user id — **프로덕션에서는 로그인 email** |
-| `VAULT_AGENT_TOKEN` | Secrets Manager `agent-skills/vault-agent-token` 또는 `ob-docs/vault-agent-token` | AgentCore용 HMAC (양쪽 시크릿 값이 같아야 함) |
+| `VAULT_AGENT_TOKEN` | Secrets Manager `agent-skills/vault-agent-token` 또는 `ob-note/vault-agent-token` (legacy `ob-docs/…`) | AgentCore용 HMAC (양쪽 시크릿 값이 같아야 함) |
 | `OB_DOCS_VAULT_AGENT_SECRET` | (없음) | 토큰 시크릿 이름 강제 지정 |
 | `SESSION_SIGNING_KEY` | (로컬/앱 ECS) | 웹 세션 키 — AgentCore에서는 IAM Deny |
 
-로컬 ob-docs:
+로컬 ob-note:
 
 ```bash
 export OB_DOCS_URL=http://127.0.0.1:8502
@@ -235,12 +236,25 @@ python skills/my-vaults/scripts/read_vault.py list
 
 config.json에 `ob_docs_url`을 넣어도 됩니다.
 
+## Note deep links
+
+쓰기·읽기·검색 JSON에는 vault 상대경로 `path`와 함께 **로그인 후 해당 노트로 이동하는** deep link `url`이 붙습니다. public share(`/s/{token}`)가 아닙니다.
+
+```text
+https://vault.my-agentic-ai.click/?note=Cloud%2FAWS+Azure+GCP+%EA%B0%80%EA%B2%A9+%EB%B9%84%EA%B5%90.md
+```
+
+- 형식: `{OB_DOCS_URL}/?note=<urlencoded vault path>`
+- 스크립트가 `url` 필드를 자동으로 넣습니다. 직접 만들 때도 `path`만 URL 인코딩하면 됩니다 (`/` → `%2F`, 공백 → `+` 또는 `%20`).
+- **사용자 응답에는 path와 클릭 가능한 `url`을 함께** 보여 주세요. 예: `저장: [Cloud/AWS Azure GCP 가격 비교.md](https://vault.my-agentic-ai.click/?note=…)`
+- 미로그인 사용자는 로그인 후 해당 노트가 열립니다.
+
 ## Response tips
 
-- `list`/`search` 결과는 path 표로 정리하세요.
-- `read`는 title·tags·backlinks를 함께 보여준 뒤 본문 요약을 하세요.
-- 쓰기 성공 시 path와 `ok: true`만 짧게 확인하면 됩니다.
-- 새 노트 작성 시 frontmatter 없이 `# 제목` + 본문만 저장하고, **카테고리 폴더 경로**(`AI/...`, `Meeting/...` 등)를 사용자에게 알려 주세요.
+- `list`/`search` 결과는 path(+ `url`) 표로 정리하세요.
+- `read`는 title·tags·backlinks를 함께 보여준 뒤 본문 요약을 하세요. 상단에 deep link를 넣으세요.
+- 쓰기 성공 시 path · `url` · `ok: true`를 짧게 확인하면 됩니다. **폴더 위치만 설명하고 링크를 빼지 마세요.**
+- 새 노트 작성 시 frontmatter 없이 `# 제목` + 본문만 저장하고, **카테고리 폴더 경로**(`AI/...`, `Meeting/...` 등)와 deep link를 사용자에게 알려 주세요.
 - 사용자가 폴더를 지정하지 않아도 주제에 맞는 폴더를 고르거나 만들고, 기존 폴더가 있으면 재사용하세요.
 - 조사·요약·리포트·회의록 등은 **한 파일**에 섹션으로 모으세요. `Part1.md` / `Part2.md`처럼 잘게 나누지 마세요.
 - 본문이 길면 (`##` 섹션이 대략 4개 이상이거나 스크롤이 길 때) `# 제목` 다음에 `## 목차`와 앵커 링크 목록을 넣으세요.
@@ -250,10 +264,10 @@ config.json에 `ob_docs_url`을 넣어도 됩니다.
 ### `Vault auth unavailable` / `SESSION_SIGNING_KEY not found`
 
 AgentCore 런타임은 `session-signing-key` 읽기가 **IAM Deny**입니다.  
-`agent-skills/vault-agent-token` 또는 `ob-docs/vault-agent-token` + 런타임 정책 Allow가 필요합니다.  
-두 시크릿 **문자열이 동일**해야 ob-docs가 검증에 성공합니다.
+`agent-skills/vault-agent-token` 또는 `ob-note/vault-agent-token` (legacy `ob-docs/…`) + 런타임 정책 Allow가 필요합니다.  
+두 시크릿 **문자열이 동일**해야 ob-note가 검증에 성공합니다.
 
-### `Failed to reach ob-docs`
+### `Failed to reach ob-note`
 
 `OB_DOCS_URL`이 `https://vault.my-agentic-ai.click` (또는 로컬 `http://127.0.0.1:8502`)인지 확인하세요.  
 agentic-work CloudFront(`cowork…`)로 치면 실패합니다.
@@ -264,8 +278,8 @@ agentic-work CloudFront(`cowork…`)로 치면 실패합니다.
 
 ### `HTTP 401 unauthorized`
 
-프로덕션: vault-agent-token이 ob-docs·AgentCore 양쪽에 있고 값이 같은지 확인하세요.  
-로컬: `OB_DOCS_URL=http://127.0.0.1:8502` + ob-docs `ALLOW_LOCAL_AUTH_BYPASS=1`.
+프로덕션: vault-agent-token이 ob-note·AgentCore 양쪽에 있고 값이 같은지 확인하세요.  
+로컬: `OB_DOCS_URL=http://127.0.0.1:8502` + ob-note `ALLOW_LOCAL_AUTH_BYPASS=1`.
 
 ### 빈 tree / `File not found`
 

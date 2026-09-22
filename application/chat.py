@@ -2090,7 +2090,7 @@ def append_tool_guidance_to_prompt(
     if "use-vault" in selected:
         uid = (user_id or "").strip() or "default"
         extras.append(
-            "ob-docs vault 작업은 use-vault MCP 도구(vault_read, vault_search, "
+            "ob-note vault 작업은 use-vault MCP 도구(vault_read, vault_search, "
             "vault_write, vault_append 등)를 사용하세요. "
             f'모든 도구 호출에 actor_id="{uid}" 를 반드시 전달하세요 '
             "(계정 로그인 email). 닉네임·표시 이름을 쓰지 마세요. "

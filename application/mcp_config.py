@@ -83,7 +83,7 @@ def get_agentcore_gateway_mcp_url(gateway_name: str, gateway_region: str) -> str
 
 
 def get_use_vault_mcp_url() -> str | None:
-    """Streamable-HTTP URL for ob-docs use-vault AgentCore Runtime MCP (IAM SigV4)."""
+    """Streamable-HTTP URL for ob-note use-vault AgentCore Runtime MCP (IAM SigV4)."""
     configured = (
         config.get("use_vault_mcp_url")
         or os.environ.get("use_vault_mcp_url")
