@@ -5,13 +5,17 @@ import { useTheme } from "../hooks/useTheme";
 import type { Theme } from "../theme";
 import type { AppConfig, Task } from "../types";
 import { ConfigDrawer } from "./ConfigDrawer";
+import { DocumentsConfigureModal } from "./DocumentsConfigureModal";
+import { DocumentsListModal } from "./DocumentsListModal";
 import { KnowledgeGraphModal } from "./KnowledgeGraphModal";
 import { LlmGatewayModal } from "./LlmGatewayModal";
+import { SyncProgressModal } from "./SyncProgressModal";
 import { TaskListItem } from "./TaskListItem";
 import {
   AppearanceIcon,
   ChevronIcon,
   DashboardIcon,
+  DocumentsIcon,
   GuardrailIcon,
   KnowledgeGraphIcon,
   LlmGatewayIcon,
@@ -25,12 +29,13 @@ import {
   CloseIcon,
 } from "./SidebarIcons";
 
-type DrawerKind = "skill" | "mcp" | "model" | "appearance" | null;
+type DrawerKind = "skill" | "mcp" | "model" | "appearance" | "documents" | null;
 
 const LLM_GATEWAY_NOT_CONFIGURED =
   "LLM Gateway가 설정되어 있지 않아 활성화할 수 없습니다. 관리자에게 설정을 요청하세요.";
 
 const THEME_OPTIONS = ["Light", "Dark"] as const;
+const DOCUMENTS_OPTIONS = ["Projects", "Drawings", "Configure"] as const;
 
 function themeToLabel(theme: Theme): string {
   return theme === "light" ? "Light" : "Dark";
@@ -91,10 +96,26 @@ export function Sidebar({
   const mcpBtnRef = useRef<HTMLButtonElement>(null);
   const modelBtnRef = useRef<HTMLButtonElement>(null);
   const appearanceBtnRef = useRef<HTMLButtonElement>(null);
+  const documentsBtnRef = useRef<HTMLButtonElement>(null);
   const settingsSectionRef = useRef<HTMLDivElement>(null);
   const [llmGatewayOpen, setLlmGatewayOpen] = useState(false);
   const [knowledgeGraphOpen, setKnowledgeGraphOpen] = useState(false);
   const [settingsExpanded, setSettingsExpanded] = useState(false);
+  const [documentsConfigureOpen, setDocumentsConfigureOpen] = useState(false);
+  const [documentsListOpen, setDocumentsListOpen] = useState(false);
+  const [documentsListKind, setDocumentsListKind] = useState<"project" | "drawing">("project");
+  const [documentsSyncBusy, setDocumentsSyncBusy] = useState(false);
+  const [documentsSyncMessage, setDocumentsSyncMessage] = useState<string | null>(null);
+  const [documentsSyncProgress, setDocumentsSyncProgress] = useState<{
+    file?: string | null;
+    file_i?: number | null;
+    file_n?: number | null;
+    page?: number | null;
+    page_n?: number | null;
+    pct?: number | null;
+    aggregated?: boolean | null;
+  } | null>(null);
+  const [documentsSyncPopupOpen, setDocumentsSyncPopupOpen] = useState(false);
   const { theme, setTheme } = useTheme();
   const skills = activeTask?.skills ?? config?.default_skills ?? [];
   const mcpServers = activeTask?.mcp_servers ?? config?.default_mcp_servers ?? [];
@@ -138,13 +159,109 @@ export function Sidebar({
       if (!(target instanceof Element)) return;
       if (settingsSectionRef.current?.contains(target)) return;
       if (target.closest(".config-popover")) return;
-      if (target.closest(".modal-overlay, .llm-gateway-modal, .knowledge-graph-modal")) return;
+      if (
+        target.closest(
+          ".modal-overlay, .llm-gateway-modal, .knowledge-graph-modal, .documents-configure-modal, .documents-doc-list-modal, .sync-progress-modal",
+        )
+      ) {
+        return;
+      }
       collapseSettings();
     }
 
     document.addEventListener("mousedown", onPointerDown);
     return () => document.removeEventListener("mousedown", onPointerDown);
   }, [settingsExpanded, onCloseDrawer]);
+
+  async function handleDocumentsAction(choice: string) {
+    if (choice === "Configure") {
+      setDocumentsConfigureOpen(true);
+      onCloseDrawer();
+      return;
+    }
+    if (choice === "Projects") {
+      setDocumentsListKind("project");
+      setDocumentsListOpen(true);
+      onCloseDrawer();
+      return;
+    }
+    if (choice === "Drawings") {
+      setDocumentsListKind("drawing");
+      setDocumentsListOpen(true);
+      onCloseDrawer();
+      return;
+    }
+    if (choice !== "Sync") return;
+
+    setDocumentsSyncPopupOpen(true);
+    setDocumentsSyncBusy(true);
+    setDocumentsSyncMessage("Documents 동기화를 시작합니다…");
+    try {
+      const result = await api.syncDocuments(false, modelName || undefined);
+      if (result.status === "error") {
+        setDocumentsSyncBusy(false);
+        setDocumentsSyncMessage(result.error || "Documents 동기화에 실패했습니다.");
+      } else if (result.status === "unchanged" || result.status === "ready") {
+        setDocumentsSyncBusy(false);
+        setDocumentsSyncMessage(
+          result.message || "Documents가 이미 최신 상태입니다.",
+        );
+      } else {
+        setDocumentsSyncBusy(true);
+        setDocumentsSyncMessage(
+          result.message || "Documents 동기화를 백그라운드에서 실행 중입니다.",
+        );
+      }
+    } catch (err) {
+      setDocumentsSyncBusy(false);
+      setDocumentsSyncMessage(
+        err instanceof Error ? err.message : "Documents 동기화에 실패했습니다.",
+      );
+    }
+  }
+
+  useEffect(() => {
+    if (!documentsSyncBusy && !documentsSyncPopupOpen) return;
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+
+    async function pollDocumentsSync() {
+      try {
+        const next = await api.getDocumentsStatus();
+        if (cancelled) return;
+        const busy = next.status === "queued" || next.status === "running";
+        setDocumentsSyncBusy(busy);
+        if (next.progress) {
+          setDocumentsSyncProgress(next.progress);
+        }
+        if (busy) {
+          setDocumentsSyncMessage(
+            next.message || "Documents 동기화를 백그라운드에서 실행 중입니다.",
+          );
+          timer = setTimeout(pollDocumentsSync, 1500);
+        } else if (next.status === "ready" || next.status === "unchanged") {
+          setDocumentsSyncMessage(next.message || "Documents 동기화가 완료되었습니다.");
+        } else if (next.status === "idle") {
+          setDocumentsSyncMessage(
+            next.message || documentsSyncMessage || "Documents 동기화가 완료되었습니다.",
+          );
+        } else if (next.status === "error") {
+          setDocumentsSyncMessage(next.error || "Documents 동기화에 실패했습니다.");
+        }
+      } catch {
+        if (cancelled) return;
+        if (documentsSyncBusy) {
+          timer = setTimeout(pollDocumentsSync, 4000);
+        }
+      }
+    }
+
+    void pollDocumentsSync();
+    return () => {
+      cancelled = true;
+      if (timer) clearTimeout(timer);
+    };
+  }, [documentsSyncBusy, documentsSyncPopupOpen]);
 
   function renderTask(task: Task, hidePinBadge = false) {
     return (
@@ -398,6 +515,18 @@ export function Sidebar({
                 </span>
               </button>
               <button
+                ref={documentsBtnRef}
+                type="button"
+                className={`sidebar-menu-btn${drawer === "documents" || documentsSyncBusy ? " is-active" : ""}`}
+                aria-expanded={drawer === "documents"}
+                aria-haspopup="dialog"
+                title={documentsSyncMessage ?? "Documents"}
+                onClick={() => toggleDrawer("documents")}
+              >
+                <DocumentsIcon className="sidebar-icon" />
+                <span>{documentsSyncBusy ? "Documents (Syncing…)" : "Documents"}</span>
+              </button>
+              <button
                 ref={appearanceBtnRef}
                 type="button"
                 className={`sidebar-menu-btn${drawer === "appearance" ? " is-active" : ""}`}
@@ -471,6 +600,19 @@ export function Sidebar({
           onClose={handleDrawerClose}
         />
       )}
+      {drawer === "documents" && (
+        <ConfigDrawer
+          title="Documents"
+          options={[...DOCUMENTS_OPTIONS]}
+          selected={[]}
+          mode="single"
+          anchorEl={documentsBtnRef.current}
+          onChange={(next) => {
+            if (next[0]) void handleDocumentsAction(next[0]);
+          }}
+          onClose={handleDrawerClose}
+        />
+      )}
 
       {knowledgeGraphOpen && knowledgeGraphEnabled && (
         <KnowledgeGraphModal
@@ -524,6 +666,30 @@ export function Sidebar({
             setSettingsExpanded(false);
             onCloseDrawer();
           }}
+        />
+      )}
+
+      {documentsConfigureOpen && (
+        <DocumentsConfigureModal
+          onClose={() => setDocumentsConfigureOpen(false)}
+          onFileUploaded={() => {
+            void handleDocumentsAction("Sync");
+          }}
+        />
+      )}
+      {documentsListOpen && (
+        <DocumentsListModal
+          kind={documentsListKind}
+          onClose={() => setDocumentsListOpen(false)}
+        />
+      )}
+      {documentsSyncPopupOpen && (
+        <SyncProgressModal
+          title="Documents Sync"
+          busy={documentsSyncBusy}
+          message={documentsSyncMessage}
+          progress={documentsSyncProgress}
+          onClose={() => setDocumentsSyncPopupOpen(false)}
         />
       )}
     </>
