@@ -473,6 +473,37 @@ def demote_closed_furniture_boxes(
     return result
 
 
+def _iter_closed_boxes(
+    msp,
+    *,
+    min_mm: float = 150.0,
+    max_mm: float = 3000.0,
+    max_pts: int = 8,
+) -> list[tuple[float, float, float, float, float, float, float, float, Any]]:
+    """닫힌 사각/직사각 LWPOLYLINE → (cx, cy, w, h, x0, x1, y0, y1, entity)."""
+    out: list[tuple[float, float, float, float, float, float, float, float, Any]] = []
+    for e in msp:
+        if e.dxftype() != "LWPOLYLINE":
+            continue
+        pts = [(float(p[0]), float(p[1])) for p in e.get_points("xy")]
+        if len(pts) < 4 or len(pts) > max_pts:
+            continue
+        closed = bool(e.closed) or (
+            math.hypot(pts[0][0] - pts[-1][0], pts[0][1] - pts[-1][1]) < 50.0
+        )
+        if not closed:
+            continue
+        xs = [p[0] for p in pts]
+        ys = [p[1] for p in pts]
+        x0, x1 = min(xs), max(xs)
+        y0, y1 = min(ys), max(ys)
+        w, h = x1 - x0, y1 - y0
+        if not (min_mm <= w <= max_mm and min_mm <= h <= max_mm):
+            continue
+        out.append(((x0 + x1) * 0.5, (y0 + y1) * 0.5, w, h, x0, x1, y0, y1, e))
+    return out
+
+
 def _iter_closed_squares(
     msp,
     *,
@@ -481,67 +512,18 @@ def _iter_closed_squares(
 ) -> list[tuple[float, float, float, float, Any]]:
     """닫힌 대략 정사각 LWPOLYLINE → (cx, cy, w, h, entity)."""
     out: list[tuple[float, float, float, float, Any]] = []
-    for e in msp:
-        if e.dxftype() != "LWPOLYLINE":
-            continue
-        pts = [(float(p[0]), float(p[1])) for p in e.get_points("xy")]
-        if len(pts) < 4:
-            continue
-        # closed 또는 시작≈끝
-        closed = bool(e.closed) or (
-            math.hypot(pts[0][0] - pts[-1][0], pts[0][1] - pts[-1][1]) < 50.0
-        )
-        if not closed:
-            continue
-        xs = [p[0] for p in pts]
-        ys = [p[1] for p in pts]
-        w = max(xs) - min(xs)
-        h = max(ys) - min(ys)
-        if not (min_mm <= w <= max_mm and min_mm <= h <= max_mm):
-            continue
+    for cx, cy, w, h, _x0, _x1, _y0, _y1, e in _iter_closed_boxes(
+        msp, min_mm=min_mm, max_mm=max_mm
+    ):
         if abs(w - h) > max(w, h) * 0.35:
             continue
-        out.append(((min(xs) + max(xs)) * 0.5, (min(ys) + max(ys)) * 0.5, w, h, e))
+        out.append((cx, cy, w, h, e))
     return out
 
 
-def find_hbeam_column_entities(msp) -> set[int]:
-    """H-Beam 기둥 엔티티 id.
-
-    패턴: 동심 중첩 정사각(외곽·내곽) ± 내부 짧은 가로/세로 대시.
-    """
-    squares = _iter_closed_squares(msp)
-    by_cell: dict[tuple[int, int], list[tuple[float, float, float, float, Any]]] = defaultdict(
-        list
-    )
-    for cx, cy, w, h, e in squares:
-        by_cell[(int(round(cx / 50.0) * 50), int(round(cy / 50.0) * 50))].append(
-            (cx, cy, w, h, e)
-        )
-
-    column_ids: set[int] = set()
-    centers: list[tuple[float, float, float]] = []  # cx, cy, outer_size
-    for items in by_cell.values():
-        if len(items) < 2:
-            continue
-        items = sorted(items, key=lambda t: max(t[2], t[3]))
-        for i, a in enumerate(items):
-            for b in items[i + 1 :]:
-                if abs(a[0] - b[0]) > 100.0 or abs(a[1] - b[1]) > 100.0:
-                    continue
-                inner_sz = max(a[2], a[3])
-                outer_sz = max(b[2], b[3])
-                if outer_sz < inner_sz * 1.05 or outer_sz > inner_sz * 1.55:
-                    continue
-                # 테두리 두께 대략 벽두께 대역
-                gap = (outer_sz - inner_sz) * 0.5
-                if gap < 20.0 or gap > 250.0:
-                    continue
-                column_ids.add(id(a[4]))
-                column_ids.add(id(b[4]))
-                centers.append((a[0], a[1], outer_sz))
-
-    # 내부 H 대시 (짧은 직교 LINE)
+def _iter_hbeam_dashes(msp) -> list[tuple[float, float, float, Any]]:
+    """H-Beam 내부 '_' 대시 — 짧은 직교 LINE → (mx, my, length, entity)."""
+    dashes: list[tuple[float, float, float, Any]] = []
     for e in msp:
         if e.dxftype() != "LINE":
             continue
@@ -558,12 +540,61 @@ def find_hbeam_column_entities(msp) -> set[int]:
         is_v = dx <= max(20.0, 0.15 * length)
         if not (is_h or is_v):
             continue
-        mx, my = (x0 + x1) * 0.5, (y0 + y1) * 0.5
-        for cx, cy, sz in centers:
-            if abs(mx - cx) <= sz * 0.35 and abs(my - cy) <= sz * 0.35:
-                column_ids.add(id(e))
+        dashes.append(((x0 + x1) * 0.5, (y0 + y1) * 0.5, length, e))
+    return dashes
+
+
+def find_hbeam_column_entities(msp) -> set[int]:
+    """H-Beam 기둥 엔티티 id — 정사각 + 중앙 '_' 심볼만.
+
+    외부 연결 벽·직사각 슬리브는 승격하지 않는다.
+    동심 이중 정사각이면 '_' 를 품은 정사각(+ 대시)만 WALL.
+    밀집 격자는 제외.
+    """
+    squares = _iter_closed_squares(msp, min_mm=450.0, max_mm=1500.0)
+    dashes = _iter_hbeam_dashes(msp)
+
+    candidates: list[tuple[float, float, float, set[int]]] = []
+    for cx, cy, w, h, e in squares:
+        side = max(w, h)
+        dash_ids: set[int] = set()
+        for mx, my, length, de in dashes:
+            if length > min(w, h) * 0.85:
+                continue
+            if abs(mx - cx) <= side * 0.35 and abs(my - cy) <= side * 0.35:
+                dash_ids.add(id(de))
+        if not dash_ids:
+            continue
+        candidates.append((cx, cy, side, {id(e)} | dash_ids))
+
+    merged: list[tuple[float, float, float, set[int]]] = []
+    for cx, cy, sz, eids in candidates:
+        found = False
+        for i, (mx, my, msz, meds) in enumerate(merged):
+            if abs(cx - mx) <= 120.0 and abs(cy - my) <= 120.0:
+                meds |= eids
+                merged[i] = (mx, my, max(msz, sz), meds)
+                found = True
                 break
+        if not found:
+            merged.append((cx, cy, sz, set(eids)))
+
+    # 밀집 격자 제외 (구조 기둥은 ~8 m 간격)
+    keep: list[tuple[float, float, float, set[int]]] = []
+    for cx, cy, sz, eids in merged:
+        rad = max(2500.0, sz * 4.0)
+        n_near = sum(
+            1 for ox, oy, _osz, _ in merged if math.hypot(cx - ox, cy - oy) <= rad
+        )
+        if n_near >= 4:
+            continue
+        keep.append((cx, cy, sz, eids))
+
+    column_ids: set[int] = set()
+    for _cx, _cy, _sz, eids in keep:
+        column_ids |= eids
     return column_ids
+
 
 
 def promote_hbeam_columns(msp) -> int:
@@ -1066,6 +1097,134 @@ def promote_corridor_walls(
             continue
         seen.add(key)
         out.append(s)
+    return out
+
+
+def promote_corridor_door_flanks(
+    segs: list[AxisSeg],
+    *,
+    corridor_run_min_mm: float = 4000.0,
+    door_gap_min_mm: float = 700.0,
+    door_gap_max_mm: float = 2200.0,
+    flank_min_mm: float = 300.0,
+    flank_max_mm: float = 6000.0,
+    abut_mm: float = 450.0,
+) -> list[AxisSeg]:
+    """복도 벽 문 개구의 양옆(좌·우/상·하) BASE → WALL.
+
+    한쪽만 WALL이고 반대 모서리가 회색인 경우를 메운다.
+    """
+    wall = [s for s in segs if s.layer == WALL_LAYER]
+    base = [s for s in segs if s.layer == BASE_LAYER]
+    out: list[AxisSeg] = []
+    seen: set[tuple[float, float, float, float]] = set()
+
+    # ortho bucket → segs (H/V 각각)
+    by_ortho: dict[tuple[bool, int], list[AxisSeg]] = defaultdict(list)
+    for s in wall + base:
+        by_ortho[(s.is_h, _bucket(s.ortho))].append(s)
+
+    # 인접 ortho를 합쳐 벽선 후보 구성
+    processed: set[tuple[bool, int]] = set()
+    for is_h, ortho_b in list(by_ortho.keys()):
+        key0 = (is_h, ortho_b)
+        if key0 in processed:
+            continue
+        # ±100 mm 묶음
+        bundle_keys = [
+            (is_h, ortho_b + d * 50)
+            for d in (-2, -1, 0, 1, 2)
+            if (is_h, ortho_b + d * 50) in by_ortho
+        ]
+        for bk in bundle_keys:
+            processed.add(bk)
+        bundle = []
+        for bk in bundle_keys:
+            bundle.extend(by_ortho[bk])
+        wall_iv = sorted(
+            [(s.along0, s.along1) for s in bundle if s.layer == WALL_LAYER],
+            key=lambda t: t[0],
+        )
+        if not wall_iv:
+            continue
+        # merge WALL intervals
+        merged: list[list[float]] = []
+        for a0, a1 in wall_iv:
+            if not merged or a0 > merged[-1][1] + 80:
+                merged.append([a0, a1])
+            else:
+                merged[-1][1] = max(merged[-1][1], a1)
+        wall_span = sum(m[1] - m[0] for m in merged)
+        along_lo = min(s.along0 for s in bundle)
+        along_hi = max(s.along1 for s in bundle)
+        total_span = along_hi - along_lo
+        # 복도 장축이거나, 복도 인접 실 벽(일부만 WALL)도 허용
+        if wall_span < 800.0:
+            continue
+        if wall_span < corridor_run_min_mm and total_span < corridor_run_min_mm:
+            continue
+        # door-sized gaps: (a) WALL–WALL 사이 (b) WALL 끝 ↔ BASE 플랭크
+        gaps: list[tuple[float, float]] = []
+        for i in range(len(merged) - 1):
+            g0, g1 = merged[i][1], merged[i + 1][0]
+            gap = g1 - g0
+            if door_gap_min_mm <= gap <= door_gap_max_mm:
+                gaps.append((g0, g1))
+        base_cands = [
+            s
+            for s in bundle
+            if s.layer == BASE_LAYER and flank_min_mm <= s.length <= flank_max_mm
+        ]
+        # WALL 런 끝 너머 문 간격만큼 떨어진 BASE = 반대쪽 문틀
+        for m0, m1 in merged:
+            for s in base_cands:
+                gap_l = m0 - s.along1
+                if door_gap_min_mm <= gap_l <= door_gap_max_mm and s.along0 < s.along1 - 80:
+                    gaps.append((s.along1, m0))
+                gap_r = s.along0 - m1
+                if door_gap_min_mm <= gap_r <= door_gap_max_mm and s.along1 > s.along0 + 80:
+                    gaps.append((m1, s.along0))
+        # dedupe gaps
+        uniq_gaps: list[tuple[float, float]] = []
+        for g0, g1 in sorted(gaps):
+            if uniq_gaps and abs(g0 - uniq_gaps[-1][0]) < 50 and abs(g1 - uniq_gaps[-1][1]) < 50:
+                continue
+            uniq_gaps.append((g0, g1))
+        if not uniq_gaps:
+            continue
+        for g0, g1 in uniq_gaps:
+            # 이미 한쪽이 WALL인 문만 대상 (반대쪽 BASE 보완)
+            has_wall_left = any(abs(m[1] - g0) <= abut_mm for m in merged)
+            has_wall_right = any(abs(m[0] - g1) <= abut_mm for m in merged)
+            if not (has_wall_left or has_wall_right):
+                continue
+            for s in base_cands:
+                # 문 왼쪽/아래: 세그먼트가 gap 시작(g0)에 맞닿음
+                left_abut = abs(s.along1 - g0) <= abut_mm and s.along0 < g0 - 50
+                # 문 오른쪽/위: 세그먼트가 gap 끝(g1)에 맞닿음
+                right_abut = abs(s.along0 - g1) <= abut_mm and s.along1 > g1 + 50
+                if not (left_abut or right_abut):
+                    continue
+                # 왼쪽 BASE는 오른쪽에 WALL이 있을 때, 오른쪽 BASE는 왼쪽에 WALL이 있을 때
+                if left_abut and not has_wall_right:
+                    continue
+                if right_abut and not has_wall_left:
+                    continue
+                if not _has_parallel_pair(
+                    s, base, thick_min=15.0, thick_max=500.0
+                ):
+                    if s.length > 3500.0:
+                        continue
+                key = (
+                    round(s.x0, 1),
+                    round(s.y0, 1),
+                    round(s.x1, 1),
+                    round(s.y1, 1),
+                )
+                if key in seen:
+                    continue
+                seen.add(key)
+                out.append(s)
     return out
 
 
@@ -2228,6 +2387,7 @@ def apply_corrections(
         promote.extend(find_promote_segments(segs))
     if do_corridor_promote:
         promote.extend(promote_corridor_walls(segs))
+        promote.extend(promote_corridor_door_flanks(segs))
     promote.extend(promote_collinear_room_walls(segs))
     n_stair_promote = 0
     if do_stair_promote:

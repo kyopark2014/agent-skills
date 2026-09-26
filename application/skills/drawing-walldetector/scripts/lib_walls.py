@@ -104,12 +104,14 @@ def is_non_wall_closed_box(e: DXFEntity, *, max_mm: float = 3500.0) -> bool:
     return False
 
 
-def _square_metrics(e: DXFEntity) -> tuple[float, float, float, float] | None:
-    """닫힌 대략 정사각이면 (cx, cy, w, h), 아니면 None."""
+def _box_metrics(
+    e: DXFEntity, *, max_mm: float = 2600.0
+) -> tuple[float, float, float, float, float, float, float, float] | None:
+    """닫힌 사각/직사각이면 (cx, cy, w, h, x0, x1, y0, y1), 아니면 None."""
     if e.dxftype() != "LWPOLYLINE":
         return None
     pts = [(float(p[0]), float(p[1])) for p in e.get_points("xy")]
-    if len(pts) < 4:
+    if len(pts) < 4 or len(pts) > 8:
         return None
     closed = bool(e.closed) or (
         math.hypot(pts[0][0] - pts[-1][0], pts[0][1] - pts[-1][1]) < 50.0
@@ -118,46 +120,84 @@ def _square_metrics(e: DXFEntity) -> tuple[float, float, float, float] | None:
         return None
     xs = [p[0] for p in pts]
     ys = [p[1] for p in pts]
-    w = max(xs) - min(xs)
-    h = max(ys) - min(ys)
-    if not (150.0 <= w <= 1200.0 and 150.0 <= h <= 1200.0):
+    x0, x1 = min(xs), max(xs)
+    y0, y1 = min(ys), max(ys)
+    w, h = x1 - x0, y1 - y0
+    if not (150.0 <= w <= max_mm and 150.0 <= h <= max_mm):
         return None
+    return ((x0 + x1) * 0.5, (y0 + y1) * 0.5, w, h, x0, x1, y0, y1)
+
+
+def _square_metrics(e: DXFEntity) -> tuple[float, float, float, float] | None:
+    """닫힌 대략 정사각이면 (cx, cy, w, h), 아니면 None."""
+    m = _box_metrics(e, max_mm=1500.0)
+    if not m:
+        return None
+    cx, cy, w, h, *_ = m
     if abs(w - h) > max(w, h) * 0.35:
         return None
-    return ((min(xs) + max(xs)) * 0.5, (min(ys) + max(ys)) * 0.5, w, h)
+    return (cx, cy, w, h)
 
 
 def find_hbeam_column_idxs(entities: list[DXFEntity]) -> set[int]:
-    """H-Beam 기둥 엔티티 인덱스 — 동심 중첩 정사각."""
+    """H-Beam 기둥 엔티티 인덱스 — 정사각 + 중앙 '_' 만.
+
+    외부 연결·직사각 슬리브 제외. 밀집 격자 제외.
+    """
     squares: list[tuple[int, float, float, float, float]] = []
+    dashes: list[tuple[float, float, float, int]] = []
     for ei, e in enumerate(entities):
         m = _square_metrics(e)
-        if not m:
+        if m:
+            cx, cy, w, h = m
+            if 450.0 <= max(w, h) <= 1500.0:
+                squares.append((ei, cx, cy, w, h))
+        if e.dxftype() == "LINE":
+            try:
+                x0, y0 = float(e.dxf.start.x), float(e.dxf.start.y)
+                x1, y1 = float(e.dxf.end.x), float(e.dxf.end.y)
+            except Exception:  # noqa: BLE001
+                continue
+            length = math.hypot(x1 - x0, y1 - y0)
+            if not (60.0 <= length <= 700.0):
+                continue
+            dx, dy = abs(x1 - x0), abs(y1 - y0)
+            if dy <= max(20.0, 0.15 * length) or dx <= max(20.0, 0.15 * length):
+                dashes.append(((x0 + x1) * 0.5, (y0 + y1) * 0.5, length, ei))
+
+    cands: list[tuple[float, float, float, set[int]]] = []
+    for ei, cx, cy, w, h in squares:
+        side = max(w, h)
+        dash_idxs: set[int] = set()
+        for mx, my, length, di in dashes:
+            if length > min(w, h) * 0.85:
+                continue
+            if abs(mx - cx) <= side * 0.35 and abs(my - cy) <= side * 0.35:
+                dash_idxs.add(di)
+        if not dash_idxs:
             continue
-        cx, cy, w, h = m
-        squares.append((ei, cx, cy, w, h))
-    by_cell: dict[tuple[int, int], list[tuple[int, float, float, float, float]]] = {}
-    for item in squares:
-        key = (int(round(item[1] / 50.0) * 50), int(round(item[2] / 50.0) * 50))
-        by_cell.setdefault(key, []).append(item)
+        cands.append((cx, cy, side, {ei} | dash_idxs))
+
+    merged: list[tuple[float, float, float, set[int]]] = []
+    for cx, cy, sz, idxs in cands:
+        found = False
+        for i, (mx, my, msz, midxs) in enumerate(merged):
+            if abs(cx - mx) <= 120.0 and abs(cy - my) <= 120.0:
+                midxs |= idxs
+                merged[i] = (mx, my, max(msz, sz), midxs)
+                found = True
+                break
+        if not found:
+            merged.append((cx, cy, sz, set(idxs)))
     out: set[int] = set()
-    for items in by_cell.values():
-        if len(items) < 2:
+    for cx, cy, sz, idxs in merged:
+        rad = max(2500.0, sz * 4.0)
+        n_near = sum(
+            1 for ox, oy, _osz, _ in merged if math.hypot(cx - ox, cy - oy) <= rad
+        )
+        if n_near >= 4:
             continue
-        items = sorted(items, key=lambda t: max(t[3], t[4]))
-        for i, a in enumerate(items):
-            for b in items[i + 1 :]:
-                if abs(a[1] - b[1]) > 100.0 or abs(a[2] - b[2]) > 100.0:
-                    continue
-                inner = max(a[3], a[4])
-                outer = max(b[3], b[4])
-                if outer < inner * 1.05 or outer > inner * 1.55:
-                    continue
-                gap = (outer - inner) * 0.5
-                if gap < 20.0 or gap > 250.0:
-                    continue
-                out.add(a[0])
-                out.add(b[0])
+        out |= idxs
     return out
 
 
