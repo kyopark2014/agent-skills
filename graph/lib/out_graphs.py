@@ -34,13 +34,45 @@ def _load_graph(path: Path) -> nx.Graph:
 
 
 def _author_of(node_id: str, data: dict[str, Any]) -> str:
-    author = (data.get("author") or "").strip()
-    if author:
-        return author
-    source = data.get("source_file") or ""
+    """Resolve owning user for a graph node.
+
+    Preference order:
+      1. author / contributor / user_id fields on the node
+      2. corpus filename ``turn-{user}-{msg_id}.md`` (current)
+      3. legacy ``turn-{index}-{user}-…``
+      4. node id prefix ``turn_{user}_…``
+    """
+    for key in ("author", "contributor", "user_id"):
+        val = data.get(key)
+        if val is None:
+            continue
+        text = str(val).strip()
+        if text and text.lower() not in {"none", "null", "unknown"}:
+            return text
+
+    source = str(data.get("source_file") or "")
+    name = Path(source).name if source else ""
+    # Current: turn-lge-<uuid>.md  /  turn-user_email_com-<id>.md
+    m = re.match(r"turn-([^-/]+)-", name)
+    if m and not m.group(1).isdigit():
+        return m.group(1)
+    # Legacy: turn-0001-lge-title-abcd1234.md
+    m = re.match(r"turn-\d+-([^-/]+)", name)
+    if m:
+        return m.group(1)
+    # Absolute path still has basename above; also try full path patterns
+    m = re.search(r"/turn-([^-/]+)-[^/]+\.md$", source)
+    if m and not m.group(1).isdigit():
+        return m.group(1)
     m = re.search(r"turn-\d+-([^-/]+)", source)
     if m:
         return m.group(1)
+
+    # Node ids often look like turn_lge_cb320280_task
+    m = re.match(r"turn_([^_]+)_", str(node_id or ""))
+    if m and not m.group(1).isdigit():
+        return m.group(1)
+
     return "unknown"
 
 

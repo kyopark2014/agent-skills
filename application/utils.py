@@ -79,6 +79,134 @@ def ensure_user_artifacts_dir(user_id: str | None) -> str:
     return artifacts_dir
 
 
+# Chat "Load files" attachments under .session_storage/{user}/upload/
+UPLOAD_SUBDIR = "upload"
+LOAD_FILE_MAX_BYTES = 2 * 1024 * 1024 * 1024  # 2 GiB (large DXF)
+LOAD_FILE_ALLOWED_EXTENSIONS = {
+    ".pdf",
+    ".txt",
+    ".md",
+    ".markdown",
+    ".csv",
+    ".doc",
+    ".docx",
+    ".ppt",
+    ".pptx",
+    ".xls",
+    ".xlsx",
+    ".html",
+    ".htm",
+    ".json",
+    ".py",
+    ".js",
+    ".ts",
+    ".tsx",
+    ".jsx",
+    ".yml",
+    ".yaml",
+    ".xml",
+    ".rst",
+    ".dxf",
+    ".png",
+    ".jpg",
+    ".jpeg",
+    ".webp",
+    ".gif",
+}
+
+
+def get_user_upload_dir(user_id: str | None) -> str:
+    """Absolute path to {SESSION_STORAGE_DIR}/{user_id}/upload (does not create)."""
+    segment = sanitize_user_path_segment(user_id) or "default"
+    return os.path.join(SESSION_STORAGE_DIR, segment, UPLOAD_SUBDIR)
+
+
+def ensure_user_upload_dir(user_id: str | None) -> str:
+    """Create {SESSION_STORAGE_DIR}/{user_id}/upload if needed and return it."""
+    segment = sanitize_user_path_segment(user_id)
+    if not segment:
+        raise ValueError(
+            "Invalid user_id for upload path; expected a plain user id, "
+            "not a signed session cookie"
+        )
+    upload_dir = os.path.join(SESSION_STORAGE_DIR, segment, UPLOAD_SUBDIR)
+    os.makedirs(upload_dir, exist_ok=True)
+    logger.info("user upload dir ready: %s", upload_dir)
+    return upload_dir
+
+
+def sanitize_load_filename(filename: str) -> str:
+    """Validate Load-files extension and return a safe basename (overwrite-safe)."""
+    name = os.path.basename(filename or "").strip() or "upload.bin"
+    if name in {".", ".."} or "/" in name or "\\" in name:
+        name = "upload.bin"
+    name = name.replace("\x00", "_") or "upload.bin"
+    ext = os.path.splitext(name)[1].lower()
+    if ext not in LOAD_FILE_ALLOWED_EXTENSIONS:
+        raise ValueError(f"Unsupported file type: {ext or '(none)'}")
+    return name
+
+
+def save_session_upload(
+    filename: str,
+    data: bytes,
+    *,
+    user_id: str | None = None,
+) -> dict[str, object]:
+    """Write a Load-files attachment under ``.session_storage/{user}/upload/``.
+
+    Returns absolute ``workspace_path`` for chat ``files`` delivery.
+    Same basename overwrites the previous file.
+    """
+    if data is None or len(data) == 0:
+        raise ValueError("Empty file")
+    if len(data) > LOAD_FILE_MAX_BYTES:
+        raise ValueError("File exceeds the 2 GiB upload limit")
+
+    safe_name = sanitize_load_filename(filename)
+    upload_dir = ensure_user_upload_dir(user_id)
+    dest = os.path.abspath(os.path.join(upload_dir, safe_name))
+    # Ensure dest stays inside upload_dir (basename already sanitized).
+    if os.path.commonpath([dest, os.path.abspath(upload_dir)]) != os.path.abspath(
+        upload_dir
+    ):
+        raise ValueError("Invalid upload target")
+
+    with open(dest, "wb") as f:
+        f.write(data)
+
+    content_type = _session_upload_content_type(safe_name)
+    logger.info(
+        "Load-file saved: user=%s file=%s path=%s bytes=%s",
+        sanitize_user_path_segment(user_id) or "default",
+        safe_name,
+        dest,
+        len(data),
+    )
+    return {
+        "ok": True,
+        "file_name": safe_name,
+        "workspace_path": dest,
+        "path": dest,
+        "bytes": len(data),
+        "content_type": content_type,
+    }
+
+
+def resolve_session_upload_path(user_id: str | None, filename: str) -> str | None:
+    """Return absolute path if ``filename`` exists under the user's upload dir."""
+    safe_name = os.path.basename(filename or "").strip()
+    if not safe_name or safe_name in {".", ".."}:
+        return None
+    upload_dir = os.path.abspath(get_user_upload_dir(user_id))
+    dest = os.path.abspath(os.path.join(upload_dir, safe_name))
+    if os.path.commonpath([dest, upload_dir]) != upload_dir:
+        return None
+    if not os.path.isfile(dest):
+        return None
+    return dest
+
+
 def get_user_skills_dir(user_id: str | None) -> str:
     """Absolute path to {SESSION_STORAGE_DIR}/{user_id}/skills (does not create)."""
     segment = sanitize_user_path_segment(user_id) or "default"

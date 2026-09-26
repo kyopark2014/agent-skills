@@ -1227,6 +1227,20 @@ def _file_name_from_ref(file_ref: str) -> str:
     return parse.unquote(name)
 
 
+def _is_local_filesystem_ref(file_ref: str) -> bool:
+    raw = (file_ref or "").strip()
+    if not raw or raw.startswith("/api/"):
+        return False
+    if raw.startswith("http://") or raw.startswith("https://"):
+        return False
+    return raw.startswith("/")
+
+
+def _is_image_filename(file_name: str) -> bool:
+    ext = file_name.rsplit(".", 1)[-1].lower() if "." in file_name else ""
+    return ext in ("png", "jpeg", "jpg", "webp", "gif")
+
+
 def _s3_key_from_file_ref(file_ref: str, *, default_prefix: str = s3_image_prefix) -> str:
     """Derive S3 object key from a sharing URL or bare file name.
 
@@ -1258,14 +1272,18 @@ def _s3_key_from_file_ref(file_ref: str, *, default_prefix: str = s3_image_prefi
 
 
 def _load_image_bytes_from_ref(file_ref: str) -> tuple[str, bytes]:
-    """Load image bytes from S3 (images/{user_id}/) using a sharing URL or file name."""
+    """Load image bytes from a local absolute path or S3 (images/{user_id}/)."""
     file_name = _file_name_from_ref(file_ref)
     if not file_name:
         raise ValueError("파일 이름을 확인할 수 없습니다.")
 
-    file_type = file_name.rsplit(".", 1)[-1].lower() if "." in file_name else ""
-    if file_type not in ("png", "jpeg", "jpg", "webp", "gif"):
-        raise ValueError(f"지원하지 않는 이미지 형식입니다: {file_type or '(unknown)'}")
+    if not _is_image_filename(file_name):
+        raise ValueError(f"지원하지 않는 이미지 형식입니다: {file_name.rsplit('.', 1)[-1]}")
+
+    if _is_local_filesystem_ref(file_ref) and os.path.isfile(file_ref):
+        logger.info(f"loading image from local path: {file_ref}")
+        with open(file_ref, "rb") as f:
+            return file_name, f.read()
 
     if not s3_bucket:
         raise ValueError("s3_bucket is not configured")
@@ -1278,7 +1296,7 @@ def _load_image_bytes_from_ref(file_ref: str) -> tuple[str, bytes]:
 
 
 def build_human_message_with_files(prompt: str, files: list | None = None) -> HumanMessage:
-    """Build a multimodal HumanMessage: attached images + user text."""
+    """Build a multimodal HumanMessage: attached images + local paths + user text."""
     text = (prompt or "").strip()
     file_list = files or []
     if not isinstance(file_list, list):
@@ -1290,10 +1308,27 @@ def build_human_message_with_files(prompt: str, files: list | None = None) -> Hu
 
     content_blocks: list[dict] = []
     image_names: list[str] = []
+    path_names: list[str] = []
 
     for file_ref in file_list:
+        file_name = _file_name_from_ref(file_ref)
+        # Local non-image paths: pass absolute path so tools can read the file.
+        if _is_local_filesystem_ref(file_ref) and not _is_image_filename(file_name):
+            content_blocks.append(
+                {
+                    "type": "text",
+                    "text": (
+                        f"첨부 파일: {file_name}\n"
+                        f"절대 경로: {file_ref}\n"
+                        "도구(bash/read_file 등)로 이 경로의 파일을 읽으세요."
+                    ),
+                }
+            )
+            path_names.append(file_name)
+            continue
+
         try:
-            file_name, image_bytes = _load_image_bytes_from_ref(file_ref)
+            loaded_name, image_bytes = _load_image_bytes_from_ref(file_ref)
             img_base64, mime = _prepare_image_base64(image_bytes)
             content_blocks.append(
                 {
@@ -1301,10 +1336,23 @@ def build_human_message_with_files(prompt: str, files: list | None = None) -> Hu
                     "image_url": {"url": f"data:{mime};base64,{img_base64}"},
                 }
             )
-            image_names.append(file_name)
-            logger.info(f"attached image for multimodal message: {file_name}")
+            image_names.append(loaded_name)
+            logger.info(f"attached image for multimodal message: {loaded_name}")
         except Exception as e:
             logger.error(f"Failed to load image {file_ref}: {e}")
+            if _is_local_filesystem_ref(file_ref):
+                content_blocks.append(
+                    {
+                        "type": "text",
+                        "text": (
+                            f"첨부 파일: {file_name or file_ref}\n"
+                            f"절대 경로: {file_ref}\n"
+                            "도구(bash/read_file 등)로 이 경로의 파일을 읽으세요."
+                        ),
+                    }
+                )
+                path_names.append(file_name or file_ref)
+                continue
             # Fall back to text summary for this file
             try:
                 summary = get_summary_of_uploaded_file(file_ref, prompt=text)
@@ -1312,7 +1360,7 @@ def build_human_message_with_files(prompt: str, files: list | None = None) -> Hu
                     {
                         "type": "text",
                         "text": (
-                            f"선택한 파일({_file_name_from_ref(file_ref)})의 내용을 "
+                            f"선택한 파일({file_name})의 내용을 "
                             f"요약하면 아래와 같습니다.\n\n{summary}"
                         ),
                     }
@@ -1321,18 +1369,20 @@ def build_human_message_with_files(prompt: str, files: list | None = None) -> Hu
                 content_blocks.append(
                     {
                         "type": "text",
-                        "text": f"파일 로드 실패 ({_file_name_from_ref(file_ref)}): {summary_err}",
+                        "text": f"파일 로드 실패 ({file_name}): {summary_err}",
                     }
                 )
 
     if not text:
-        if image_names:
+        if image_names and not path_names:
             text = (
                 f"첨부한 이미지({', '.join(image_names)})를 자세히 설명해주세요. "
                 "구성 요소, 레이블, 화살표/연결 관계, 전체 의미를 markdown으로 정리하세요."
             )
+        elif path_names and not image_names:
+            text = f"첨부한 파일({', '.join(path_names)})을 분석해주세요."
         else:
-            text = "첨부한 이미지를 분석해주세요."
+            text = "첨부한 파일/이미지를 분석해주세요."
 
     content_blocks.append({"type": "text", "text": text})
     return HumanMessage(content=content_blocks)
@@ -1353,9 +1403,9 @@ def summarize_image(image_content: bytes, prompt: str) -> str:
 
 
 def get_summary_of_uploaded_file(file_ref: str, prompt: str = "") -> str:
-    """Analyze an uploaded file (by URL or name) and return a text summary.
+    """Analyze an uploaded file (by URL, local path, or name) and return a text summary.
 
-    Images are loaded from S3 under images/{user_id}/ and summarized with vision.
+    Images are loaded from a local absolute path or S3 under images/{user_id}/.
     """
     file_name = _file_name_from_ref(file_ref)
     if not file_name:
@@ -1371,6 +1421,14 @@ def get_summary_of_uploaded_file(file_ref: str, prompt: str = "") -> str:
         logger.info(f"image_summary_prompt: {image_summary_prompt}")
 
         return summarize_image(image_content, image_summary_prompt)
+
+    if _is_local_filesystem_ref(file_ref) and os.path.isfile(file_ref):
+        return (
+            f"로컬 첨부 파일입니다.\n"
+            f"파일명: {file_name}\n"
+            f"절대 경로: {file_ref}\n"
+            f"크기: {os.path.getsize(file_ref)} bytes"
+        )
 
     return f"지원하지 않는 파일 형식입니다: {file_type or '(unknown)'}"
 

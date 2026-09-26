@@ -1074,6 +1074,48 @@ select {
   padding: 0 2px 4px;
 }
 
+.message-loaded-files {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 6px;
+}
+
+.message-loaded-file {
+  max-width: 100%;
+  padding: 6px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.04);
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+a.message-loaded-file-link {
+  display: inline-block;
+  text-decoration: none;
+  cursor: pointer;
+  transition: border-color 0.12s ease, color 0.12s ease, background 0.12s ease;
+}
+
+a.message-loaded-file-link:hover {
+  border-color: var(--accent, #58a6ff);
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.08);
+}
+
+a.message-loaded-file-link:focus-visible {
+  outline: 2px solid var(--accent, #58a6ff);
+  outline-offset: 2px;
+}
+
+.message-loaded-file-name {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .chat-loaded-files {
   display: flex;
   flex-direction: column;
@@ -1092,14 +1134,79 @@ select {
   background: rgba(255, 255, 255, 0.04);
 }
 
+a.chat-loaded-file-open {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  flex: 1;
+  text-decoration: none;
+  color: inherit;
+  cursor: pointer;
+  border-radius: 6px;
+}
+
+a.chat-loaded-file-open:hover .chat-loaded-file-name {
+  color: var(--accent, #58a6ff);
+  text-decoration: underline;
+}
+
+a.chat-loaded-file-open:focus-visible {
+  outline: 2px solid var(--accent, #58a6ff);
+  outline-offset: 2px;
+}
+
+.chat-loaded-file-icon {
+  flex-shrink: 0;
+  color: var(--text-secondary);
+  display: inline-flex;
+}
+
+.chat-loaded-file-meta {
+  min-width: 0;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
 .chat-loaded-file-name {
   font-size: 13px;
   color: var(--text-primary);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  flex: 1;
-  min-width: 0;
+}
+
+.chat-loaded-file-size {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.chat-loaded-file-remove {
+  flex-shrink: 0;
+  width: 22px;
+  height: 22px;
+  border: none;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.45);
+  color: #fff;
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+}
+
+.chat-loaded-file-remove:hover:not(:disabled) {
+  background: rgba(0, 0, 0, 0.7);
+}
+
+.chat-loaded-file-remove:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
 .chat-attachment {

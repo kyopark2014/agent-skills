@@ -54,6 +54,7 @@ RUN pip install defusedxml lxml openpyxl Pillow pytesseract "markitdown[pptx]"
 RUN pip install reportlab pypdf pdfplumber PyYAML
 # Skills: browser automation
 RUN pip install "browser-use[cli]"
+RUN pip install ezdxf
 
 COPY . .
 

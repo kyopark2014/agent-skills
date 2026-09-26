@@ -32,6 +32,17 @@ AGENT_STREAM_MAX_SECONDS = 14400
 # worker to finish so the final answer can still be persisted for refresh.
 LATE_PERSIST_WAIT_SECONDS = 1800
 DEFAULT_IMAGE_PROMPT = "첨부한 이미지를 분석해주세요."
+DEFAULT_FILE_PROMPT = "첨부한 파일을 분석해주세요."
+
+
+def _is_local_file_ref(file_ref: str) -> bool:
+    raw = (file_ref or "").strip()
+    if not raw or raw.startswith("/api/"):
+        return False
+    if raw.startswith("http://") or raw.startswith("https://"):
+        return False
+    return raw.startswith("/")
+
 
 _TOOL_INPUT_RE = re.compile(r"^Tool: (.+?), Input:\s*(.*)$", re.DOTALL)
 _TOOL_RESULT_RE = re.compile(r"^Tool Result: (.+)$", re.DOTALL)
@@ -522,7 +533,12 @@ def chat_stream(task_id: str, body: ChatRequest, request: Request):
     files = [url.strip() for url in (body.files or []) if url and url.strip()]
     prompt = body.prompt.strip()
     if not prompt and files:
-        prompt = DEFAULT_IMAGE_PROMPT
+        has_local = any(_is_local_file_ref(f) for f in files)
+        has_http = any(f.startswith("http://") or f.startswith("https://") for f in files)
+        if has_local and not has_http:
+            prompt = DEFAULT_FILE_PROMPT
+        else:
+            prompt = DEFAULT_IMAGE_PROMPT
 
     chat.update(
         userId=user_id,

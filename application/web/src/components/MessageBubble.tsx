@@ -22,6 +22,122 @@ function normalizeText(value: string): string {
   return value.trim().replace(/\s+/g, " ");
 }
 
+function fileNameFromRef(ref: string): string {
+  const trimmed = (ref || "").trim();
+  if (!trimmed) return "file";
+  try {
+    const noQuery = trimmed.split("?")[0].split("#")[0];
+    const parts = noQuery.split("/");
+    return decodeURIComponent(parts[parts.length - 1] || "file");
+  } catch {
+    return "file";
+  }
+}
+
+function isHttpImageRef(ref: string): boolean {
+  const trimmed = (ref || "").trim();
+  if (!/^https?:\/\//i.test(trimmed)) return false;
+  const path = trimmed.split("?")[0].split("#")[0].toLowerCase();
+  return /\.(png|jpe?g|gif|webp)$/i.test(path) || /\/images\//i.test(path);
+}
+
+/** Rewrite CloudFront/S3 artifact .md/.json/.csv links to the in-app viewer. */
+function resolveArtifactViewerHref(href: string | undefined): string | undefined {
+  if (!href) return href;
+  try {
+    const url = new URL(href, window.location.origin);
+    const match = url.pathname.match(
+      /\/artifacts\/[^/]+\/(.+\.(?:md|markdown|json|csv))$/i,
+    );
+    if (!match) return href;
+    const rest = decodeURIComponent(match[1]);
+    if (!rest || rest.includes("..")) return href;
+    const encoded = rest
+      .split("/")
+      .filter(Boolean)
+      .map((part) => encodeURIComponent(part))
+      .join("/");
+    return `/api/artifacts/view/${encoded}`;
+  } catch {
+    return href;
+  }
+}
+
+/** Map an attachment ref to a browser-openable URL (new tab), if possible. */
+function resolveAttachmentOpenUrl(ref: string): string | null {
+  const trimmed = (ref || "").trim();
+  if (!trimmed) return null;
+
+  const name = fileNameFromRef(trimmed);
+  if (!name) return null;
+
+  // CloudFront artifact text files → authenticated artifact viewer.
+  const artifactViewer = resolveArtifactViewerHref(trimmed);
+  if (artifactViewer && artifactViewer !== trimmed) return artifactViewer;
+
+  if (/^https?:\/\//i.test(trimmed)) return trimmed;
+  if (trimmed.startsWith("/api/")) return trimmed;
+
+  // Load-files workspace paths → authenticated viewer API.
+  return `/api/files/view/${encodeURIComponent(name)}`;
+}
+
+function splitAttachmentRefs(refs: string[]): {
+  imageUrls: string[];
+  filePaths: string[];
+} {
+  const imageUrls: string[] = [];
+  const filePaths: string[] = [];
+  for (const ref of refs) {
+    if (isHttpImageRef(ref)) imageUrls.push(ref);
+    else filePaths.push(ref);
+  }
+  return { imageUrls, filePaths };
+}
+
+function AttachmentMedia({ refs }: { refs: string[] }) {
+  const { imageUrls, filePaths } = splitAttachmentRefs(refs);
+  if (imageUrls.length === 0 && filePaths.length === 0) return null;
+  return (
+    <>
+      {filePaths.length > 0 && (
+        <div className="message-loaded-files" aria-label="첨부 파일">
+          {filePaths.map((path) => {
+            const openUrl = resolveAttachmentOpenUrl(path);
+            const label = fileNameFromRef(path);
+            if (openUrl) {
+              return (
+                <a
+                  key={path}
+                  className="message-loaded-file message-loaded-file-link"
+                  href={openUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  title={`${path}\n클릭하여 새 탭에서 열기`}
+                >
+                  <span className="message-loaded-file-name">{label}</span>
+                </a>
+              );
+            }
+            return (
+              <div key={path} className="message-loaded-file" title={path}>
+                <span className="message-loaded-file-name">{label}</span>
+              </div>
+            );
+          })}
+        </div>
+      )}
+      {imageUrls.length > 0 && (
+        <div className="message-images">
+          {imageUrls.map((url) => (
+            <img key={url} src={url} alt="" />
+          ))}
+        </div>
+      )}
+    </>
+  );
+}
+
 function isStreamingPrefixOfFinal(partial: string, finalText: string): boolean {
   if (!partial || !finalText) return false;
   if (finalText.startsWith(partial) || partial.startsWith(finalText)) return true;
@@ -65,11 +181,14 @@ function MarkdownText({ content }: { content: string }) {
     <ReactMarkdown
       remarkPlugins={[remarkGfm]}
       components={{
-        a: ({ href, children, ...props }) => (
-          <a href={href} target="_blank" rel="noopener noreferrer" {...props}>
-            {children}
-          </a>
-        ),
+        a: ({ href, children, ...props }) => {
+          const openHref = resolveArtifactViewerHref(href);
+          return (
+            <a href={openHref} target="_blank" rel="noopener noreferrer" {...props}>
+              {children}
+            </a>
+          );
+        },
       }}
     >
       {content}
@@ -270,13 +389,7 @@ export function MessageBubble({ role, content, images = [], toolEvents = [] }: P
           ) : (
             <div className="message-bubble">{content}</div>
           ))}
-        {images.length > 0 && (
-          <div className="message-images">
-            {images.map((url) => (
-              <img key={url} src={url} alt="" />
-            ))}
-          </div>
-        )}
+        {images.length > 0 && <AttachmentMedia refs={images} />}
       </div>
     );
   }
@@ -290,26 +403,14 @@ export function MessageBubble({ role, content, images = [], toolEvents = [] }: P
           ))}
         </div>
       )}
-      {role === "user" && images.length > 0 && (
-        <div className="message-images">
-          {images.map((url) => (
-            <img key={url} src={url} alt="" />
-          ))}
-        </div>
-      )}
+      {role === "user" && images.length > 0 && <AttachmentMedia refs={images} />}
       {content.trim() &&
         (role === "assistant" ? (
           <MarkdownBubble content={content} />
         ) : (
           <div className="message-bubble">{content}</div>
         ))}
-      {role !== "user" && images.length > 0 && (
-        <div className="message-images">
-          {images.map((url) => (
-            <img key={url} src={url} alt="" />
-          ))}
-        </div>
-      )}
+      {role !== "user" && images.length > 0 && <AttachmentMedia refs={images} />}
     </div>
   );
 }

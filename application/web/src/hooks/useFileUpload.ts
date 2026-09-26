@@ -161,6 +161,45 @@ export function useFileUpload({ disabled = false }: UseFileUploadOptions = {}) {
     [disabled],
   );
 
+  const loadWorkspaceFiles = useCallback(
+    async (files: File[]) => {
+      if (files.length === 0 || disabled || uploadingRef.current) return;
+      setUploading(true);
+      setUploadError(null);
+      try {
+        for (const file of files) {
+          const result = await fileUploadService.loadFile(file);
+          setLoadedFiles((prev) => {
+            const next = prev.filter((item) => item.path !== result.workspace_path);
+            return [
+              ...next,
+              {
+                path: result.workspace_path,
+                name: result.file_name,
+                size: file.size,
+              },
+            ];
+          });
+        }
+      } catch (err) {
+        console.error("Load files failed", err);
+        let detail = "파일 로드에 실패했습니다. 다시 시도해 주세요.";
+        if (err instanceof Error) {
+          const cause = (err as Error & { cause?: unknown }).cause;
+          if (cause instanceof Error && cause.message) {
+            detail = cause.message;
+          } else if (err.message && !err.message.startsWith("Load file failed")) {
+            detail = err.message;
+          }
+        }
+        setUploadError(detail);
+      } finally {
+        setUploading(false);
+      }
+    },
+    [disabled],
+  );
+
   const removeAttachment = useCallback((url: string) => {
     setAttachments((prev) => {
       const next: AttachedImage[] = [];
@@ -269,6 +308,7 @@ export function useFileUpload({ disabled = false }: UseFileUploadOptions = {}) {
     clearUploadError,
     uploadImageFiles,
     uploadRagFile,
+    loadWorkspaceFiles,
     removeAttachment,
     removeLoadedFile,
     attachExistingFile,

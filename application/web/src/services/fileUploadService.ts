@@ -20,6 +20,16 @@ export const fileUploadService = {
     }
   },
 
+  async loadFile(
+    file: File,
+  ): Promise<{ workspace_path: string; file_name: string }> {
+    try {
+      return await api.loadFile(file);
+    } catch (cause) {
+      throw toUploadError("Load file failed", cause);
+    }
+  },
+
   async uploadToRag(file: File): Promise<{ message: string }> {
     try {
       return await api.uploadToRag(file);
