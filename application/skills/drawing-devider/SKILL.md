@@ -1,34 +1,36 @@
 ---
 name: drawing-devider
 description: >-
-  CAD/DXF 도면을 분석 가능한 크기(기본 60×60 m 이내)로 분할하고 치수를 포함한
-  타일(PNG/DXF/JSON)과 작업 로그를 산출합니다. 도면 분할, drawing divider,
-  floor tile, extract_2d, 평면도 자르기 요청 시 사용합니다.
+  CAD/DXF 도면을 층별 floor_original DXF/PNG로 추출하고 구조를 분석합니다.
+  도면 추출, extract_2d, 층별 평면도, drawing divider, 평면도 전처리 요청 시 사용합니다.
+  (타일 parts 분할은 기본 워크플로에서 제외 — 필요 시 레거시 split 스크립트만 사용)
 ---
 
-# drawing-devider (도면 분할)
+# drawing-devider (층별 도면 추출)
 
-주어진 DXF/클린 도면을 **분석 → 구조 MD → 분할 계획 → (층별) 자르기 → 산출물 JSON/MD** 순으로 처리한다.
+주어진 DXF를 **층별 추출 → 구조 분석 → 산출물 JSON/MD** 순으로 처리한다.  
+고해상도 렌더로 **층 하나 = 이미지·DXF 하나**로 충분하므로, **parts 타일 분할은 기본 워크플로에서 하지 않는다.**
 
 ## When to Use
 
-- DXF/평면도/층별 도면을 **Vision·벽체 인식이 가능한 크기**로 자를 때
-- `extract_2d`, 도면 분할, tile, 30m 그리드 언급 시
-- 다층 도면에서 **층별 N개 타일 + 치수** 산출이 필요할 때
+- DXF/평면도를 **층 단위** `floor_original.dxf` / `.png`로 뽑을 때
+- `extract_2d`, 층별 평면도, 도면 전처리 언급 시
+- 다층 도면에서 **층당 1개 스냅샷**이 필요할 때
 
 ## Critical Rules
 
-1. **기존 폴더 게이트** — `$ARTIFACTS_DIR/<drawing_id>/`가 **이미 있으면** 분석·자르기를 **시작하지 않는다**. 경로·기존 산출물 요약을 보여 주고 **계속(덮어쓰기/이어하기) / 중단**을 사용자에게 물은 뒤, 허락이 있을 때만 진행한다.
-2. **먼저 구조 파악** — “파일 실측 요약” 형태로 분석한 뒤 MD로 저장한다. 분석 없이 자르지 않는다.
-3. **분할 계획 MD/JSON**을 구조 MD를 근거로 작성한다. 타일 한 변은 **60 m 이내** (기본 `max_tile_m=60`).
-4. **치수 필수** — 잘린 도면(PNG/DXF)에 전체·그리드 치수를 포함한다 (`lib_render.py`와 동일 계열).
-5. **층별 1개씩** — `extract_2d`·`split_floor`는 **한 번의 bash/도구 호출에 층 1개만** 실행한다. `for FLOOR in 6F 7F …` 일괄 루프, `--floor all`, 여러 층을 한 커맨드에 묶어 돌리는 것을 **금지**한다 (대용량 DXF에서 TimeoutExpired 발생). 한 층이 끝나면 결과를 보고한 뒤 다음 층으로 넘어간다.
-6. **층 게이트** — 다층이면 **파일럿 1개 층만** 자른 뒤 사용자 허락을 받고, 나머지 층도 **층당 1회씩** 진행한다.
+1. **기존 폴더 게이트** — `$ARTIFACTS_DIR/<drawing_id>/`가 **이미 있으면** 분석·추출을 **시작하지 않는다**. 경로·기존 산출물 요약을 보여 주고 **계속(덮어쓰기/이어하기) / 중단**을 사용자에게 물은 뒤, 허락이 있을 때만 진행한다.
+2. **먼저 구조 파악** — “파일 실측 요약” 형태로 분석한 뒤 MD로 저장한다. 분석 없이 다층 추출만 밀어붙이지 않는다.
+3. **층 단위만** — 기본 산출은 `floors/<F>/floor_original.dxf` (+ `.png`). `parts/`·`floor_parts_index.json`·`split_plan.*`를 **만들지 않는다**.
+4. **치수** — 층 PNG/DXF 미리보기에 전체·그리드 치수를 포함한다 (`lib_render.py`).
+5. **층별 1개씩** — `extract_2d`는 **한 번의 bash/도구 호출에 층 1개만** 실행한다. `for FLOOR in 6F 7F …` 일괄 루프, `--floor all`, 여러 층을 한 커맨드에 묶어 돌리는 것을 **금지**한다 (대용량 DXF에서 TimeoutExpired 발생). 한 층이 끝나면 결과를 보고한 뒤 다음 층으로 넘어간다.
+6. **층 게이트** — 다층이면 **파일럿 1개 층만** 추출한 뒤 사용자 허락을 받고, 나머지 층도 **층당 1회씩** 진행한다.
 7. **산출물 경로** — **사용자 artifacts** (`$ARTIFACTS_DIR/<drawing_id>/`) 아래에만 저장한다. (아래 [Artifacts](#artifacts-layout))
 8. **미리보기** — 층 시각 확인은 `floors/<F>/floor_original.png`만 사용. `floor_overview.*` / `floor_*_2d.png` / `floor_*_geom.json`을 **만들지 않는다**.
-9. **스크립트 사용** — 자르기는 스킬 `scripts/` 로만 수행한다. ad-hoc 일회성 코드로 대용량 DXF를 우회하지 않는다.
+9. **스크립트 사용** — 추출·분석은 스킬 `scripts/` 로만 수행한다. ad-hoc 일회성 코드로 대용량 DXF를 우회하지 않는다.
 10. **작업 로그** — 전체 작업 내용·파일 목록을 하나의 Markdown으로 남기고 사용자에게 전달한다.
 11. 응답은 **한국어**. 경로·JSON 키는 영문/숫자 유지.
+12. **타일 분할(레거시)** — 추후 다시 나눌 수 있으나 **현재 기본 경로가 아님**. 사용자가 명시할 때만 `plan_split.py` / `split_floor.py`를 사용한다.
 
 ## Script Location
 
@@ -87,11 +89,12 @@ ART="$ARTIFACTS_DIR/sk_yongin_jiwon"
 
 | 스크립트 | 용도 |
 | --- | --- |
-| `$SCRIPTS/analyze_drawing.py` | 구조 실측 → `structure.md` / `structure.json` |
-| `$SCRIPTS/plan_split.py` | 60×60 m 그리드 계획 → `split_plan.md` / `split_plan.json` |
-| `$SCRIPTS/split_floor.py` | 한 층 타일 자르기(+치수) → `floors/<F>/parts/` (기본: floor_original) |
 | `$SCRIPTS/extract_2d.py` | 원본 → `floors/<F>/floor_original.dxf` (+ `.png` 자동) |
-| `$SCRIPTS/lib_render.py` | 치수·고해상도 렌더 라이브러리 (`split_floor`가 import) |
+| `$SCRIPTS/analyze_drawing.py` | 구조 실측 → `structure.md` / `structure.json` |
+| `$SCRIPTS/lib_render.py` | 치수·고해상도 렌더 라이브러리 |
+| `$SCRIPTS/lib_split.py` | 공통 유틸 (primary 클러스터·bbox 등) |
+| `$SCRIPTS/plan_split.py` | **(레거시·선택)** 타일 격자 계획 — 기본 워크플로 제외 |
+| `$SCRIPTS/split_floor.py` | **(레거시·선택)** parts 자르기 — 기본 워크플로 제외 |
 
 ```bash
 # bootstrap 후
@@ -112,25 +115,18 @@ DXF 입력 (artifacts/ 또는 --dxf)
 ⓪ drawing_id 결정 → $ARTIFACTS_DIR/<drawing_id>/ 존재 여부 확인
   ↓ (이미 있으면 사용자에게 계속/중단 확인 — 허락 전 작업 금지)
   ↓
-① extract_2d.py → floors/<F>/floor_original.dxf (+ floor_original.png)
-     ※ floor_*_clean.dxf / floor_*_2d.png 생성 금지
+① extract_2d.py --floor <FIRST>
+     → floors/<F>/floor_original.dxf (+ floor_original.png)
+     ※ floor_*_clean.dxf / floor_*_2d.png / parts/ 생성 금지
      ※ PNG는 기본 생성 (`--no-png`로 생략)
   ↓
-② analyze_drawing.py  → structure.md / structure.json
+② 사용자 허락 요청 (나머지 층 진행 여부)
   ↓
-③ plan_split.py       → split_plan.md / split_plan.json  (타일 ≤ 60×60 m)
-  ↓
-④ 사용자에게 계획 요약 제시
-  ↓
-⑤ split_floor.py --floor <FIRST>
-     → parts는 **floor_original.dxf** 기준 (--source original)
-     → floor_overview.* 는 **생성·사용하지 않음** (레거시 있으면 삭제)
-  ↓
-⑥ 사용자 허락 요청 (나머지 층 진행 여부)
-  ↓
-⑦ 허락 시 다음 층만 extract(필요 시) → split  ← 층당 1회, 일괄 루프 금지
+③ 허락 시 다음 층만 extract  ← 층당 1회, 일괄 루프 금지
   ↓ (층마다 완료 보고 후 다음 층)
-⑧ work_log.md 작성·전달
+④ analyze_drawing.py  → structure.md / structure.json
+  ↓
+⑤ work_log.md 작성·전달
 ```
 
 ### ⓪ 기존 산출 폴더 확인 (필수)
@@ -155,43 +151,26 @@ fi
 
 규칙:
 
-- 사용자가 **계속**하기 전까지 `extract_2d` / `analyze` / `plan` / `split`을 **실행하지 않는다**.
+- 사용자가 **계속**하기 전까지 `extract_2d` / `analyze`를 **실행하지 않는다**.
 - **중단**이면 작업을 끝낸다. 폴더를 임의로 삭제하지 않는다.
 - **계속**이면 기존 파일을 덮어쓸 수 있음을 한 줄로 알리고 워크플로를 이어간다.
 - 폴더가 없으면 곧바로 ①부터 진행한다.
 
-### ① 구조 파악 (파일 실측 요약)
-
-원본 또는 `floor_original.dxf`를 분석한다. MD에는 최소 다음을 포함한다.
-
-| 항목 | 내용 |
-|------|------|
-| 파일 메타 | 경로, 크기, CAD 버전, 단위(mm) |
-| modelspace / 블록 | 엔티티 수, INSERT·층 블록 목록 |
-| 레이어 | 상위 레이어, 벽/가구 분리 가능 여부 |
-| 층 목록 | `XA-S-{N}F 평면` 등 |
-| 층별 대략 span | m 단위 폭×깊이 (가능하면) |
-| 이중 클러스터 | 좌우 어긋난 복사본 여부 (12F 사례) |
-| 권장 전처리 | `extract_2d.py --floor …` 등 |
-
-층별 `floor_original.dxf`가 없으면 **해당 층만** 추출한다 (`--floor`에 층 하나).
+### ① 층 추출 (파일럿 → 승인 → 나머지)
 
 ```bash
 # 위 Script Location bootstrap 후
-python3 "$SCRIPTS/analyze_drawing.py" \
-  --drawing-id <drawing_id> \
-  --out "$ART" \
-  --raw-dxf "$ARTIFACTS_DIR/<input>.dxf" \
-  --floor-dir "$ART/floors"
-```
-
-```bash
 python3 "$SCRIPTS/extract_2d.py" \
   --dxf "$ARTIFACTS_DIR/<input>.dxf" \
   --floor 12F \
   --out "$ARTIFACTS_DIR" \
   --drawing-id <drawing_id>
 ```
+
+성공 시 `floors/12F/floor_original.dxf` / `.png` / `_meta.json`이 생긴다.  
+**여기서 멈추고** 사용자에게 PNG·경로·파일 크기를 보여 준 뒤 나머지 층 진행 허락을 받는다.
+
+허락 후 나머지 층도 **한 층 = bash 1회**로만 진행한다.
 
 **금지 예** (대용량 DXF에서 `TimeoutExpired` 유발):
 
@@ -205,50 +184,43 @@ done
 python3 "$SCRIPTS/extract_2d.py" --dxf … --floor all …
 ```
 
-나머지 층이 필요하면 **층마다 별도 bash 호출**로 1개씩 돌리고, 완료·실패를 보고한 뒤 다음 층으로 간다.
+### ② 구조 파악 (파일 실측 요약)
 
-### ② 분할 계획
+원본 또는 `floor_original.dxf`를 분석한다. MD에는 최소 다음을 포함한다.
 
-`structure.json`의 층별 bbox(m)로 타일 수를 계산한다.
-
-\[
-n_x = \lceil W / (30 - 2\cdot overlap) \rceil,\quad
-n_y = \lceil H / (30 - 2\cdot overlap) \rceil,\quad
-N = n_x \times n_y
-\]
-
-- 기본 `max_tile_m=60`, `overlap_m=1` → 유효 step ≤ 58 m (겹침 포함 시에도 ≤ 60 m)
-- 장축만 나누는 strip 모드는 **한 변이 60 m를 넘으면 금지** → 반드시 2D 그리드
-- 계획 MD에 층별 `N`, `n_x`, `n_y`, 타일 ID 규칙(`R{r}C{c}`)을 명시
-
-### ③ 자르기 (층 1개 → 승인 → 나머지 층도 1개씩)
+| 항목 | 내용 |
+|------|------|
+| 파일 메타 | 경로, 크기, CAD 버전, 단위(mm) |
+| modelspace / 블록 | 엔티티 수, INSERT·층 블록 목록 |
+| 레이어 | 상위 레이어, 벽/가구 분리 가능 여부 |
+| 층 목록 | `XA-S-{N}F 평면` 등 |
+| 층별 대략 span | m 단위 폭×깊이 (가능하면) |
+| 이중 클러스터 | 좌우 어긋난 복사본 여부 (12F 사례) |
+| 권장 전처리 | `extract_2d.py --floor …` 등 |
 
 ```bash
-# bootstrap 후 (SCRIPTS / ART 필수)
-python3 "$SCRIPTS/split_floor.py" \
-  --artifacts "$ART" \
-  --floor 12F \
-  --source original \
-  --max-tile-m 60 --overlap-m 1 \
-  --dpi 300 --px-width 6000
+python3 "$SCRIPTS/analyze_drawing.py" \
+  --drawing-id <drawing_id> \
+  --out "$ART" \
+  --raw-dxf "$ARTIFACTS_DIR/<input>.dxf" \
+  --floor-dir "$ART/floors"
 ```
 
-성공 시 해당 층 `floors/12F/floor_parts_index.json`이 갱신된다.  
-**여기서 멈추고** 사용자에게 PNG 샘플·타일 수·경로를 보여 준 뒤 나머지 층 진행 허락을 받는다.
-
-허락 후 나머지 층도 **한 층 = bash 1회**로만 진행한다.
-
-1. (필요 시) `extract_2d.py --floor <NEXT>` 한 층만  
-2. 완료 보고 (`floor_original.dxf` 크기 등)  
-3. `split_floor.py --floor <NEXT>` 한 층만  
-4. 타일 수·경로 보고 → 다음 층  
-
-`for … in 6F 7F …` 로 extract/split을 한 번에 묶지 않는다.
-
-### ④ 작업 로그
+### ③ 작업 로그
 
 모든 단계가 끝나면(또는 1층만 끝난 중간 보고 시) `work_log.md`를 갱신한다.  
 사용자에게 **path + 핵심 표**로 전달한다.
+
+### (선택) 타일 분할 — 사용자가 명시한 경우만
+
+고해상도로도 층이 너무 크면 레거시 스크립트를 쓸 수 있다.
+
+```bash
+python3 "$SCRIPTS/plan_split.py" --artifacts "$ART" --max-tile-m 60 --overlap-m 1
+python3 "$SCRIPTS/split_floor.py" --artifacts "$ART" --floor 12F --source original
+```
+
+기본 워크플로·체크리스트에는 포함하지 않는다.
 
 ---
 
@@ -260,56 +232,21 @@ bash cwd가 이미 `artifacts/`이므로 상대경로 `<drawing_id>/…` 도 동
 ```text
 $ARTIFACTS_DIR/<drawing_id>/
 ├── structure.md / .json
-├── split_plan.md / .json
 ├── work_log.md
 └── floors/<FLOOR>/
-    ├── floor_original.dxf / .png / _meta.json   # 층 스냅샷 → parts 입력 · 미리보기
+    ├── floor_original.dxf / .png / _meta.json   # 층 스냅샷 · 미리보기 · 후속 스킬 입력
     ├── floor_wall_original.dxf / .png           # (walldetector) 층 전체 벽
-    ├── floor_meta.json
-    ├── floor_parts_index.json
-    └── parts/R0C0.png|.dxf|_meta.json|_geom.json …
+    └── floor_meta.json                          # (extract 시)
 ```
 
 | 산출 | 용도 |
 |------|------|
-| `floors/<F>/floor_original.dxf` (+ `.png`) | **원본에 가까운 층** (조경·가구·실명 라벨) → **parts 기준** · **미리보기** |
+| `floors/<F>/floor_original.dxf` (+ `.png`) | **원본에 가까운 층** (조경·가구·실명 라벨) → **공식 층 단위 입력** · **미리보기** |
+| `parts/` · `floor_parts_index.json` · `split_plan.*` | **기본 미생성** (레거시·선택) |
 | `floor_overview.*` | **제거됨** — 생성·사용 금지 |
 | `floor_*_clean.dxf` | **제거됨** — 생성·사용 금지 |
 
 `floor_*_2d.png` / `floor_*_geom.json`도 만들지 않는다.
-
-### `floor_parts_index.json` (층 단위)
-
-```json
-{
-  "floor": "12F",
-  "drawing_id": "sk_yongin_jiwon",
-  "max_tile_m": 60,
-  "overlap_m": 1,
-  "grid": { "nx": 8, "ny": 3, "tile_w_m": 18.91, "tile_h_m": 15.84 },
-  "source": {
-    "kind": "original",
-    "dxf": "…/floors/12F/floor_original.dxf",
-    "original_dxf": "…/floors/12F/floor_original.dxf"
-  },
-  "bbox_mm": { "xmin": 0, "ymin": 0, "xmax": 0, "ymax": 0 },
-  "parts": [
-    {
-      "id": "R0C0",
-      "row": 0,
-      "col": 0,
-      "bbox_mm": {},
-      "size_m": { "width": 18.91, "height": 15.84 },
-      "files": { "png": "…", "dxf": "…", "meta": "…", "geom": "…" },
-      "dimensions_overall": { "width_m": 18.91, "height_m": 15.84 }
-    }
-  ],
-  "status": "completed",
-  "approved_for_remaining_floors": false
-}
-```
-
-각 타일 `*_meta.json`에는 bbox(mm/m), 치수 요약, 렌더 설정, 상대 파일 경로를 넣는다.
 
 ---
 
@@ -346,28 +283,25 @@ $ARTIFACTS_DIR/<drawing_id>/
 ### work_log.md 골격
 
 ```markdown
-# 도면 분할 작업 로그 — <drawing_id>
+# 도면 추출 작업 로그 — <drawing_id>
 
 ## 목차
 - [요약](#요약)
 - [구조 분석](#구조-분석)
-- [분할 계획](#분할-계획)
 - [실행 결과](#실행-결과)
 - [파일 목록](#파일-목록)
 
 ## 요약
 - 상태: 1층 완료 / 전체 완료
-- 파일럿 층: 12F (N=… 타일)
+- 파일럿 층: 12F
+- 단위: 층당 floor_original (parts 없음)
 
 ## 구조 분석
 - structure.md 링크
 
-## 분할 계획
-- split_plan.md 링크, max_tile_m=60
-
 ## 실행 결과
-| 층 | 타일 수 | 상태 | index |
-|----|---------|------|-------|
+| 층 | floor_original | 상태 |
+|----|----------------|------|
 
 ## 파일 목록
 | 구분 | 경로 |
@@ -378,15 +312,13 @@ $ARTIFACTS_DIR/<drawing_id>/
 
 ## Decision Checklist
 
-작업 시작·자르기 전에 확인:
+작업 시작·추출 전에 확인:
 
 - [ ] `$ARTIFACTS_DIR/<drawing_id>/`가 이미 있으면 **계속/중단**을 사용자에게 물었는가 (허락 전 스크립트 미실행)
-- [ ] `structure.md`에 실측 요약이 있는가
-- [ ] 모든 타일 `width_m ≤ 30` and `height_m ≤ 30` 인가
-- [ ] 치수(`with-dims`)가 켜져 있는가
+- [ ] 산출이 `floors/<F>/floor_original.*` 층 단위인가 (`parts/` 기본 생성 안 함)
 - [ ] 산출 경로가 `$ARTIFACTS_DIR/<id>/` 인가
 - [ ] 첫 층만 돌렸고 사용자 허락을 기다리는가 (다층인 경우)
-- [ ] extract/split을 **층당 bash 1회**로만 돌리는가 (`for` 일괄·`--floor all` 없음)
+- [ ] extract를 **층당 bash 1회**로만 돌리는가 (`for` 일괄·`--floor all` 없음)
 - [ ] 미리보기로 `floor_*_2d.png` / `floor_overview.*`를 쓰지 않는가 (`floor_original.png`만)
 
 ---
@@ -396,12 +328,10 @@ $ARTIFACTS_DIR/<drawing_id>/
 | 증상 | 대응 |
 |------|------|
 | 동일 `drawing_id` 폴더 이미 존재 | 사용자에게 계속/중단 확인 — 허락 전 덮어쓰기 금지 |
-| `TimeoutExpired` (extract/split) | 여러 층 일괄 루프·`--floor all` 금지 → **층당 bash 1회**로 재시도 |
-| PNG에 도면이 좌·우 둘 | primary 클러스터(LINE 많은 쪽)만 bbox — `extract_2d`/`split_floor` 공통 |
-| 타일이 60 m 초과 | `plan_split` 재계산, strip 모드 금지 |
+| `TimeoutExpired` (extract) | 여러 층 일괄 루프·`--floor all` 금지 → **층당 bash 1회**로 재시도 |
+| PNG에 도면이 좌·우 둘 | primary 클러스터(LINE 많은 쪽)만 bbox — `extract_2d` 공통 |
 | 치수 없음 | `--with-dims`, PNG 오버레이 + DXF `DIMS` 레이어 |
-| 원본 277MB 로드 실패 | 층별 `floor_original.dxf`를 먼저 만든 뒤 split |
-| 가구로 벽 왜곡 | walldetector는 이중선 휴리스틱; original에도 가구 포함됨 |
+| 원본 277MB 로드 실패 | 층별 `floor_original.dxf`를 먼저 만든 뒤 후속 스킬 |
 | `floor_*_2d.png` / `floor_overview.*` | 생성 금지 산출물 — `floors/<F>/floor_original.png`만 확인 |
 | `/skills/...` 없음 · `WORKING_DIR=` 빈 값 | **env 없이** SKILL.md 옆 `scripts/` 절대경로를 `SCRIPTS`로 지정 (빈 `$WORKING_DIR` 연결 금지) |
 | `/sk_yongin_jiwon` Read-only | `ARTIFACTS_DIR` 미설정으로 루트에 mkdir 시도 — artifacts 절대경로 `export` 후 재시도 |
@@ -411,6 +341,6 @@ $ARTIFACTS_DIR/<drawing_id>/
 ## Related
 
 - `scripts/extract_2d.py` — `floor_original.dxf`
-- `scripts/lib_render.py` — 치수·고해상도 렌더 (`split_floor`가 재사용)
-- `scripts/split_floor.py` — parts(floor_original)
-- `drawing-walldetector` — 타일 DXF에서 벽 검출
+- `scripts/lib_render.py` — 치수·고해상도 렌더
+- `scripts/plan_split.py` / `split_floor.py` — 레거시 타일 분할 (선택)
+- `drawing-walldetector` — `floor_original.dxf`에서 층 전체 벽 검출

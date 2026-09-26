@@ -2271,7 +2271,7 @@ async def create_agent(
 
     app = langgraph_agent.buildChatAgentWithHistory(tools)
     agent_config = {
-        "recursion_limit": 100,
+        "recursion_limit": 500,
         "configurable": {
             "thread_id": thread_id,
             "tools": tools,

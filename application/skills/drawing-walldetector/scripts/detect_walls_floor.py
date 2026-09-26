@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""층 단위: 타일별 + 층 전체(floor_original) 벽 검출.
+"""층 단위: floor_original → floor_wall_original 벽 검출.
 
-층 전체 출력: floors/<F>/floor_wall_original.{dxf,png,meta.json}
-타일 출력:     floors/<F>/walls/R*C*_walls.*
-(구 floor_walls_overview / walls/floor_wall_original 은 더 이상 생성하지 않음)
+기본: floors/<F>/floor_wall_original.{dxf,png,_meta.json} 만 생성.
+타일(parts) 분할은 기본 워크플로에서 제외. 레거시 parts가 있고
+--with-tiles 를 주면 floors/<F>/walls/R*C*_walls.* 도 생성.
 
 Usage:
   python detect_walls_floor.py \\
@@ -111,21 +111,31 @@ def _detect_one(
     return meta
 
 
-def _resolve_original_dxf(floor_dir: Path, index: dict) -> Path | None:
-    """층 전체 벽 입력: floor_original.dxf (overview 아님)."""
-    src = (index.get("source") or {}).get("original_dxf") or (
-        index.get("source") or {}
-    ).get("dxf")
-    if src:
-        p = Path(src)
-        if p.is_file() and "original" in p.name:
-            return p
+def _resolve_original_dxf(floor_dir: Path, index: dict | None) -> Path | None:
+    """층 전체 벽 입력: floor_original.dxf."""
+    if index:
+        src = (index.get("source") or {}).get("original_dxf") or (
+            index.get("source") or {}
+        ).get("dxf")
+        if src:
+            p = Path(src)
+            if p.is_file() and "original" in p.name:
+                return p
     cand = floor_dir / "floor_original.dxf"
     return cand if cand.is_file() else None
 
 
+def _load_parts_index(floor_dir: Path) -> dict | None:
+    index_path = floor_dir / "floor_parts_index.json"
+    if not index_path.is_file():
+        return None
+    return json.loads(index_path.read_text(encoding="utf-8"))
+
+
 def main() -> int:
-    p = argparse.ArgumentParser(description="층 타일 + floor_original 층 전체 벽 검출")
+    p = argparse.ArgumentParser(
+        description="층 floor_original → floor_wall_original 벽 검출 (기본)"
+    )
     p.add_argument(
         "--artifacts",
         type=Path,
@@ -133,14 +143,23 @@ def main() -> int:
         help="$ARTIFACTS_DIR/<drawing_id> (예: …/artifacts/sk_yongin_jiwon)",
     )
     p.add_argument("--floor", required=True, help="예: 12F")
-    p.add_argument("--only", default=None, help="특정 타일만 (예: R0C0,R1C0)")
-    p.add_argument("--tiles-only", action="store_true", help="타일만 (층 전체 생략)")
+    p.add_argument(
+        "--with-tiles",
+        action="store_true",
+        help="레거시 parts 타일도 검출 (floor_parts_index.json 필요)",
+    )
+    p.add_argument("--only", default=None, help="특정 타일만 (--with-tiles 시, 예: R0C0,R1C0)")
+    p.add_argument(
+        "--tiles-only",
+        action="store_true",
+        help="레거시: 타일만 (층 전체 생략) — floor_parts_index 필요",
+    )
     p.add_argument(
         "--overview-only",
         action="store_true",
-        help="층 전체(floor_wall_original)만 — 타일 생략 (레거시 플래그명)",
+        help="(레거시) 층 전체만 — 기본 동작과 동일",
     )
-    p.add_argument("--original-only", action="store_true", help="층 전체만 (= --overview-only)")
+    p.add_argument("--original-only", action="store_true", help="층 전체만 (= 기본)")
     p.add_argument("--min-len-mm", type=float, default=500.0)
     p.add_argument("--thick-min-mm", type=float, default=50.0)
     p.add_argument("--thick-max-mm", type=float, default=420.0)
@@ -160,18 +179,34 @@ def main() -> int:
         help="floor_wall_original.png 가로 픽셀",
     )
     args = p.parse_args()
-    floor_only = args.overview_only or args.original_only
+
+    # 기본: 층만. --with-tiles → 층+타일. --tiles-only → 타일만.
+    # --overview-only / --original-only → 층만 (기본과 동일, 타일 끔).
+    if args.tiles_only:
+        do_tiles, run_floor = True, False
+    elif args.overview_only or args.original_only:
+        do_tiles, run_floor = False, True
+    elif args.with_tiles:
+        do_tiles, run_floor = True, True
+    else:
+        do_tiles, run_floor = False, True
+
     floor_px = (
         args.overview_px_width if args.overview_px_width is not None else args.floor_px_width
     )
 
     floor_dir = args.artifacts / "floors" / args.floor
-    index_path = floor_dir / "floor_parts_index.json"
-    if not index_path.is_file():
-        raise SystemExit(f"floor_parts_index.json 없음: {index_path}")
-    index = json.loads(index_path.read_text(encoding="utf-8"))
+    if not floor_dir.is_dir():
+        raise SystemExit(f"층 폴더 없음: {floor_dir}")
 
+    index = _load_parts_index(floor_dir)
     original_dxf = _resolve_original_dxf(floor_dir, index)
+    if run_floor and (not original_dxf or not original_dxf.is_file()):
+        raise SystemExit(
+            f"floor_original.dxf 없음: {floor_dir / 'floor_original.dxf'}\n"
+            f"  먼저 drawing-devider extract_2d.py --floor {args.floor}"
+        )
+
     original_png = floor_dir / "floor_original.png"
     original_meta_path = floor_dir / "floor_original_meta.json"
     original_meta = None
@@ -181,28 +216,28 @@ def main() -> int:
         except Exception:  # noqa: BLE001
             original_meta = None
 
+    drawing_id = (index or {}).get("drawing_id") or args.artifacts.name
+
     print(f"floor={args.floor}")
     print(f"floor_original_dxf={original_dxf}")
     print(f"floor_original_png={original_png if original_png.is_file() else None}")
-    print(f"parts={len(index.get('parts') or [])}")
+    mode = "floor+tiles" if (run_floor and do_tiles) else ("tiles" if do_tiles else "floor")
+    print(f"mode={mode}")
 
     only = None
     if args.only:
         only = {x.strip() for x in args.only.split(",") if x.strip()}
 
     walls_dir = floor_dir / "walls"
-    walls_dir.mkdir(parents=True, exist_ok=True)
+    results: list = []
 
-    sum_path = walls_dir / "walls_index.json"
-    prev_tiles = []
-    if sum_path.is_file() and floor_only:
-        try:
-            prev_tiles = json.loads(sum_path.read_text(encoding="utf-8")).get("tiles") or []
-        except Exception:  # noqa: BLE001
-            prev_tiles = []
-
-    results = []
-    if not floor_only:
+    if do_tiles:
+        if not index or not (index.get("parts") or []):
+            raise SystemExit(
+                f"타일 검출 요청(--with-tiles/--tiles-only)이지만 "
+                f"floor_parts_index.json / parts 없음: {floor_dir}"
+            )
+        walls_dir.mkdir(parents=True, exist_ok=True)
         for part in index.get("parts") or []:
             tid = part["id"]
             if only and tid not in only:
@@ -230,80 +265,70 @@ def main() -> int:
                     size_m=part.get("size_m"),
                 )
             )
-    else:
-        results = prev_tiles
 
     floor_original_walls_meta = None
-    if not args.tiles_only:
-        if not original_dxf or not original_dxf.is_file():
-            print("  WARN: floor_original.dxf 없음 — 층 전체 wall 생략", flush=True)
-        else:
-            bbox_mm = (original_meta or {}).get("bbox_mm") or index.get("bbox_mm")
-            size_m = (original_meta or {}).get("size_m") or {
-                "width": (index.get("grid") or {}).get("width_m"),
-                "height": (index.get("grid") or {}).get("height_m"),
-            }
-            # floor_original.png 과 동일 창·해상도 (render_floor_original_preview: 14000@300dpi + pad)
-            if args.overview_px_width is None and args.floor_px_width == 4000:
-                ps = (original_meta or {}).get("png_size") or {}
-                # meta png_size 는 패딩 포함 → 렌더 입력은 -200
-                if ps.get("width"):
-                    floor_px = max(int(ps["width"]) - 200, 1000)
-                else:
-                    floor_px = 14000
-            floor_dpi = args.dpi if args.dpi != 200 else 300
-            w_m = (size_m or {}).get("width")
-            h_m = (size_m or {}).get("height")
-            if w_m and h_m:
-                title = f"{args.floor} FLOOR WALL ORIGINAL  {float(w_m):.2f}×{float(h_m):.2f} m"
+    if run_floor:
+        assert original_dxf is not None
+        bbox_mm = (original_meta or {}).get("bbox_mm") or (index or {}).get("bbox_mm")
+        size_m = (original_meta or {}).get("size_m") or {
+            "width": ((index or {}).get("grid") or {}).get("width_m"),
+            "height": ((index or {}).get("grid") or {}).get("height_m"),
+        }
+        if args.overview_px_width is None and args.floor_px_width == 4000:
+            ps = (original_meta or {}).get("png_size") or {}
+            if ps.get("width"):
+                floor_px = max(int(ps["width"]) - 200, 1000)
             else:
-                title = f"{args.floor} FLOOR WALL ORIGINAL"
-            floor_original_walls_meta = _detect_one(
-                floor=args.floor,
-                tile_id="floor_original",
-                src=original_dxf,
-                walls_dir=floor_dir,  # floors/<F>/ (walls/ 아님)
-                min_len_mm=args.min_len_mm,
-                thick_min_mm=args.thick_min_mm,
-                thick_max_mm=args.thick_max_mm,
-                no_png=args.no_png,
-                dpi=floor_dpi,
-                px_width=floor_px,
-                title=title,
-                out_stem="floor_wall_original",
-                bbox_mm=bbox_mm,
-                size_m=size_m,
-            )
-            print("  → floors/<F>/floor_wall_original.dxf (층 전체 wall, source=floor_original)")
-            for legacy_dir, names in (
-                (
-                    walls_dir,
-                    (
-                        "floor_walls_overview.dxf",
-                        "floor_walls_overview.png",
-                        "floor_walls_overview_meta.json",
-                        "floor_wall_original.dxf",
-                        "floor_wall_original.png",
-                        "floor_wall_original_meta.json",
-                    ),
-                ),
-                (
-                    floor_dir,
-                    (
-                        "floor_walls_overview.dxf",
-                        "floor_walls_overview.png",
-                        "floor_walls_overview_meta.json",
-                    ),
-                ),
+                floor_px = 14000
+        floor_dpi = args.dpi if args.dpi != 200 else 300
+        w_m = (size_m or {}).get("width")
+        h_m = (size_m or {}).get("height")
+        if w_m and h_m:
+            title = f"{args.floor} FLOOR WALL ORIGINAL  {float(w_m):.2f}×{float(h_m):.2f} m"
+        else:
+            title = f"{args.floor} FLOOR WALL ORIGINAL"
+        floor_original_walls_meta = _detect_one(
+            floor=args.floor,
+            tile_id="floor_original",
+            src=original_dxf,
+            walls_dir=floor_dir,
+            min_len_mm=args.min_len_mm,
+            thick_min_mm=args.thick_min_mm,
+            thick_max_mm=args.thick_max_mm,
+            no_png=args.no_png,
+            dpi=floor_dpi,
+            px_width=floor_px,
+            title=title,
+            out_stem="floor_wall_original",
+            bbox_mm=bbox_mm,
+            size_m=size_m,
+        )
+        print("  → floors/<F>/floor_wall_original.dxf (층 전체 wall, source=floor_original)")
+        if walls_dir.is_dir():
+            for name in (
+                "floor_walls_overview.dxf",
+                "floor_walls_overview.png",
+                "floor_walls_overview_meta.json",
+                "floor_wall_original.dxf",
+                "floor_wall_original.png",
+                "floor_wall_original_meta.json",
             ):
-                for name in names:
-                    lp = legacy_dir / name
-                    if lp.is_file():
-                        lp.unlink()
-                        print(f"  removed legacy {lp.relative_to(floor_dir.parent.parent)}")
+                lp = walls_dir / name
+                if lp.is_file():
+                    lp.unlink()
+                    print(f"  removed legacy {lp}")
+        for name in (
+            "floor_walls_overview.dxf",
+            "floor_walls_overview.png",
+            "floor_walls_overview_meta.json",
+        ):
+            lp = floor_dir / name
+            if lp.is_file():
+                lp.unlink()
+                print(f"  removed legacy {lp}")
 
     summary = {
-        "drawing_id": index.get("drawing_id"),
+        "drawing_id": drawing_id,
         "floor": args.floor,
         "floor_original_png": str(original_png) if original_png.is_file() else None,
         "floor_wall_original": {
@@ -323,6 +348,11 @@ def main() -> int:
         "tiles": results,
         "status": "completed",
     }
+    if results:
+        walls_dir.mkdir(parents=True, exist_ok=True)
+        sum_path = walls_dir / "walls_index.json"
+    else:
+        sum_path = floor_dir / "floor_wall_index.json"
     sum_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
     print(
         f"\n→ {sum_path}  tiles={len(results)}  "

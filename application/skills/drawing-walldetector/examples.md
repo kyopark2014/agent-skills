@@ -1,6 +1,6 @@
 # drawing-walldetector 사용 예
 
-## 0) 경로·기존 walls 확인 (항상 먼저)
+## 0) 경로·기존 산출 확인 (항상 먼저)
 
 ```bash
 SCRIPTS="$WORKING_DIR/skills/drawing-walldetector/scripts"
@@ -8,11 +8,11 @@ ART="$ARTIFACTS_DIR/sk_yongin_jiwon"
 FLOOR=12F
 
 # devider 산출 확인
-ls "$ART/floors/$FLOOR/floor_original.png" "$ART/floors/$FLOOR/floor_parts_index.json"
+ls "$ART/floors/$FLOOR/floor_original.dxf" "$ART/floors/$FLOOR/floor_original.png"
 
-if [ -d "$ART/floors/$FLOOR/walls" ]; then
-  echo "EXISTING: $ART/floors/$FLOOR/walls — 사용자에게 계속/중단 확인 후 진행"
-  ls "$ART/floors/$FLOOR/walls" | head -20
+if [ -f "$ART/floors/$FLOOR/floor_wall_original.dxf" ]; then
+  echo "EXISTING: floor_wall_original.* — 사용자에게 계속/중단 확인 후 진행"
+  ls "$ART/floors/$FLOOR"/floor_wall_original.*
   # STOP: 허락 전 detect 금지
 fi
 ```
@@ -24,22 +24,15 @@ SCRIPTS=/Users/ksdyb/Documents/src/agent-skills/application/skills/drawing-walld
 ART=/path/to/user/artifacts/sk_yongin_jiwon
 ```
 
-## 1) 파일럿 1층
+## 1) 파일럿 1층 (층 전체)
 
 ```bash
-# floor_original로 구조 확인 후
 python3 "$SCRIPTS/detect_walls_floor.py" \
   --artifacts "$ART" \
   --floor 12F
-
-# 샘플 타일만
-python3 "$SCRIPTS/detect_walls_floor.py" \
-  --artifacts "$ART" \
-  --floor 12F \
-  --only R0C0,R1C0
 ```
 
-미리보기: `$ART/floors/12F/floor_wall_original.png`, `$ART/floors/12F/walls/R0C0_walls.png`
+미리보기: `$ART/floors/12F/floor_wall_original.png`
 
 ## 2) 컨펌 후 다음 층 (층당 bash 1회)
 
@@ -51,9 +44,14 @@ python3 "$SCRIPTS/detect_walls_floor.py" --artifacts "$ART" --floor 6F
 # 보고 후 7F는 별도 bash
 ```
 
-## 3) 단일 타일
+## 3) (선택) 레거시 타일 — parts 가 있고 사용자가 명시한 경우만
 
 ```bash
+python3 "$SCRIPTS/detect_walls_floor.py" \
+  --artifacts "$ART" \
+  --floor 12F \
+  --with-tiles
+
 python3 "$SCRIPTS/detect_walls_tile.py" \
   --dxf "$ART/floors/12F/parts/R0C0.dxf" \
   --out-dir "$ART/floors/12F/walls" \

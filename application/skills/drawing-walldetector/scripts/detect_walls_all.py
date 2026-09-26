@@ -23,7 +23,7 @@ def list_floors(artifacts: Path) -> list[str]:
         return []
     out: list[str] = []
     for p in floors_dir.iterdir():
-        if p.is_dir() and (p / "floor_parts_index.json").is_file():
+        if p.is_dir() and (p / "floor_original.dxf").is_file():
             out.append(p.name)
     def key(f: str) -> int:
         n = f[:-1] if f.endswith("F") and f[:-1].isdigit() else "0"
@@ -49,7 +49,12 @@ def main() -> int:
     p.add_argument("--thick-min-mm", type=float, default=50.0)
     p.add_argument("--thick-max-mm", type=float, default=420.0)
     p.add_argument("--no-png", action="store_true")
-    p.add_argument("--overview-only", action="store_true", help="층 전체 wall만 (타일 생략)")
+    p.add_argument(
+        "--with-tiles",
+        action="store_true",
+        help="레거시 parts 타일도 검출",
+    )
+    p.add_argument("--overview-only", action="store_true", help="(레거시) 층 전체만 — 기본과 동일")
     p.add_argument("--dpi", type=int, default=200)
     p.add_argument("--px-width", type=int, default=2400)
     args = p.parse_args()
@@ -87,12 +92,17 @@ def main() -> int:
         ]
         if args.no_png:
             cmd.append("--no-png")
-        if args.overview_only:
+        if args.with_tiles:
+            cmd.append("--with-tiles")
+        elif args.overview_only:
             cmd.append("--overview-only")
         r = subprocess.run(cmd, check=False)
         if r.returncode != 0:
             raise SystemExit(f"실패: {fl} exit={r.returncode}")
-        idx = args.artifacts / "floors" / fl / "walls" / "walls_index.json"
+        floor_dir = args.artifacts / "floors" / fl
+        idx = floor_dir / "walls" / "walls_index.json"
+        if not idx.is_file():
+            idx = floor_dir / "floor_wall_index.json"
         if idx.is_file():
             data = json.loads(idx.read_text(encoding="utf-8"))
             summary["drawing_id"] = data.get("drawing_id") or summary["drawing_id"]

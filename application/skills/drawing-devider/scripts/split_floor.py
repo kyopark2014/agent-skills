@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
-"""한 층을 60×60 m 이하 타일로 자르고 치수를 넣어 저장.
+"""(레거시·선택) 한 층을 60×60 m 이하 타일로 자르고 치수를 넣어 저장.
 
-parts 기본 입력: floors/<F>/floor_original.dxf (원본 층 스냅샷)
+기본 워크플로는 층 단위 floor_original 만 사용한다.
+사용자가 타일 분할을 명시한 경우에만 이 스크립트를 실행한다.
+
+parts 입력: floors/<F>/floor_original.dxf
 층 미리보기는 floor_original.* 만 사용 (floor_overview.* 생성·사용 안 함).
 """
 

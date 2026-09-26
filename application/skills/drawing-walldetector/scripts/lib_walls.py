@@ -86,6 +86,7 @@ def is_non_wall_closed_box(e: DXFEntity, *, max_mm: float = 3500.0) -> bool:
     지원동 등에서 책상·캐비닛·배식대가 이중 사각(50–420 mm)으로 그려져
     벽과 동일 패턴이 되므로, max 변 ≤ max_mm 인 닫힌 박스는 통째로 제외.
     (실제 벽은 보통 긴 LINE/대형 폴리라인으로 그려짐)
+    ※ H-Beam 기둥(중첩 정사각 ≤1.2 m)은 classify 에서 별도 WALL 처리.
     """
     if e.dxftype() != "LWPOLYLINE" or not e.closed:
         return False
@@ -101,6 +102,63 @@ def is_non_wall_closed_box(e: DXFEntity, *, max_mm: float = 3500.0) -> bool:
     if max(w, h) <= max_mm and min(w, h) >= 150:
         return True
     return False
+
+
+def _square_metrics(e: DXFEntity) -> tuple[float, float, float, float] | None:
+    """닫힌 대략 정사각이면 (cx, cy, w, h), 아니면 None."""
+    if e.dxftype() != "LWPOLYLINE":
+        return None
+    pts = [(float(p[0]), float(p[1])) for p in e.get_points("xy")]
+    if len(pts) < 4:
+        return None
+    closed = bool(e.closed) or (
+        math.hypot(pts[0][0] - pts[-1][0], pts[0][1] - pts[-1][1]) < 50.0
+    )
+    if not closed:
+        return None
+    xs = [p[0] for p in pts]
+    ys = [p[1] for p in pts]
+    w = max(xs) - min(xs)
+    h = max(ys) - min(ys)
+    if not (150.0 <= w <= 1200.0 and 150.0 <= h <= 1200.0):
+        return None
+    if abs(w - h) > max(w, h) * 0.35:
+        return None
+    return ((min(xs) + max(xs)) * 0.5, (min(ys) + max(ys)) * 0.5, w, h)
+
+
+def find_hbeam_column_idxs(entities: list[DXFEntity]) -> set[int]:
+    """H-Beam 기둥 엔티티 인덱스 — 동심 중첩 정사각."""
+    squares: list[tuple[int, float, float, float, float]] = []
+    for ei, e in enumerate(entities):
+        m = _square_metrics(e)
+        if not m:
+            continue
+        cx, cy, w, h = m
+        squares.append((ei, cx, cy, w, h))
+    by_cell: dict[tuple[int, int], list[tuple[int, float, float, float, float]]] = {}
+    for item in squares:
+        key = (int(round(item[1] / 50.0) * 50), int(round(item[2] / 50.0) * 50))
+        by_cell.setdefault(key, []).append(item)
+    out: set[int] = set()
+    for items in by_cell.values():
+        if len(items) < 2:
+            continue
+        items = sorted(items, key=lambda t: max(t[3], t[4]))
+        for i, a in enumerate(items):
+            for b in items[i + 1 :]:
+                if abs(a[1] - b[1]) > 100.0 or abs(a[2] - b[2]) > 100.0:
+                    continue
+                inner = max(a[3], a[4])
+                outer = max(b[3], b[4])
+                if outer < inner * 1.05 or outer > inner * 1.55:
+                    continue
+                gap = (outer - inner) * 0.5
+                if gap < 20.0 or gap > 250.0:
+                    continue
+                out.add(a[0])
+                out.add(b[0])
+    return out
 
 
 def is_hatch_or_landscape_polyline(e: DXFEntity) -> bool:
@@ -223,7 +281,8 @@ def classify_entities(
 ) -> dict[str, Any]:
     """벽 분류.
 
-    - 닫힌 박스 ≤ furniture_box_max_mm → 기둥/가구로 제외
+    - 닫힌 박스 ≤ furniture_box_max_mm → 가구로 제외
+      ※ 단 H-Beam 중첩 정사각 기둥은 WALL
     - 짧은 다변 폴리라인 → 조경/해칭 제외
     - 폴리라인은 벽 비율 ≥ entity_wall_ratio 일 때만 통째로 WALL
       (미만이면 세그먼트만 wall_segs 로 빨강)
@@ -235,11 +294,15 @@ def classify_entities(
         thick_min_mm=thick_min_mm,
         thick_max_mm=thick_max_mm,
     )
-    wall_entity_idxs: set[int] = set()
+    hbeam_idxs = find_hbeam_column_idxs(entities)
+    wall_entity_idxs: set[int] = set(hbeam_idxs)
     skip_idxs: set[int] = set()
     n_furniture = 0
     n_hatch = 0
+    n_hbeam = len(hbeam_idxs)
     for ei, e in enumerate(entities):
+        if ei in hbeam_idxs:
+            continue  # already WALL
         if is_non_wall_closed_box(e, max_mm=furniture_box_max_mm):
             skip_idxs.add(ei)
             n_furniture += 1
@@ -274,6 +337,7 @@ def classify_entities(
         "skip_column_idxs": sorted(skip_idxs),
         "n_furniture_skipped": n_furniture,
         "n_hatch_skipped": n_hatch,
+        "n_hbeam_columns": n_hbeam,
         "entity_wall_ratio": entity_wall_ratio,
         "furniture_box_max_mm": furniture_box_max_mm,
     }

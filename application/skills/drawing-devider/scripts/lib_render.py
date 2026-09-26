@@ -2,8 +2,8 @@
 """
 DXF 치수·고해상도 렌더 라이브러리 (+ 선택적 CLI).
 
-`split_floor.py`가 아래를 import 한다:
-  · build_dim_plan / render_hires_png / write_clean_dxf
+`extract_2d.py` / (레거시) `split_floor.py`가 아래를 import 한다:
+  · build_dim_plan / render_hires_png / write_clean_dxf / render_floor_original_preview
 
 CLI는 클린 DXF(또는 원본)에서 bbox 크롭·치수·고해상도 PNG를 뽑을 때 사용.
 층은 `--floor`로 지정 (특정 층 전용 아님).

@@ -7,23 +7,22 @@ bash/`execute_code` cwd는 사용자 `artifacts/`이며, 환경변수 `$ARTIFACT
 ```text
 $ARTIFACTS_DIR/<drawing_id>/
   floors/<F>/
-    floor_original.dxf / .png / floor_parts_index.json / parts/   # drawing-devider
-    floor_wall_original.dxf / .png / _meta.json              # 층 전체 wall (floor_original 기준)
-    walls/                                                   # drawing-walldetector 타일
-      walls_index.json
-      R0C0_walls.dxf / .png / _meta.json
-  walls_all_index.json                                     # 선택(다층 요약)
+    floor_original.dxf / .png                         # drawing-devider
+    floor_wall_original.dxf / .png / _meta.json       # 층 전체 wall (기본)
+    floor_wall_index.json                             # 층 요약
+  walls_all_index.json                                # 선택(다층 요약)
 ```
 
-- `floor_walls_overview.*` / `walls/floor_wall_original.*` 는 **생성·사용하지 않음** → `floors/<F>/floor_wall_original.*` 사용.
+- `floor_walls_overview.*` / `walls/floor_wall_original.*` 는 **생성·사용하지 않음**.
+- `parts/` · `walls/R*C*_walls.*` 는 **기본 미생성** (`--with-tiles` 레거시만).
 
 - 스크립트 호출: `$WORKING_DIR/skills/drawing-walldetector/scripts/...`
 - 상대 `skills/`·`scripts/`·구경로 `cde-pilot/...` **금지**
-- 로컬 개발 시에도 `cde-drawing/out/`가 아니라 **사용자 artifacts**를 쓴다.
+- 로컬 개발 시에도 **사용자 artifacts**를 쓴다.
 
-## 기존 walls 게이트
+## 기존 산출 게이트
 
-`floors/<F>/walls/`가 이미 있으면:
+`floors/<F>/floor_wall_original.*`가 이미 있으면:
 
 1. 경로·기존 파일 요약을 사용자에게 보여 준다
 2. **계속 / 중단**을 묻는다
@@ -67,7 +66,7 @@ $ARTIFACTS_DIR/<drawing_id>/
 
 | 단계 | 스킬 | 산출 |
 |------|------|------|
-| 자르기 | `drawing-devider` | `$ARTIFACTS_DIR/<id>/floors/<F>/parts/R*C*.dxf` |
-| 벽 | `drawing-walldetector` | `$ARTIFACTS_DIR/<id>/floors/<F>/walls/R*C*_walls.dxf` |
+| 층 추출 | `drawing-devider` | `$ARTIFACTS_DIR/<id>/floors/<F>/floor_original.dxf` |
+| 벽 | `drawing-walldetector` | `$ARTIFACTS_DIR/<id>/floors/<F>/floor_wall_original.dxf` |
 
-타일 bbox·ID는 `floor_parts_index.json`을 그대로 따른다.
+타일 `parts/` 분할은 기본 파이프라인에서 쓰지 않는다.

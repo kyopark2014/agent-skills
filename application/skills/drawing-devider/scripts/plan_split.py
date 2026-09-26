@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""structure.json → 60×60 m 분할 계획 (split_plan.md / .json)."""
+"""(레거시·선택) structure.json → 60×60 m 분할 계획 (split_plan.md / .json).
+
+기본 워크플로는 층 단위 floor_original 만 사용한다.
+사용자가 타일 분할을 명시한 경우에만 이 스크립트를 실행한다.
+"""
 
 from __future__ import annotations
 

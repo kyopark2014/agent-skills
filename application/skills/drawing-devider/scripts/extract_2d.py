@@ -523,7 +523,7 @@ def extract_floor(
 
     - clean: 평면/코어/기둥, 가구 제외, LINE primary
     - original: +조경 등 extra, 가구 유지.
-      기존 plan/original이 있으면 그 좌표계로 맞춘다 (parts 타일 정합).
+      기존 plan/original이 있으면 그 좌표계로 맞춘다.
     """
     if variant not in {"clean", "original"}:
         raise ValueError(f"variant 오류: {variant!r}")
