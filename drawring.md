@@ -263,7 +263,7 @@ python3 "$SCRIPTS/correct_walls_floor.py" --artifacts "$ART" --floor 12F
 - **복도 양측 장축선은 기본적으로 벽** — demote 금지, 회색이면 promote
 - **복도 인접 벽의 문 개구는 양옆(좌·우) 모두 벽** — 한쪽만 빨강이면 반대쪽 promote
 - **계단실(UP/DN)은 문 제외 외곽이 벽** — 트레드·중심 난간은 비벽, 외곽 이중선은 promote·protect
-- **엘리베이터 입구 잼·뱅크 주위는 벽** — 로비 향 문면 잼, 전고 문/후면/중앙은 비벽
+- **엘리베이터 입구 잼·문 어깨(꺾임)·뱅크 주위는 벽** — 로비 향 문면 잼·복도에서 꺾이는 짧은 리턴, 전고 문/후면/중앙은 비벽
 - **H-Beam 기둥(정사각+`_`)은 벽** — 심볼만 WALL. 외부 연결·직사각 슬리브는 승격하지 않음. 밀집 격자는 제외
 - **연속된 동일 방 열**은 벽 처리가 같아야 함 — 한 칸만 회색이면 promote
 - **강당·오픈홀 중앙에는 벽이 없음** — 객석 통로·보이드(X)·「강당」라벨을 관통하는 장축은 demote
@@ -316,9 +316,9 @@ walldetector 휴리스틱 + Vision bbox가 겹치면 “구조적으로 이상�
 
 | | 내용 |
 |--|------|
-| **증상** | 「중강당」등 오픈홀 중앙 통로·보이드(X)를 세로/가로 빨간 WALL이 관통 |
-| **원인** | walldetector가 긴 단일선을 벽으로 잡고, `protect_corridor`가 길이≥6 m라 demote 보호. corridor/collinear promote가 홀 내부 BASE도 승격 |
-| **대응** | (1) TEXT「강당」라벨로 홀 bbox 추정 (2) `demote_open_hall_center_walls` — 가장자리 제외 내부 장축 demote, protect보다 우선 (3) `filter_promote_away_from_open_halls` — 홀 내부 promote 차단 (4) AHU·조정실 등 설비 라벨은 제외 |
+| **증상** | 「중강당」·「소강당」등 오픈홀 중앙 통로·객석열을 세로/가로 빨간 WALL이 관통 |
+| **원인** | walldetector가 긴 단일선(객석 단·통로)을 벽으로 잡고, `protect_corridor`가 길이≥6 m라 demote 보호. corridor/collinear promote가 홀 내부 BASE도 승격 |
+| **대응** | (1) TEXT「강당」라벨로 홀 bbox 추정 (2) `demote_open_hall_center_walls` — 가장자리 제외 내부 장축(V 통로·H 객석열) demote, protect보다 우선 (3) `filter_promote_away_from_open_halls` — 홀 내부 promote 차단 (4) AHU·조정실 등 설비 라벨은 제외 |
 
 #### 5) 계단실 외곽이 회색으로 남음
 
@@ -332,9 +332,9 @@ walldetector 휴리스틱 + Vision bbox가 겹치면 “구조적으로 이상�
 
 | | 내용 |
 |--|------|
-| **증상** | 로비를 향한 문 개구 위·아래 짧은 수직(화살표)이 회색 |
-| **원인** | 문 방향을 뱅크 바깥/중앙으로 오인하거나 모서리·외곽만 승격 |
-| **대응** | (1) 로비 간격(5–9.5 m) 열 쌍으로 문 방향 결정 (2) `door_jamb` 짧은 수직 promote (3) 주위 외곽 유지, 전고 문/후면/중앙 demote |
+| **증상** | 로비를 향한 문 개구 위·아래 짧은 수직(화살표)·직각 꺾임(어깨)이 회색 |
+| **원인** | 문 방향을 뱅크 바깥/중앙으로 오인하거나 모서리·외곽만 승격; `iter_axis_segs` 기본 500 mm에 짧은 리턴(≈100–250 mm)이 잘림 |
+| **대응** | (1) 로비 간격(5–9.5 m) 열 쌍으로 문 방향 결정 (2) `door_jamb` + `door_return` + `corridor_turn` promote (3) `apply_corrections`에서 `min_len_mm=70` (4) 주위 외곽 유지, 전고 문/후면/중앙 demote |
 
 #### 7) H-Beam 기둥이 회색이거나, 설비 격자가 빨강
 
@@ -342,7 +342,7 @@ walldetector 휴리스틱 + Vision bbox가 겹치면 “구조적으로 이상�
 |--|------|
 | **증상** | 진짜 기둥이 회색이거나, 작은 정사각 밀집 격자가 WALL(빨강) |
 | **원인** | `_` 없는 사각 오인; 외부 연결선까지 승격하면 가구 이중선이 WALL 됨 |
-| **대응** | (1) 정사각+`_` 심볼만 `promote_hbeam_columns` (2) 외부 연결 승격 없음 (3) 소형 밀집 제외 (4) 가구 demote에서 기둥 exclude |
+| **대응** | (1) 정사각+`_` 심볼만 `promote_hbeam_columns` (2) 외부 연결 승격 없음 (3) 소형 밀집 제외 (4) 가구 demote에서 기둥 exclude (5) `demote_line_furniture_boxes` — LINE 소파·테이블 직사각은 protect보다 우선 demote (6) `demote_fitness_equipment` — 「피트니스」라벨 주변 웨이트/짧은 BASE 밀집 셀의 짧은 WALL demote |
 
 #### 처리 순서 (현재 `apply_corrections`)
 

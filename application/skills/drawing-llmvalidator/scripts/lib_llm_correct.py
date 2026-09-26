@@ -446,14 +446,17 @@ def demote_closed_furniture_boxes(
     min_span_mm: float = 400.0,
     exclude_ids: set[int] | None = None,
 ) -> set[int]:
-    """닫힌 소·중형 WALL 폴리라인(책상·캐비닛·랙 윤곽) demote.
+    """닫힌 소·중형 폴리라인(책상·캐비닛·랙 윤곽) 및 일치 WALL LINE demote.
 
     H-Beam 기둥(중첩 사각)은 exclude_ids 로 제외한다.
+    BASE 닫힌 가구 윤곽과 겹치는 WALL LINE(소파 장변 잔여)도 제거.
     """
     exclude_ids = exclude_ids or set()
     result: set[int] = set()
+    furniture_edges: list[tuple[bool, float, float, float]] = []
+    # (is_h, ortho, along0, along1)
     for e in msp:
-        if e.dxf.layer != WALL_LAYER or e.dxftype() != "LWPOLYLINE":
+        if e.dxftype() != "LWPOLYLINE":
             continue
         if id(e) in exclude_ids:
             continue
@@ -466,11 +469,303 @@ def demote_closed_furniture_boxes(
         ys = [p[1] for p in pts]
         w = max(xs) - min(xs)
         h = max(ys) - min(ys)
-        if min(w, h) < min_span_mm:
+        if min(w, h) < 150.0:
             continue
-        if max(w, h) <= max_span_mm:
+        if max(w, h) > max_span_mm:
+            continue
+        if e.dxf.layer == WALL_LAYER and min(w, h) >= min_span_mm:
             result.add(id(e))
+        # 가늘고 긴 가구(소파) 윤곽 → 장변 좌표 기록
+        if max(w, h) < 1200.0 or max(w, h) / max(min(w, h), 1.0) < 1.6:
+            continue
+        x0, x1, y0, y1 = min(xs), max(xs), min(ys), max(ys)
+        if w >= h:
+            furniture_edges.append((True, y0, x0, x1))
+            furniture_edges.append((True, y1, x0, x1))
+        else:
+            furniture_edges.append((False, x0, y0, y1))
+            furniture_edges.append((False, x1, y0, y1))
+
+    for e in msp:
+        if e.dxf.layer != WALL_LAYER or e.dxftype() != "LINE":
+            continue
+        if id(e) in exclude_ids:
+            continue
+        try:
+            x0, y0 = float(e.dxf.start.x), float(e.dxf.start.y)
+            x1, y1 = float(e.dxf.end.x), float(e.dxf.end.y)
+        except Exception:  # noqa: BLE001
+            continue
+        length = math.hypot(x1 - x0, y1 - y0)
+        if length < 1200.0:
+            continue
+        dx, dy = abs(x1 - x0), abs(y1 - y0)
+        is_h = dy <= max(20.0, 0.15 * length)
+        is_v = dx <= max(20.0, 0.15 * length)
+        if not (is_h or is_v):
+            continue
+        if is_h:
+            ortho = (y0 + y1) * 0.5
+            a0, a1 = min(x0, x1), max(x0, x1)
+        else:
+            ortho = (x0 + x1) * 0.5
+            a0, a1 = min(y0, y1), max(y0, y1)
+        for eh, eo, ea0, ea1 in furniture_edges:
+            if eh != is_h:
+                continue
+            if abs(ortho - eo) > 120.0:
+                continue
+            ov = min(a1, ea1) - max(a0, ea0)
+            if ov >= length * 0.7:
+                result.add(id(e))
+                break
     return result
+
+def demote_line_furniture_boxes(
+    segs: list[AxisSeg],
+    *,
+    exclude_ids: set[int] | None = None,
+    long_min_mm: float = 1200.0,
+    long_max_mm: float = 3800.0,
+    short_min_mm: float = 450.0,
+    short_max_mm: float = 1400.0,
+    aspect_min: float = 1.6,
+    along_tol_mm: float = 150.0,
+    corner_tol_mm: float = 180.0,
+) -> set[int]:
+    """LINE으로 이뤄진 닫힌 직사각 가구(소파·테이블) WALL demote.
+
+    walldetector가 소파 이중선(≈3 m × 0.5–1.0 m)을 WALL로 올린 경우,
+    protect_corridor(≥2.5 m + 평행쌍)에 걸려 기존 demote가 막힌다.
+    장변·단변이 가구 크기이고 네 모서리가 닫히면 구조 벽이 아니다.
+    단변 간격 < 450 mm 은 벽두께 이중선이므로 제외.
+    """
+    exclude_ids = exclude_ids or set()
+    demote: set[int] = set()
+
+    def _axis_furniture(
+        long_segs: list[AxisSeg],
+        short_segs: list[AxisSeg],
+    ) -> None:
+        groups: dict[tuple[int, int], list[AxisSeg]] = defaultdict(list)
+        for s in long_segs:
+            if not (long_min_mm <= s.length <= long_max_mm):
+                continue
+            key = (
+                int(round(s.along0 / 50.0) * 50),
+                int(round(s.along1 / 50.0) * 50),
+            )
+            groups[key].append(s)
+        for group in groups.values():
+            group = sorted(group, key=lambda s: s.ortho)
+            n = len(group)
+            for i in range(n):
+                a = group[i]
+                for j in range(i + 1, n):
+                    b = group[j]
+                    gap = b.ortho - a.ortho
+                    if gap < short_min_mm:
+                        continue
+                    if gap > short_max_mm:
+                        break
+                    if a.length / max(gap, 1.0) < aspect_min:
+                        continue
+                    # 양끝 단변이 장변 간격을 잇는지 (WALL/BASE 모두 허용)
+                    lo = (a.along0 + b.along0) * 0.5
+                    hi = (a.along1 + b.along1) * 0.5
+
+                    def _has_end(x: float) -> bool:
+                        for v in short_segs:
+                            if abs(v.ortho - x) > corner_tol_mm:
+                                continue
+                            if not (short_min_mm * 0.5 <= v.length <= short_max_mm * 1.5):
+                                continue
+                            ov = min(v.along1, b.ortho + 40.0) - max(
+                                v.along0, a.ortho - 40.0
+                            )
+                            if ov >= gap * 0.55:
+                                return True
+                        return False
+
+                    if not (_has_end(lo) and _has_end(hi)):
+                        continue
+                    # 장변·내부 평행선: 가구 윤곽 엔티티로 표시 (BASE 승격 차단용)
+                    # demote 적용 시 WALL만 삭제. LWPOLYLINE 통째 피해 방지 → LINE만
+                    for s in group:
+                        if a.ortho - 40.0 <= s.ortho <= b.ortho + 40.0:
+                            if abs(s.along0 - lo) > along_tol_mm + 200.0:
+                                continue
+                            if abs(s.along1 - hi) > along_tol_mm + 200.0:
+                                continue
+                            if id(s.entity) in exclude_ids:
+                                continue
+                            ent = s.entity
+                            if ent is not None and getattr(ent, "dxftype", lambda: "")() != "LINE":
+                                continue
+                            demote.add(id(ent))
+                    for v in short_segs:
+                        if id(v.entity) in exclude_ids:
+                            continue
+                        # 가구 깊이 정도의 짧은 단변만 — 복도·실 장축 V 보호
+                        if v.length > short_max_mm * 1.25:
+                            continue
+                        ent = v.entity
+                        if ent is not None and getattr(ent, "dxftype", lambda: "")() != "LINE":
+                            continue
+                        if (
+                            abs(v.ortho - lo) > corner_tol_mm
+                            and abs(v.ortho - hi) > corner_tol_mm
+                        ):
+                            continue
+                        ov = min(v.along1, b.ortho + 80.0) - max(
+                            v.along0, a.ortho - 80.0
+                        )
+                        if ov >= min(gap, v.length) * 0.35:
+                            demote.add(id(ent))
+
+    h_long = [s for s in segs if s.is_h]
+    v_short = [s for s in segs if s.is_v]
+    _axis_furniture(h_long, v_short)
+    # 세로로 긴 소파/벤치
+    v_long = [s for s in segs if s.is_v]
+    h_short = [s for s in segs if s.is_h]
+    _axis_furniture(v_long, h_short)
+    return demote
+
+
+_FITNESS_RE = re.compile(r"(피트니스|FITNESS|헬스장|헬스\b|GX룸|GX\b)", re.IGNORECASE)
+
+
+def find_fitness_labels(msp) -> list[tuple[float, float, str]]:
+    """피트니스·헬스 실명 라벨."""
+    hits: list[tuple[float, float, str]] = []
+    for x, y, s in _iter_text_labels(msp):
+        if _FITNESS_RE.search(s):
+            hits.append((x, y, s))
+    return hits
+
+
+def demote_fitness_equipment(
+    msp,
+    segs: list[AxisSeg],
+    *,
+    exclude_ids: set[int] | None = None,
+    label_radius_mm: float = 32000.0,
+    cell_mm: float = 2000.0,
+    dense_min: int = 25,
+    max_len_mm: float = 2000.0,
+    min_len_mm: float = 400.0,
+    plate_r_min: float = 40.0,
+    plate_r_max: float = 280.0,
+) -> set[int]:
+    """피트니스 운동기구(랙·바벨 프레임) WALL demote.
+
+    「피트니스」라벨 주변에서, 웨이트 플레이트(작은 ARC/CIRCLE) 클러스터와
+    그에 인접한 짧은 BASE 밀집 셀 안의 짧은 LINE WALL만 제거한다.
+    """
+    exclude_ids = exclude_ids or set()
+    labels = find_fitness_labels(msp)
+    if not labels:
+        return set()
+
+    def _near_fitness(mx: float, my: float) -> bool:
+        return any(
+            abs(mx - lx) <= label_radius_mm and abs(my - ly) <= label_radius_mm
+            for lx, ly, _ in labels
+        )
+
+    plates: list[tuple[float, float]] = []
+    for e in msp:
+        if e.dxftype() not in ("ARC", "CIRCLE"):
+            continue
+        try:
+            r = float(e.dxf.radius)
+            cx, cy = float(e.dxf.center.x), float(e.dxf.center.y)
+        except Exception:  # noqa: BLE001
+            continue
+        if not (plate_r_min <= r <= plate_r_max):
+            continue
+        if _near_fitness(cx, cy):
+            plates.append((cx, cy))
+
+    plate_grid: dict[tuple[int, int], int] = defaultdict(int)
+    for px, py in plates:
+        plate_grid[(int(px // cell_mm), int(py // cell_mm))] += 1
+
+    base_grid: dict[tuple[int, int], int] = defaultdict(int)
+    for s in segs:
+        if s.layer != BASE_LAYER or s.length > 2500.0:
+            continue
+        mx = (s.x0 + s.x1) * 0.5
+        my = (s.y0 + s.y1) * 0.5
+        if not _near_fitness(mx, my):
+            continue
+        base_grid[(int(mx // cell_mm), int(my // cell_mm))] += 1
+
+    plate_hot = {k for k, n in plate_grid.items() if n >= 3}
+    base_hot = {k for k, n in base_grid.items() if n >= dense_min}
+    # 플레이트 셀 ±2 + 플레이트 인접 밀집 BASE
+    hot: set[tuple[int, int]] = set()
+    for i, j in plate_hot:
+        for di in (-2, -1, 0, 1, 2):
+            for dj in (-2, -1, 0, 1, 2):
+                hot.add((i + di, j + dj))
+    for i, j in base_hot:
+        if any(
+            (i + di, j + dj) in plate_hot
+            for di in (-2, -1, 0, 1, 2)
+            for dj in (-2, -1, 0, 1, 2)
+        ):
+            hot.add((i, j))
+        elif base_grid[(i, j)] >= dense_min + 20:
+            # 플레이트 없는 케이블머신 등 — 매우 밀집만
+            hot.add((i, j))
+
+    if not hot:
+        return set()
+
+    long_wall = [s for s in segs if s.layer == WALL_LAYER and s.length >= 8000.0]
+    h_long, v_long = _index_wall_runs(long_wall)
+
+    def on_long_run(s: AxisSeg) -> bool:
+        if s.is_h:
+            iv: list[tuple[float, float, float]] = []
+            for d in (-2, -1, 0, 1, 2):
+                iv.extend(h_long.get(_bucket(s.ortho) + d * 50, []))
+        else:
+            iv = []
+            for d in (-2, -1, 0, 1, 2):
+                iv.extend(v_long.get(_bucket(s.ortho) + d * 50, []))
+        return any(
+            min(s.along1, b1) - max(s.along0, b0) > 200
+            or abs(b1 - s.along0) <= 400
+            or abs(s.along1 - b0) <= 400
+            for b0, b1, _ in iv
+        )
+
+    demote: set[int] = set()
+    for s in segs:
+        if s.layer != WALL_LAYER:
+            continue
+        if not (min_len_mm <= s.length <= max_len_mm):
+            continue
+        if id(s.entity) in exclude_ids:
+            continue
+        ent = s.entity
+        if ent is not None and getattr(ent, "dxftype", lambda: "")() != "LINE":
+            continue
+        mx = (s.x0 + s.x1) * 0.5
+        my = (s.y0 + s.y1) * 0.5
+        if not _near_fitness(mx, my):
+            continue
+        key = (int(mx // cell_mm), int(my // cell_mm))
+        if key not in hot:
+            continue
+        if on_long_run(s):
+            continue
+        # 기구 존(플레이트 클러스터·인접 밀집 BASE) 안의 짧은 LINE
+        demote.add(id(ent))
+    return demote
 
 
 def _iter_closed_boxes(
@@ -911,21 +1206,59 @@ def _nearest_hall_side_walls(
     return left_x, right_x
 
 
+def _nearest_hall_end_walls(
+    segs: list[AxisSeg],
+    lx: float,
+    ly: float,
+    *,
+    search_mm: float = 30000.0,
+    long_min_mm: float = 8000.0,
+    clear_mm: float = 6000.0,
+) -> tuple[float | None, float | None]:
+    """라벨에서 clear_mm 이상 떨어진 최근접 상·하 이중선 벽 y."""
+    near = [
+        s
+        for s in segs
+        if s.is_h
+        and s.length >= long_min_mm
+        and abs((s.along0 + s.along1) * 0.5 - lx) <= search_mm
+        and abs(s.ortho - ly) <= search_mm
+    ]
+    along_pad = 5000.0
+    bot_y: float | None = None
+    top_y: float | None = None
+    for s in near:
+        if not (s.along0 - along_pad <= lx <= s.along1 + along_pad):
+            continue
+        if not _has_parallel_pair(s, near):
+            continue
+        if s.ortho <= ly - clear_mm:
+            if bot_y is None or s.ortho > bot_y:
+                bot_y = s.ortho
+        elif s.ortho >= ly + clear_mm:
+            if top_y is None or s.ortho < top_y:
+                top_y = s.ortho
+    return bot_y, top_y
+
+
 def collect_open_hall_regions(
     msp,
     segs: list[AxisSeg],
-) -> list[tuple[float, float, str, float, float, float | None, float | None]]:
-    """(lx, ly, label, cx, band_mm, left_wall_x, right_wall_x).
+) -> list[tuple[float, float, str, float, float, float | None, float | None, float | None, float | None]]:
+    """(lx, ly, label, cx, band_mm, left_wall_x, right_wall_x, bot_wall_y, top_wall_y).
 
     cx = 홀 좌·우 외곽 중점(없으면 라벨 x).
     band_mm = 중점에서 중앙 통로 demote 반경.
     """
-    regions: list[tuple[float, float, str, float, float, float | None, float | None]] = []
+    regions: list[
+        tuple[float, float, str, float, float, float | None, float | None, float | None, float | None]
+    ] = []
     seen: list[tuple[float, float]] = []
     for lx, ly, name in find_open_hall_labels(msp):
         if any(abs(lx - sx) < 16000 and abs(ly - sy) < 12000 for sx, sy in seen):
             continue
         left_x, right_x = _nearest_hall_side_walls(segs, lx, ly)
+        bot_y, top_y = _nearest_hall_end_walls(segs, lx, ly)
         if left_x is not None and right_x is not None:
             cx = (left_x + right_x) * 0.5
             half = min(cx - left_x, right_x - cx)
@@ -936,23 +1269,42 @@ def collect_open_hall_regions(
             cx = lx
             band = 5500.0
         seen.append((lx, ly))
-        regions.append((lx, ly, name, cx, band, left_x, right_x))
+        regions.append((lx, ly, name, cx, band, left_x, right_x, bot_y, top_y))
     return regions
 
 
 def _is_open_hall_interior_seg(
     s: AxisSeg,
-    halls: list[tuple[float, float, str, float, float, float | None, float | None]],
+    halls: list[
+        tuple[float, float, str, float, float, float | None, float | None, float | None, float | None]
+    ],
     all_segs: list[AxisSeg] | None = None,
     *,
     min_len_mm: float = 8000.0,
 ) -> bool:
-    """강당 중앙 통로를 가로지르는 긴 수직선인가."""
-    if not s.is_v or s.length < min_len_mm:
+    """강당 중앙을 가로·세로로 가로지르는 긴 선인가 (객석 통로/열)."""
+    if s.length < min_len_mm:
         return False
+    if s.is_v:
+        return _is_open_hall_interior_v_seg(s, halls, all_segs, min_len_mm=min_len_mm)
+    if s.is_h:
+        return _is_open_hall_interior_h_seg(s, halls, all_segs, min_len_mm=min_len_mm)
+    return False
+
+
+def _is_open_hall_interior_v_seg(
+    s: AxisSeg,
+    halls: list[
+        tuple[float, float, str, float, float, float | None, float | None, float | None, float | None]
+    ],
+    all_segs: list[AxisSeg] | None,
+    *,
+    min_len_mm: float,
+) -> bool:
+    """강당 중앙 통로를 가로지르는 긴 수직선인가."""
     mx = (s.x0 + s.x1) * 0.5
     peers = [x for x in (all_segs or []) if x.is_v and x.length >= min_len_mm]
-    for lx, ly, _name, cx, band, left_x, right_x in halls:
+    for lx, ly, _name, cx, band, left_x, right_x, _bot_y, _top_y in halls:
         if left_x is not None and abs(mx - left_x) <= 500.0:
             continue
         if right_x is not None and abs(mx - right_x) <= 500.0:
@@ -962,8 +1314,6 @@ def _is_open_hall_interior_seg(
             half = min(cx - left_x, right_x - cx)
         near_label = abs(mx - lx) <= min(5000.0, band)
         near_center = abs(mx - cx) <= band
-        # 단일선(이중선 아님)은 조금 더 넓은 대역에서도 통로 오검출로 본다
-        # 단, 외곽 근처(≤5.5 m) 단일선은 외벽 후보이므로 제외
         wide_single = False
         near_outer = (
             (left_x is not None and abs(mx - left_x) <= 5500.0)
@@ -989,6 +1339,72 @@ def _is_open_hall_interior_seg(
     return False
 
 
+def _is_open_hall_interior_h_seg(
+    s: AxisSeg,
+    halls: list[
+        tuple[float, float, str, float, float, float | None, float | None, float | None, float | None]
+    ],
+    all_segs: list[AxisSeg] | None,
+    *,
+    min_len_mm: float,
+) -> bool:
+    """강당 객석을 가로지르는 긴 수평선인가 — 의자 위 벽 오검출."""
+    my = s.ortho
+    peers = [x for x in (all_segs or []) if x.is_h and x.length >= min_len_mm]
+    for lx, ly, _name, cx, band, left_x, right_x, bot_y, top_y in halls:
+        # 상·하 외곽 벽은 유지
+        if bot_y is not None and abs(my - bot_y) <= 500.0:
+            continue
+        if top_y is not None and abs(my - top_y) <= 500.0:
+            continue
+        # 홀 폭을 가로질러야 함
+        if left_x is not None and right_x is not None:
+            hall_w = right_x - left_x
+            ov = min(s.along1, right_x - 2500.0) - max(s.along0, left_x + 2500.0)
+            if ov < max(min_len_mm * 0.55, hall_w * 0.35):
+                continue
+            near_outer = (
+                abs(my - bot_y) <= 4000.0 if bot_y is not None else False
+            ) or (abs(my - top_y) <= 4000.0 if top_y is not None else False)
+        else:
+            # 외곽 미검출 시 라벨 주변 가로 장축
+            if abs((s.along0 + s.along1) * 0.5 - lx) > band + 8000.0:
+                continue
+            near_outer = False
+        # 상·하 외곽 근처(복도·실 경계)는 유지
+        if near_outer:
+            continue
+        # 라벨~객석 대역 (라벨 위·아래)
+        half_h = None
+        cy = ly
+        if bot_y is not None and top_y is not None:
+            cy = (bot_y + top_y) * 0.5
+            half_h = min(cy - bot_y, top_y - cy)
+            y_band = min(half_h * 0.55, max(half_h - 3500.0, 5000.0))
+            y_band = max(5000.0, min(y_band, 12000.0))
+            near_center = abs(my - cy) <= y_band
+        else:
+            near_center = abs(my - ly) <= 12000.0
+        near_label = abs(my - ly) <= 12000.0
+        wide_single = False
+        if (
+            half_h is not None
+            and peers
+            and not _has_parallel_pair(s, peers)
+        ):
+            wide_single = abs(my - cy) <= min(half_h * 0.7, 14000.0)
+        if not (near_label or near_center or wide_single):
+            continue
+        # X 방향으로 라벨/홀 중심 근처를 가로지름
+        if s.along1 < lx - 20000.0 or s.along0 > lx + 20000.0:
+            continue
+        if left_x is not None and right_x is not None:
+            if s.along1 < left_x + 1000.0 or s.along0 > right_x - 1000.0:
+                continue
+        return True
+    return False
+
+
 def demote_open_hall_center_walls(
     msp,
     segs: list[AxisSeg],
@@ -997,7 +1413,7 @@ def demote_open_hall_center_walls(
 ) -> set[int]:
     """강당·오픈홀 중앙을 가로지르는 긴 WALL demote.
 
-    「강당」실명 라벨/홀 중심 대역을 관통하는 장축 수직선은 객석 통로/보이드이며
+    「강당」실명 라벨/홀 중심 대역을 관통하는 장축(수직 통로·수평 객석열)은
     벽이 될 수 없다. protect_corridor 보다 우선.
     """
     halls = collect_open_hall_regions(msp, segs)
@@ -1010,31 +1426,57 @@ def demote_open_hall_center_walls(
         if _is_open_hall_interior_seg(s, halls, segs, min_len_mm=min_len_mm):
             demote.add(id(s.entity))
 
-    # 중앙 통로 오검출이 벽두께 쌍으로 잡힌 경우, 짝도 함께 제거
-    wall_v = [
-        s
-        for s in segs
-        if s.layer == WALL_LAYER and s.is_v and s.length >= min_len_mm
-    ]
-    demoted_segs = [s for s in wall_v if id(s.entity) in demote]
-    for s in wall_v:
-        if id(s.entity) in demote:
-            continue
-        mx = (s.x0 + s.x1) * 0.5
-        if any(
-            (left_x is not None and abs(mx - left_x) <= 500.0)
-            or (right_x is not None and abs(mx - right_x) <= 500.0)
-            for _lx, _ly, _n, _cx, _band, left_x, right_x in halls
-        ):
-            continue
-        in_pair_zone = any(
-            abs(mx - cx) <= band * 1.25 for _lx, _ly, _n, cx, band, _l, _r in halls
-        )
-        if not in_pair_zone or not demoted_segs:
-            continue
-        # 통로 오검출 쌍은 일반 벽두께(420)보다 넓게 잡히는 경우 있음
-        if _has_parallel_pair(s, demoted_segs, thick_min=40.0, thick_max=900.0):
-            demote.add(id(s.entity))
+    # 중앙 오검출이 벽두께 쌍으로 잡힌 경우, 짝도 함께 제거 (V·H)
+    for is_v in (True, False):
+        wall_axis = [
+            s
+            for s in segs
+            if s.layer == WALL_LAYER
+            and ((is_v and s.is_v) or ((not is_v) and s.is_h))
+            and s.length >= min_len_mm
+        ]
+        demoted_segs = [s for s in wall_axis if id(s.entity) in demote]
+        for s in wall_axis:
+            if id(s.entity) in demote:
+                continue
+            ortho = s.ortho
+            on_outer = False
+            for _lx, _ly, _n, _cx, _band, left_x, right_x, bot_y, top_y in halls:
+                if is_v:
+                    if (left_x is not None and abs(ortho - left_x) <= 500.0) or (
+                        right_x is not None and abs(ortho - right_x) <= 500.0
+                    ):
+                        on_outer = True
+                        break
+                else:
+                    if (bot_y is not None and abs(ortho - bot_y) <= 500.0) or (
+                        top_y is not None and abs(ortho - top_y) <= 500.0
+                    ):
+                        on_outer = True
+                        break
+            if on_outer:
+                continue
+            if is_v:
+                in_pair_zone = any(
+                    abs(ortho - cx) <= band * 1.25
+                    for _lx, _ly, _n, cx, band, _l, _r, _b, _t in halls
+                )
+            else:
+                in_pair_zone = any(
+                    (
+                        abs(ortho - ly) <= 14000.0
+                        or (
+                            bot_y is not None
+                            and top_y is not None
+                            and bot_y + 3500.0 <= ortho <= top_y - 3500.0
+                        )
+                    )
+                    for _lx, ly, _n, _cx, _band, _l, _r, bot_y, top_y in halls
+                )
+            if not in_pair_zone or not demoted_segs:
+                continue
+            if _has_parallel_pair(s, demoted_segs, thick_min=40.0, thick_max=900.0):
+                demote.add(id(s.entity))
     return demote
 
 
@@ -1045,7 +1487,7 @@ def filter_promote_away_from_open_halls(
     *,
     min_len_mm: float = 8000.0,
 ) -> list[AxisSeg]:
-    """강당 중앙 통로 promote 후보 제거."""
+    """강당 중앙 통로·객석열 promote 후보 제거."""
     halls = collect_open_hall_regions(msp, segs)
     if not halls:
         return promote
@@ -1799,6 +2241,146 @@ def _is_elevator_door_jamb_seg(
     return near_l or near_r
 
 
+def _is_elevator_door_return_seg(
+    s: AxisSeg,
+    shaft: dict[str, float],
+    bank: dict[str, float | int],
+) -> bool:
+    """복도↔엘리베이터 문 개구로 꺾이는 짧은 리턴(어깨) — 벽.
+
+    복도 문 양옆과 같이, 문틀에서 직각으로 꺾여 들어가는 짧은 선.
+    door_faces_x → 수평 리턴(개구 상·하 잼 모서리); door_faces_y → 수직 리턴.
+    """
+    door_x = bool(bank.get("door_faces_x", 1))
+    sign = _shaft_door_sign(shaft, bank)
+    cx, cy = shaft["cx"], shaft["cy"]
+    hw, hh = shaft["half_w"], shaft["half_h"]
+    if door_x:
+        if not s.is_h:
+            return False
+        if not (70.0 <= s.length <= 900.0):
+            return False
+        # 문 개구 높이 대역(샤프트 반고) 안, 중앙(문짝) 제외 → 상·하 잼 모서리
+        if not (cy - hh - 250.0 <= s.ortho <= cy + hh + 250.0):
+            return False
+        if abs(s.ortho - cy) < hh * 0.18:
+            return False
+        if abs(s.ortho - cy) > hh * 1.15:
+            return False
+        door_face = cx + sign * hw
+        touches_face = (
+            abs(s.along0 - door_face) <= 550.0
+            or abs(s.along1 - door_face) <= 550.0
+            or (
+                min(s.along0, s.along1) - 120.0
+                <= door_face
+                <= max(s.along0, s.along1) + 120.0
+            )
+        )
+        if not touches_face:
+            # 포털 두꺼운 수직 박스(문면보다 로비쪽)에 붙은 어깨도 허용
+            portal_lo = door_face - 50.0
+            portal_hi = door_face + sign * 600.0
+            if sign < 0:
+                portal_lo, portal_hi = door_face + sign * 600.0, door_face + 50.0
+            mid = (s.along0 + s.along1) * 0.5
+            if not (portal_lo <= mid <= portal_hi):
+                return False
+        mid = (s.along0 + s.along1) * 0.5
+        toward = (mid - cx) * sign
+        return hw - 550.0 <= toward <= hw + 1400.0
+    if not s.is_v:
+        return False
+    if not (70.0 <= s.length <= 900.0):
+        return False
+    if not (cx - hw - 250.0 <= s.ortho <= cx + hw + 250.0):
+        return False
+    if abs(s.ortho - cx) < hw * 0.18:
+        return False
+    if abs(s.ortho - cx) > hw * 1.15:
+        return False
+    door_face = cy + sign * hh
+    touches_face = (
+        abs(s.along0 - door_face) <= 550.0
+        or abs(s.along1 - door_face) <= 550.0
+        or (
+            min(s.along0, s.along1) - 120.0
+            <= door_face
+            <= max(s.along0, s.along1) + 120.0
+        )
+    )
+    if not touches_face:
+        portal_lo = door_face - 50.0
+        portal_hi = door_face + sign * 600.0
+        if sign < 0:
+            portal_lo, portal_hi = door_face + sign * 600.0, door_face + 50.0
+        mid = (s.along0 + s.along1) * 0.5
+        if not (portal_lo <= mid <= portal_hi):
+            return False
+    mid = (s.along0 + s.along1) * 0.5
+    toward = (mid - cy) * sign
+    return hh - 550.0 <= toward <= hh + 1400.0
+
+
+def _is_elevator_corridor_turn_seg(
+    s: AxisSeg,
+    shaft: dict[str, float],
+    bank: dict[str, float | int],
+) -> bool:
+    """복도 장축 벽이 엘리베이터 입구 alcove로 꺾이는 L자 다리 — 벽.
+
+    문 어깨(return)에서 복도 벽까지 이어지는 입구 측면 이중선.
+    (화살표가 가리키는 복도↔엘리베이터 모서리)
+    """
+    door_x = bool(bank.get("door_faces_x", 1))
+    sign = _shaft_door_sign(shaft, bank)
+    cx, cy = shaft["cx"], shaft["cy"]
+    hw, hh = shaft["half_w"], shaft["half_h"]
+    if door_x:
+        if not s.is_v:
+            return False
+        if not (700.0 <= s.length <= 2800.0):
+            return False
+        toward = (s.ortho - cx) * sign
+        if not (hw - 400.0 <= toward <= hw + 1600.0):
+            return False
+        top = cy + hh
+        bot = cy - hh
+        # 상단: 문 개구 상단 대역에서 시작해 샤프트 밖으로 복도까지
+        if (
+            s.along1 >= top + 150.0
+            and cy + hh * 0.20 <= s.along0 <= top + 120.0
+        ):
+            return True
+        # 하단: 복도에서 올라와 문 개구 하단 대역으로
+        if (
+            s.along0 <= bot - 150.0
+            and bot - 120.0 <= s.along1 <= cy - hh * 0.20
+        ):
+            return True
+        return False
+    if not s.is_h:
+        return False
+    if not (700.0 <= s.length <= 2800.0):
+        return False
+    toward = (s.ortho - cy) * sign
+    if not (hh - 400.0 <= toward <= hh + 1600.0):
+        return False
+    right = cx + hw
+    left = cx - hw
+    if (
+        s.along1 >= right + 150.0
+        and cx + hw * 0.20 <= s.along0 <= right + 120.0
+    ):
+        return True
+    if (
+        s.along0 <= left - 150.0
+        and left - 120.0 <= s.along1 <= cx - hw * 0.20
+    ):
+        return True
+    return False
+
+
 def _is_elevator_entrance_portal_seg(
     s: AxisSeg,
     shaft: dict[str, float],
@@ -2094,11 +2676,16 @@ def promote_elevator_enclosure_walls(
     min_len_mm: float = 300.0,
     max_len_mm: float = 25000.0,
 ) -> list[AxisSeg]:
-    """엘리베이터: 입구 측면 잼(화살표) + 뱅크 주위 외곽 → WALL. 문 개구 제외."""
+    """엘리베이터: 입구 잼·문 어깨(꺾임)·복도 꺾임·문사이 + 뱅크 주위 외곽 → WALL. 문 개구 제외."""
     banks = find_elevator_banks(msp)
     if not banks:
         return []
-    base = [s for s in segs if s.layer == BASE_LAYER and min_len_mm <= s.length <= max_len_mm]
+    # 짧은 문 어깨(70–300 mm)도 포함
+    base = [
+        s
+        for s in segs
+        if s.layer == BASE_LAYER and 70.0 <= s.length <= max_len_mm
+    ]
     wall = [s for s in segs if s.layer == WALL_LAYER]
     h_wall, v_wall = _index_wall_runs(wall)
     out: list[AxisSeg] = []
@@ -2111,24 +2698,39 @@ def promote_elevator_enclosure_walls(
         box = _elevator_bank_box(bank, shafts, segs)
         for s in base:
             is_jamb = any(_is_elevator_door_jamb_seg(s, sh, bank) for sh in shafts)
+            is_return = any(
+                _is_elevator_door_return_seg(s, sh, bank) for sh in shafts
+            )
+            is_turn = any(
+                _is_elevator_corridor_turn_seg(s, sh, bank) for sh in shafts
+            )
             is_inter = any(
                 _is_elevator_door_interstitial_seg(s, sh, bank, shafts) for sh in shafts
             )
             is_peri = _is_elevator_perimeter_seg(s, box)
-            if not (is_jamb or is_inter or is_peri):
+            if not (is_jamb or is_return or is_turn or is_inter or is_peri):
                 continue
-            # 전고 문 개구만 제외 (잼은 유지)
+            # 짧은 어깨/잼·복도꺾임은 min_len 미만이어도 허용; 외곽은 기존 min_len
+            if (
+                is_peri
+                and not (is_jamb or is_return or is_turn or is_inter)
+                and s.length < min_len_mm
+            ):
+                continue
+            # 전고 문 개구만 제외 (잼·어깨·복도꺾임은 유지)
             if (
                 not is_jamb
+                and not is_return
+                and not is_turn
                 and not is_inter
                 and any(_is_elevator_door_opening_seg(s, sh, bank) for sh in shafts)
             ):
                 continue
             if not _has_parallel_pair(s, base, thick_min=15.0, thick_max=500.0):
-                if not is_jamb and s.length > 2500.0:
+                if not is_jamb and not is_return and not is_turn and s.length > 2500.0:
                     continue
-            # 입구 잼·문사이는 이중선 한 쪽만 WALL이어도 나머지 BASE를 꼭 승격
-            if not is_jamb and not is_inter:
+            # 입구 잼·어깨·복도꺾임·문사이는 이중선 한 쪽만 WALL이어도 나머지 BASE를 꼭 승격
+            if not is_jamb and not is_return and not is_turn and not is_inter:
                 if s.is_h:
                     iv: list[tuple[float, float, float]] = []
                     for d in (-2, -1, 0, 1, 2):
@@ -2169,8 +2771,12 @@ def demote_elevator_door_back_faces(
             continue
         box = _elevator_bank_box(bank, shafts, segs)
         for s in wall:
-            # 입구 잼·문사이 칸막이·주위 외곽은 유지
+            # 입구 잼·어깨·복도꺾임·문사이 칸막이·주위 외곽은 유지
             if any(_is_elevator_door_jamb_seg(s, sh, bank) for sh in shafts):
+                continue
+            if any(_is_elevator_door_return_seg(s, sh, bank) for sh in shafts):
+                continue
+            if any(_is_elevator_corridor_turn_seg(s, sh, bank) for sh in shafts):
                 continue
             if any(
                 _is_elevator_door_interstitial_seg(s, sh, bank, shafts) for sh in shafts
@@ -2225,6 +2831,12 @@ def filter_promote_away_from_elevator_doors(
             if any(_is_elevator_door_jamb_seg(s, sh, bank) for sh in shafts):
                 keep = True
                 break
+            if any(_is_elevator_door_return_seg(s, sh, bank) for sh in shafts):
+                keep = True
+                break
+            if any(_is_elevator_corridor_turn_seg(s, sh, bank) for sh in shafts):
+                keep = True
+                break
             if any(
                 _is_elevator_door_interstitial_seg(s, sh, bank, shafts) for sh in shafts
             ):
@@ -2275,12 +2887,12 @@ def protect_elevator_enclosure_entities(
     *,
     min_len_mm: float = 300.0,
 ) -> set[int]:
-    """입구 잼·문사이 칸막이·뱅크 주위 외곽 WALL demote 금지."""
+    """입구 잼·문 어깨·복도 꺾임·문사이 칸막이·뱅크 주위 외곽 WALL demote 금지."""
     banks = find_elevator_banks(msp)
     if not banks:
         return set()
     protect: set[int] = set()
-    wall = [s for s in segs if s.layer == WALL_LAYER and s.length >= min_len_mm]
+    wall = [s for s in segs if s.layer == WALL_LAYER]
     for bank in banks:
         shafts: list[dict[str, float]] = bank.get("shafts") or []  # type: ignore[assignment]
         if not shafts:
@@ -2290,10 +2902,18 @@ def protect_elevator_enclosure_entities(
             if any(_is_elevator_door_jamb_seg(s, sh, bank) for sh in shafts):
                 protect.add(id(s.entity))
                 continue
+            if any(_is_elevator_door_return_seg(s, sh, bank) for sh in shafts):
+                protect.add(id(s.entity))
+                continue
+            if any(_is_elevator_corridor_turn_seg(s, sh, bank) for sh in shafts):
+                protect.add(id(s.entity))
+                continue
             if any(
                 _is_elevator_door_interstitial_seg(s, sh, bank, shafts) for sh in shafts
             ):
                 protect.add(id(s.entity))
+                continue
+            if s.length < min_len_mm:
                 continue
             if _is_elevator_perimeter_seg(s, box):
                 if not any(_is_elevator_door_opening_seg(s, sh, bank) for sh in shafts):
@@ -2374,7 +2994,9 @@ def apply_corrections(
     """In-place modify doc modelspace WALL layer. Returns stats."""
     msp = doc.modelspace()
     review = review or {}
-    segs = iter_axis_segs(msp)
+    # 70 mm: 엘리베이터 문 어깨(리턴)·짧은 문틀까지 후보에 포함
+    # (기본 500 mm면 door_return 250 mm 등이 통째로 빠짐)
+    segs = iter_axis_segs(msp, min_len_mm=70.0)
 
     hbeam_ids: set[int] = set()
     if do_column_promote:
@@ -2411,6 +3033,11 @@ def apply_corrections(
     # 엘리베이터 문·후면은 승격 금지 (측벽만 벽)
     if do_elevator_promote:
         promote = filter_promote_away_from_elevator_doors(promote, msp)
+    # LINE 가구 직사각·운동기구는 승격 금지
+    if do_box_demote:
+        furn_ids = demote_line_furniture_boxes(segs, exclude_ids=hbeam_ids)
+        furn_ids |= demote_fitness_equipment(msp, segs, exclude_ids=hbeam_ids)
+        promote = [s for s in promote if id(s.entity) not in furn_ids]
 
     open_hall_demote: set[int] = set()
     if do_open_hall_demote:
@@ -2436,14 +3063,25 @@ def apply_corrections(
         demote_ids |= demote_parallel_packs(segs)
     if do_dense_demote:
         demote_ids |= demote_dense_short_clusters(segs)
+    furniture_box_demote: set[int] = set()
+    furniture_line_demote: set[int] = set()
+    fitness_demote: set[int] = set()
     if do_box_demote:
-        demote_ids |= demote_closed_furniture_boxes(msp, exclude_ids=hbeam_ids)
+        furniture_box_demote = demote_closed_furniture_boxes(msp, exclude_ids=hbeam_ids)
+        furniture_line_demote = demote_line_furniture_boxes(segs, exclude_ids=hbeam_ids)
+        fitness_demote = demote_fitness_equipment(msp, segs, exclude_ids=hbeam_ids)
+        demote_ids |= furniture_box_demote
+        demote_ids |= furniture_line_demote
+        demote_ids |= fitness_demote
     demote_ids |= demote_in_bboxes(msp, review.get("demote_bboxes") or [])
     n_protected = len(demote_ids & protect_ids)
     demote_ids -= protect_ids
-    # 오픈홀 중앙·엘리베이터 문/후면은 protect보다 우선 demote
+    # 오픈홀 중앙·엘리베이터 문/후면·가구·운동기구는 protect보다 우선 demote
     demote_ids |= open_hall_demote
     demote_ids |= elev_door_demote
+    demote_ids |= furniture_box_demote
+    demote_ids |= furniture_line_demote
+    demote_ids |= fitness_demote
 
     n_demoted = 0
     for e in list(msp):
@@ -2493,7 +3131,7 @@ def apply_corrections(
     # promote 로 다시 올라온 엘리베이터 문/후면 제거
     n_elev_door_post = 0
     if do_elevator_promote:
-        segs_after = iter_axis_segs(msp)
+        segs_after = iter_axis_segs(msp, min_len_mm=70.0)
         post_elev = demote_elevator_door_back_faces(msp, segs_after)
         for e in list(msp):
             if e.dxf.layer == WALL_LAYER and id(e) in post_elev:
@@ -2501,6 +3139,18 @@ def apply_corrections(
                 n_demoted += 1
                 n_elev_door_post += 1
 
+    # promote 로 다시 올라온 LINE 가구·운동기구 제거
+    n_furniture_post = 0
+    if do_box_demote:
+        segs_after = iter_axis_segs(msp, min_len_mm=70.0)
+        post_furn = demote_line_furniture_boxes(segs_after, exclude_ids=hbeam_ids)
+        post_furn |= demote_closed_furniture_boxes(msp, exclude_ids=hbeam_ids)
+        post_furn |= demote_fitness_equipment(msp, segs_after, exclude_ids=hbeam_ids)
+        for e in list(msp):
+            if e.dxf.layer == WALL_LAYER and id(e) in post_furn:
+                msp.delete_entity(e)
+                n_demoted += 1
+                n_furniture_post += 1
     # H-Beam 기둥: demote 이후 BASE→WALL (가구 demote에 안 걸림)
     n_column_promoted = 0
     if do_column_promote:
