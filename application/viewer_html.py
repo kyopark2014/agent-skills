@@ -1,4 +1,4 @@
-"""CSP-safe HTML helpers for markdown/json/csv viewers (no inline scripts, no CDN)."""
+"""CSP-safe HTML helpers for markdown/json/csv/python viewers (no inline scripts, no CDN)."""
 
 from __future__ import annotations
 
@@ -292,6 +292,95 @@ def build_json_viewer_page(
   </div>
   <div class="wrap">
     <pre class="json">{pretty}</pre>
+  </div>
+</body>
+</html>
+"""
+
+
+def build_code_viewer_page(
+    file_name: str,
+    text: str,
+    *,
+    topbar_right_html: str = "",
+    language: str = "Python",
+) -> str:
+    """Full HTML document for source preview (escaped text, CSP-safe)."""
+    title = html.escape(file_name)
+    body = html.escape(text or "")
+    lines = 0 if not text else text.count("\n") + (0 if text.endswith("\n") else 1)
+    badge = f"{language} · {lines} lines"
+    return f"""<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>{title}</title>
+  <style>
+    :root {{ color-scheme: light dark; }}
+    body {{
+      margin: 0;
+      background: #0d1117;
+      color: #e6edf3;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+    }}
+    .topbar {{
+      position: sticky; top: 0; z-index: 2;
+      display: flex; align-items: center; justify-content: space-between; gap: 12px;
+      padding: 10px 20px;
+      border-bottom: 1px solid #30363d;
+      background: rgba(13, 17, 23, 0.92);
+      backdrop-filter: blur(8px);
+    }}
+    .topbar h1 {{
+      margin: 0; font-size: 14px; font-weight: 600;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }}
+    .topbar-actions {{
+      display: flex; align-items: center; gap: 14px; flex-shrink: 0;
+    }}
+    .topbar a.action {{
+      color: #58a6ff; text-decoration: none; font-size: 13px; white-space: nowrap;
+    }}
+    .topbar a.action:hover {{ text-decoration: underline; }}
+    .badge {{
+      font-size: 12px; color: #8b949e; margin-right: 4px; white-space: nowrap;
+    }}
+    .wrap {{
+      box-sizing: border-box;
+      max-width: 1100px;
+      margin: 0 auto;
+      padding: 20px 16px 64px;
+    }}
+    pre.code {{
+      margin: 0;
+      white-space: pre-wrap;
+      word-break: break-word;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      font-size: 13px;
+      line-height: 1.55;
+      padding: 16px 18px;
+      border-radius: 8px;
+      background: rgba(110, 118, 129, 0.12);
+      border: 1px solid #30363d;
+    }}
+    @media (prefers-color-scheme: light) {{
+      body {{ background: #ffffff; color: #1f2328; }}
+      .topbar {{ background: rgba(255,255,255,0.92); border-bottom-color: #d0d7de; }}
+      pre.code {{ border-color: #d0d7de; background: rgba(175, 184, 193, 0.12); }}
+    }}
+  </style>
+</head>
+<body>
+  <div class="topbar">
+    <h1>{title}</h1>
+    <div class="topbar-actions">
+      <span class="badge">{html.escape(badge)}</span>
+      {topbar_right_html}
+    </div>
+  </div>
+  <div class="wrap">
+    <pre class="code">{body}</pre>
   </div>
 </body>
 </html>

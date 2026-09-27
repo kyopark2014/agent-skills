@@ -768,6 +768,172 @@ def demote_fitness_equipment(
     return demote
 
 
+def _is_organic_landscape_polyline(e) -> bool:
+    """짧은 다변·넓은 물결형 BASE 폴리라인 ≈ 조경 윤곽."""
+    if e.dxftype() != "LWPOLYLINE":
+        return False
+    pts = [(float(p[0]), float(p[1])) for p in e.get_points("xy")]
+    if len(pts) < 10:
+        return False
+    pairs = list(zip(pts, pts[1:]))
+    if e.closed and pts[0] != pts[-1]:
+        pairs.append((pts[-1], pts[0]))
+    if len(pairs) < 9:
+        return False
+    lengths = [math.hypot(b[0] - a[0], b[1] - a[1]) for a, b in pairs]
+    avg = sum(lengths) / len(lengths)
+    xs = [p[0] for p in pts]
+    ys = [p[1] for p in pts]
+    w = max(xs) - min(xs)
+    h = max(ys) - min(ys)
+    if avg < 1500.0:
+        return True
+    # 넓은 정원 물결 윤곽 (평균 변 < 4 m, 한 변 ≥ 8–10 m)
+    if len(pts) >= 15 and (w >= 10000.0 or h >= 8000.0) and avg < 4000.0:
+        return True
+    return False
+
+
+def _landscape_wave_bboxes(
+    msp,
+    *,
+    min_span_mm: float = 10000.0,
+    max_avg_edge_mm: float = 2000.0,
+) -> list[tuple[float, float, float, float]]:
+    """대형 유기 조경(물결) 폴리라인 bbox 목록."""
+    out: list[tuple[float, float, float, float]] = []
+    for e in msp:
+        if getattr(e.dxf, "layer", None) != BASE_LAYER:
+            continue
+        if not _is_organic_landscape_polyline(e):
+            continue
+        pts = [(float(p[0]), float(p[1])) for p in e.get_points("xy")]
+        pairs = list(zip(pts, pts[1:]))
+        if e.closed and pts[0] != pts[-1]:
+            pairs.append((pts[-1], pts[0]))
+        lengths = [math.hypot(b[0] - a[0], b[1] - a[1]) for a, b in pairs]
+        avg = sum(lengths) / len(lengths)
+        if avg > max_avg_edge_mm:
+            continue
+        xs = [p[0] for p in pts]
+        ys = [p[1] for p in pts]
+        w = max(xs) - min(xs)
+        h = max(ys) - min(ys)
+        if max(w, h) < min_span_mm and min(w, h) < 8000.0:
+            continue
+        out.append((min(xs), max(xs), min(ys), max(ys)))
+    return out
+
+
+def _landscape_rock_centers(
+    msp,
+    *,
+    min_mm: float = 300.0,
+    max_mm: float = 1500.0,
+) -> list[tuple[float, float]]:
+    """바위·식재 등 비정형 닫힌 소형 조경 윤곽 중심점."""
+    out: list[tuple[float, float]] = []
+    for e in msp:
+        if e.dxftype() != "LWPOLYLINE":
+            continue
+        if getattr(e.dxf, "layer", None) != BASE_LAYER:
+            continue
+        pts = [(float(p[0]), float(p[1])) for p in e.get_points("xy")]
+        if not (8 <= len(pts) <= 40):
+            continue
+        closed = bool(e.closed) or (
+            math.hypot(pts[0][0] - pts[-1][0], pts[0][1] - pts[-1][1]) < 50.0
+        )
+        if not closed:
+            continue
+        xs = [p[0] for p in pts]
+        ys = [p[1] for p in pts]
+        w = max(xs) - min(xs)
+        h = max(ys) - min(ys)
+        if not (min_mm <= w <= max_mm and min_mm <= h <= max_mm):
+            continue
+        out.append(((min(xs) + max(xs)) * 0.5, (min(ys) + max(ys)) * 0.5))
+    return out
+
+
+def demote_landscape_walls(
+    msp,
+    segs: list[AxisSeg],
+    *,
+    exclude_ids: set[int] | None = None,
+    wave_margin_mm: float = 2800.0,
+    rock_band_mm: float = 600.0,
+    rock_min_count: int = 3,
+    rock_max_len_mm: float = 2500.0,
+) -> set[int]:
+    """정원·조경 구역 WALL demote.
+
+    정원에는 구조 벽이 있을 수 없다.
+    - 대형 물결형 조경 폴리라인 bbox **깊숙한 내부**의 WALL
+      (가장자리 facade·테라스 장축은 margin으로 보존)
+    - 바위/식재 클러스터를 가로지르는 **짧은** WALL
+    LINE 및 사실상 LINE인 짧은 LWPOLYLINE만 대상.
+    """
+    exclude_ids = exclude_ids or set()
+    waves = _landscape_wave_bboxes(msp)
+    rocks = _landscape_rock_centers(msp)
+    if not waves and not rocks:
+        return set()
+
+    def deep_in_wave(mx: float, my: float) -> bool:
+        m = wave_margin_mm
+        for x0, x1, y0, y1 in waves:
+            if x0 + m < mx < x1 - m and y0 + m < my < y1 - m:
+                return True
+        return False
+
+    def rocks_on_seg(s: AxisSeg) -> int:
+        n = 0
+        for rx, ry in rocks:
+            if s.is_h:
+                if abs(ry - s.ortho) > rock_band_mm:
+                    continue
+                if s.along0 - rock_band_mm <= rx <= s.along1 + rock_band_mm:
+                    n += 1
+            else:
+                if abs(rx - s.ortho) > rock_band_mm:
+                    continue
+                if s.along0 - rock_band_mm <= ry <= s.along1 + rock_band_mm:
+                    n += 1
+        return n
+
+    def _allow_entity(ent: Any) -> bool:
+        if ent is None or id(ent) in exclude_ids:
+            return False
+        t = getattr(ent, "dxftype", lambda: "")()
+        if t == "LINE":
+            return True
+        # 사실상 단일 선분인 조경 오검출 PL
+        if t == "LWPOLYLINE":
+            try:
+                pts = list(ent.get_points("xy"))
+            except Exception:  # noqa: BLE001
+                return False
+            return len(pts) <= 3 and not bool(getattr(ent, "closed", False))
+        return False
+
+    demote: set[int] = set()
+    for s in segs:
+        if s.layer != WALL_LAYER:
+            continue
+        ent = s.entity
+        if not _allow_entity(ent):
+            continue
+        mx = (s.x0 + s.x1) * 0.5
+        my = (s.y0 + s.y1) * 0.5
+        if deep_in_wave(mx, my):
+            demote.add(id(ent))
+            continue
+        if s.length <= rock_max_len_mm and rocks_on_seg(s) >= rock_min_count:
+            demote.add(id(ent))
+    return demote
+
+
 def _iter_closed_boxes(
     msp,
     *,
@@ -3033,10 +3199,11 @@ def apply_corrections(
     # 엘리베이터 문·후면은 승격 금지 (측벽만 벽)
     if do_elevator_promote:
         promote = filter_promote_away_from_elevator_doors(promote, msp)
-    # LINE 가구 직사각·운동기구는 승격 금지
+    # LINE 가구 직사각·운동기구·정원/조경은 승격 금지
     if do_box_demote:
         furn_ids = demote_line_furniture_boxes(segs, exclude_ids=hbeam_ids)
         furn_ids |= demote_fitness_equipment(msp, segs, exclude_ids=hbeam_ids)
+        furn_ids |= demote_landscape_walls(msp, segs, exclude_ids=hbeam_ids)
         promote = [s for s in promote if id(s.entity) not in furn_ids]
 
     open_hall_demote: set[int] = set()
@@ -3066,22 +3233,26 @@ def apply_corrections(
     furniture_box_demote: set[int] = set()
     furniture_line_demote: set[int] = set()
     fitness_demote: set[int] = set()
+    landscape_demote: set[int] = set()
     if do_box_demote:
         furniture_box_demote = demote_closed_furniture_boxes(msp, exclude_ids=hbeam_ids)
         furniture_line_demote = demote_line_furniture_boxes(segs, exclude_ids=hbeam_ids)
         fitness_demote = demote_fitness_equipment(msp, segs, exclude_ids=hbeam_ids)
+        landscape_demote = demote_landscape_walls(msp, segs, exclude_ids=hbeam_ids)
         demote_ids |= furniture_box_demote
         demote_ids |= furniture_line_demote
         demote_ids |= fitness_demote
+        demote_ids |= landscape_demote
     demote_ids |= demote_in_bboxes(msp, review.get("demote_bboxes") or [])
     n_protected = len(demote_ids & protect_ids)
     demote_ids -= protect_ids
-    # 오픈홀 중앙·엘리베이터 문/후면·가구·운동기구는 protect보다 우선 demote
+    # 오픈홀 중앙·엘리베이터 문/후면·가구·운동기구·정원은 protect보다 우선 demote
     demote_ids |= open_hall_demote
     demote_ids |= elev_door_demote
     demote_ids |= furniture_box_demote
     demote_ids |= furniture_line_demote
     demote_ids |= fitness_demote
+    demote_ids |= landscape_demote
 
     n_demoted = 0
     for e in list(msp):
@@ -3139,13 +3310,14 @@ def apply_corrections(
                 n_demoted += 1
                 n_elev_door_post += 1
 
-    # promote 로 다시 올라온 LINE 가구·운동기구 제거
+    # promote 로 다시 올라온 LINE 가구·운동기구·정원 제거
     n_furniture_post = 0
     if do_box_demote:
         segs_after = iter_axis_segs(msp, min_len_mm=70.0)
         post_furn = demote_line_furniture_boxes(segs_after, exclude_ids=hbeam_ids)
         post_furn |= demote_closed_furniture_boxes(msp, exclude_ids=hbeam_ids)
         post_furn |= demote_fitness_equipment(msp, segs_after, exclude_ids=hbeam_ids)
+        post_furn |= demote_landscape_walls(msp, segs_after, exclude_ids=hbeam_ids)
         for e in list(msp):
             if e.dxf.layer == WALL_LAYER and id(e) in post_furn:
                 msp.delete_entity(e)

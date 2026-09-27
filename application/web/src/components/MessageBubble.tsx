@@ -41,13 +41,13 @@ function isHttpImageRef(ref: string): boolean {
   return /\.(png|jpe?g|gif|webp)$/i.test(path) || /\/images\//i.test(path);
 }
 
-/** Rewrite CloudFront/S3 artifact .md/.json/.csv links to the in-app viewer. */
+/** Rewrite CloudFront/S3 artifact .md/.json/.csv/.py links to the in-app viewer. */
 function resolveArtifactViewerHref(href: string | undefined): string | undefined {
   if (!href) return href;
   try {
     const url = new URL(href, window.location.origin);
     const match = url.pathname.match(
-      /\/artifacts\/[^/]+\/(.+\.(?:md|markdown|json|csv))$/i,
+      /\/artifacts\/[^/]+\/(.+\.(?:md|markdown|json|csv|py))$/i,
     );
     if (!match) return href;
     const rest = decodeURIComponent(match[1]);

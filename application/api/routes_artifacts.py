@@ -1,4 +1,4 @@
-"""Artifact markdown/json/csv viewer / download (agentic-work style).
+"""Artifact markdown/json/csv/python viewer / download (agentic-work style).
 
 Reads from local ``.session_storage/{user}/artifacts/`` first, then S3
 ``artifacts/{user}/...``. Chat CloudFront links are rewritten by the UI to
@@ -21,6 +21,7 @@ from fastapi.responses import HTMLResponse, Response
 from application.api.routes_auth import require_user_id
 from application import utils
 from application.viewer_html import (
+    build_code_viewer_page,
     build_csv_viewer_page,
     build_json_viewer_page,
     build_markdown_viewer_page,
@@ -33,7 +34,10 @@ router = APIRouter(prefix="/api/artifacts", tags=["artifacts"])
 _MARKDOWN_EXTENSIONS = {".md", ".markdown"}
 _JSON_EXTENSIONS = {".json"}
 _CSV_EXTENSIONS = {".csv"}
-_VIEWER_EXTENSIONS = _MARKDOWN_EXTENSIONS | _JSON_EXTENSIONS | _CSV_EXTENSIONS
+_PYTHON_EXTENSIONS = {".py"}
+_VIEWER_EXTENSIONS = (
+    _MARKDOWN_EXTENSIONS | _JSON_EXTENSIONS | _CSV_EXTENSIONS | _PYTHON_EXTENSIONS
+)
 _TEXT_VIEWER_MAX_BYTES = 8 * 1024 * 1024
 
 
@@ -172,6 +176,8 @@ def _media_type_for_ext(ext: str) -> str:
         return "application/json; charset=utf-8"
     if ext in _CSV_EXTENSIONS:
         return "text/csv; charset=utf-8"
+    if ext in _PYTHON_EXTENSIONS:
+        return "text/plain; charset=utf-8"
     return "text/markdown; charset=utf-8"
 
 
@@ -208,7 +214,7 @@ def _topbar_actions(user_id: str, file_path: str, s3_key: str) -> str:
 
 @router.get("/view/{file_path:path}")
 def view_artifact(file_path: str, request: Request):
-    """Render an artifact markdown/json/csv file as HTML (new browser tab)."""
+    """Render an artifact markdown/json/csv/python file as HTML (new browser tab)."""
     user_id = require_user_id(request)
     data, s3_key, file_name = _read_artifact_bytes(
         user_id, file_path, max_bytes=_TEXT_VIEWER_MAX_BYTES
@@ -217,7 +223,7 @@ def view_artifact(file_path: str, request: Request):
     if ext not in _VIEWER_EXTENSIONS:
         raise HTTPException(
             status_code=400,
-            detail="Viewer supports .md / .markdown / .json / .csv only",
+            detail="Viewer supports .md / .markdown / .json / .csv / .py only",
         )
 
     text = _decode_text(data)
@@ -226,6 +232,8 @@ def view_artifact(file_path: str, request: Request):
         page = build_json_viewer_page(file_name, text, topbar_right_html=actions)
     elif ext in _CSV_EXTENSIONS:
         page = build_csv_viewer_page(file_name, text, topbar_right_html=actions)
+    elif ext in _PYTHON_EXTENSIONS:
+        page = build_code_viewer_page(file_name, text, topbar_right_html=actions)
     else:
         page = build_markdown_viewer_page(file_name, text, topbar_right_html=actions)
     return HTMLResponse(content=page, media_type="text/html; charset=utf-8")
@@ -233,14 +241,14 @@ def view_artifact(file_path: str, request: Request):
 
 @router.get("/download/{file_path:path}")
 def download_artifact(file_path: str, request: Request):
-    """Download an artifact file (markdown/json/csv) as an attachment."""
+    """Download an artifact file (markdown/json/csv/python) as an attachment."""
     user_id = require_user_id(request)
     data, _s3_key, file_name = _read_artifact_bytes(user_id, file_path)
     ext = _ext_of(file_name)
     if not _is_viewer_name(file_name):
         raise HTTPException(
             status_code=400,
-            detail="Download via this endpoint supports .md / .markdown / .json / .csv only",
+            detail="Download via this endpoint supports .md / .markdown / .json / .csv / .py only",
         )
 
     headers = {

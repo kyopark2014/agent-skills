@@ -122,7 +122,7 @@ def update(userId=None, modelName=None, debugMode=None, guardrailEnabled=None, l
         and modelName is None
         and debugMode is None
         and isinstance(userId, str)
-        and any(k in userId for k in ("Claude", "OpenAI", "GPT", "Nova", "OSS"))
+        and any(k in userId for k in ("Claude", "OpenAI", "GPT", "Nova", "OSS", "Kimi"))
     ):
         modelName = userId
         userId = None
@@ -158,6 +158,33 @@ def update(userId=None, modelName=None, debugMode=None, guardrailEnabled=None, l
     if memoryEnabled is not None and memory_enabled != memoryEnabled:
         memory_enabled = memoryEnabled
         logger.info(f"memory_enabled: {memory_enabled}")
+
+    _publish_ui_llm_env_force()
+
+
+def _publish_ui_llm_env() -> None:
+    """Expose the UI-selected model to skill scripts started via bash.
+
+    Child processes inherit os.environ. Do not overwrite a value the parent
+    already published (a skill script imports this module in a fresh process).
+    ``update()`` always refreshes the variables after the UI choice changes.
+    """
+    if not os.environ.get("UI_MODEL_NAME"):
+        os.environ["UI_MODEL_NAME"] = model_name or ""
+    if "UI_LLM_GATEWAY" not in os.environ:
+        os.environ["UI_LLM_GATEWAY"] = "1" if llm_gateway_enabled else "0"
+    if "UI_GUARDRAIL" not in os.environ:
+        os.environ["UI_GUARDRAIL"] = "1" if guardrail_enabled else "0"
+
+
+def _publish_ui_llm_env_force() -> None:
+    os.environ["UI_MODEL_NAME"] = model_name or ""
+    os.environ["UI_LLM_GATEWAY"] = "1" if llm_gateway_enabled else "0"
+    os.environ["UI_GUARDRAIL"] = "1" if guardrail_enabled else "0"
+
+
+_publish_ui_llm_env()
+
 
 def _guardrail_config() -> dict | None:
     if not guardrail_enabled:
@@ -771,6 +798,27 @@ def _build_openai_chat(profile: dict, max_output_tokens: int):
     return converse_chat
 
 
+def _build_kimi_chat(profile: dict, max_output_tokens: int):
+    """Kimi K3 via Bedrock OpenAI-compatible Chat Completions.
+
+    AWS recommends Chat Completions over Converse for this model (LangChain
+    multi-turn can hit InternalServerException when reasoning blocks are
+    replayed). Endpoint is bedrock-runtime, not Mantle.
+    """
+    bedrock_region = profile["bedrock_region"]
+    model_id = profile["model_id"]
+
+    def bearer_token_provider() -> str:
+        return bedrock_data_retention.get_bedrock_bearer_token(bedrock_region)
+
+    return ChatOpenAI(
+        model=model_id,
+        api_key=bearer_token_provider,
+        base_url=f"https://bedrock-runtime.{bedrock_region}.amazonaws.com/openai/v1",
+        max_tokens=max_output_tokens,
+    )
+
+
 def _build_llm_gateway_chat(profile: dict, max_output_tokens: int):
     """Build chat model via LiteLLM gateway (ChatAnthropic / ChatOpenAI)."""
     settings = _llm_gateway_settings()
@@ -797,6 +845,10 @@ def _build_llm_gateway_chat(profile: dict, max_output_tokens: int):
         gw_model,
         model_kind,
     )
+
+    # Kimi K3 is not on the LiteLLM gateway; get_chat falls through to Bedrock.
+    if model_kind == "kimi":
+        return None
 
     if model_kind == "openai":
         return ChatOpenAI(
@@ -833,6 +885,8 @@ def get_chat():
     bedrock_region = profile['bedrock_region']
     if model_type == 'claude':
         maxOutputTokens = get_max_output_tokens(modelId)
+    elif model_type == 'kimi':
+        maxOutputTokens = 16384
     else:
         maxOutputTokens = 5120 # 5k
 
@@ -851,6 +905,9 @@ def get_chat():
 
     if profile["model_type"] == "openai":
         return _build_openai_chat(profile, maxOutputTokens)
+
+    if profile["model_type"] == "kimi":
+        return _build_kimi_chat(profile, maxOutputTokens)
 
     guardrail_cfg = _guardrail_config()
     if guardrail_cfg and profile["model_type"] in ("claude", "nova"):

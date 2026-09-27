@@ -24,7 +24,12 @@ LLM_GATEWAY_MODEL_MAP: dict[str, str] = {
     "OpenAI GPT 5.6 Sol": "gpt-5.6-sol",
     "OpenAI GPT 5.6 Terra": "gpt-5.6-terra",
     "OpenAI GPT 5.6 Luna": "gpt-5.6-luna",
+    "Kimi K3": "kimi-k3",
 }
+
+# Shown in the UI even when the LiteLLM gateway does not host them.
+# Chat routes these through Bedrock (see chat._build_kimi_chat), not the gateway.
+BEDROCK_DIRECT_UI_MODELS = ("Kimi K3",)
 
 
 def ui_models_for_gateway_ids(
@@ -36,12 +41,17 @@ def ui_models_for_gateway_ids(
     if preferred_order is None:
         preferred_order = list(LLM_GATEWAY_MODEL_MAP.keys())
 
+    direct = set(BEDROCK_DIRECT_UI_MODELS)
     if gateway_ids is None:
-        return [name for name in preferred_order if name in LLM_GATEWAY_MODEL_MAP]
+        return [
+            name
+            for name in preferred_order
+            if name in LLM_GATEWAY_MODEL_MAP or name in direct
+        ]
 
     available = {gid for gid in gateway_ids if gid}
     return [
         name
         for name in preferred_order
-        if LLM_GATEWAY_MODEL_MAP.get(name) in available
+        if name in direct or LLM_GATEWAY_MODEL_MAP.get(name) in available
     ]

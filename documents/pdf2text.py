@@ -165,6 +165,8 @@ def _vision_max_tokens(model_id: str, model_type: str) -> int:
         return 16384
     if model_type == "openai":
         return 8192
+    if model_type == "kimi":
+        return 16384
     return 8192
 
 
@@ -223,6 +225,22 @@ def _get_vision_chat(model_name: str | None = None):
             api_key=bearer_token_provider,
             base_url=f"https://bedrock-mantle.{bedrock_region}.api.aws/openai/v1",
             use_responses_api=True,
+            max_tokens=max_tokens,
+        )
+
+    if model_type == "kimi":
+        def kimi_bearer_token_provider() -> str:
+            return bedrock_data_retention.get_bedrock_bearer_token(bedrock_region)
+
+        print(
+            f"  [foundation model] vision model={preferred} id={model_id} "
+            f"via=bedrock-runtime-openai region={bedrock_region}",
+            flush=True,
+        )
+        return ChatOpenAI(
+            model=model_id,
+            api_key=kimi_bearer_token_provider,
+            base_url=f"https://bedrock-runtime.{bedrock_region}.amazonaws.com/openai/v1",
             max_tokens=max_tokens,
         )
 

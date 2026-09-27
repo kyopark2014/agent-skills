@@ -45,6 +45,7 @@ MODELS = [
     "OpenAI GPT 5.6 Luna",
     "OpenAI OSS 120B",
     "OpenAI OSS 20B",
+    "Kimi K3",
 ]
 
 DEFAULT_MODEL = "Claude 4.6 Sonnet"
