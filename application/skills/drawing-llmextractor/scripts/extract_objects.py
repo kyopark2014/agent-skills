@@ -52,6 +52,8 @@ _reexec_supported_python()
 
 from PIL import Image, ImageDraw, ImageFont
 
+from prepare_image import encode_vision_png
+
 Image.MAX_IMAGE_PIXELS = None
 
 # Snapshot before importing chat. A child process inherits UI_MODEL_NAME from
@@ -63,7 +65,8 @@ _UI_GUARDRAIL = os.environ.get("UI_GUARDRAIL")
 logger = logging.getLogger("drawing-llmextractor")
 
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tif", ".tiff"}
-MAX_PIXELS = 2_000_000
+MAX_TILE_SIDE = 5000
+OVERLAP = 0.12
 RED = (255, 0, 0, 255)
 RED_FILL = (255, 0, 0, 72)
 
@@ -214,43 +217,13 @@ def parse_objects(text: str, tile_w: int, tile_h: int) -> list[dict]:
     return found
 
 
-def plan_tiles(
+def _tile_boxes(
     width: int,
     height: int,
-    *,
-    max_pixels: int = MAX_PIXELS,
-    max_tiles: int = 0,
-    overlap: float = 0.12,
+    cols: int,
+    rows: int,
+    overlap: float,
 ) -> list[tuple[int, int, int, int]]:
-    """Split so each crop stays under the vision pixel cap and is not downscaled.
-
-    ``max_tiles`` 0 means as many tiles as the pixel cap requires.
-    Overlap keeps objects that sit on a cut line visible in two crops.
-    """
-    if width <= 0 or height <= 0:
-        return []
-    if width * height <= max_pixels:
-        return [(0, 0, width, height)]
-
-    cols, rows = 1, 1
-    while True:
-        step_w = math.ceil(width / cols)
-        step_h = math.ceil(height / rows)
-        pad_w = int(step_w * overlap)
-        pad_h = int(step_h * overlap)
-        exp_w = min(width, step_w + 2 * pad_w)
-        exp_h = min(height, step_h + 2 * pad_h)
-        if exp_w * exp_h <= max_pixels:
-            break
-        if max_tiles and cols * rows >= max_tiles:
-            break
-        if (width / cols) >= (height / rows):
-            cols += 1
-        else:
-            rows += 1
-        if cols > width and rows > height:
-            break
-
     step_w = math.ceil(width / cols)
     step_h = math.ceil(height / rows)
     pad_w = int(step_w * overlap)
@@ -264,7 +237,44 @@ def plan_tiles(
             bottom = min(height, (r + 1) * step_h + (pad_h if r + 1 < rows else 0))
             if right - left >= 8 and bottom - top >= 8:
                 tiles.append((left, top, right, bottom))
-    return tiles or [(0, 0, width, height)]
+    return tiles
+
+
+def plan_tiles(
+    width: int,
+    height: int,
+    *,
+    max_tiles: int = 0,
+    overlap: float = OVERLAP,
+    max_side: int = MAX_TILE_SIDE,
+) -> list[tuple[int, int, int, int]]:
+    """Split until every crop, including overlap, is at most ``max_side`` on both axes.
+
+    A side longer than 5000px gets another cut. 5000×5000 stays one image.
+    Overlap keeps an object on a cut line visible in two crops, so the grid
+    counts that padding. ``max_tiles`` does not stop this.
+    """
+    del max_tiles
+    if width <= 0 or height <= 0:
+        return []
+
+    cols, rows = 1, 1
+    while True:
+        boxes = _tile_boxes(width, height, cols, rows, overlap)
+        widths = [right - left for left, _top, right, _bottom in boxes]
+        heights = [bottom - top for _left, top, _right, bottom in boxes]
+        too_w = any(side > max_side for side in widths)
+        too_h = any(side > max_side for side in heights)
+        if not too_w and not too_h:
+            break
+        if too_w and (not too_h or max(widths) >= max(heights)):
+            cols += 1
+        else:
+            rows += 1
+        if cols > width and rows > height:
+            break
+
+    return _tile_boxes(width, height, cols, rows, overlap) or [(0, 0, width, height)]
 
 
 def _tile_has_ink(crop: Image.Image, min_ratio: float = 0.002) -> bool:
@@ -407,7 +417,7 @@ _TLS = threading.local()
 
 def _invoke_tile(chat, tile_png: bytes, prompt: str) -> str:
     """One multimodal call, same message shape as chat.extract_text."""
-    img_base64, _mime = chat._prepare_image_base64(tile_png)
+    img_base64 = encode_vision_png(Image.open(BytesIO(tile_png)))
     messages = [
         chat.HumanMessage(
             content=[
@@ -599,7 +609,7 @@ def main() -> int:
         "--max-tiles",
         type=int,
         default=0,
-        help="타일 상한. 0이면 한 장이 200만 픽셀을 넘지 않도록 필요한 만큼 나눔",
+        help="호환용. 조각 수는 바꾸지 않는다. 가로 또는 세로가 5000px를 넘으면 그 방향으로 더 나눈다",
     )
     parser.add_argument(
         "--workers",

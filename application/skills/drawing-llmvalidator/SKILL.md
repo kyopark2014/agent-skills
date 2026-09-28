@@ -22,8 +22,9 @@ description: >-
 ## Critical Rules
 
 1. **선행** — `floors/<F>/floor_wall_original.dxf` (walldetector)가 있어야 한다.
-2. **입력 미리보기** — Vision에는 `floor_wall_original.png` (또는 `prepare_review.py` 산출)를 쓴다.
-   레거시 parts가 있으면 타일 크롭도 만든다.
+2. **입력 미리보기** — Vision에는 `prepare_review.py`가 만든 `llm_review/` 조각만 쓴다.
+   한 변이 5000px를 넘는 이미지는 겹침 격자로 나뉘고, 5000×5000 이하는 한 장이다.
+   `floor_wall_original.png` 원본과 `floor_wall_full.png`는 Vision에 넣지 않는다.
 3. **출력** — `floors/<F>/floor_wall_validated.{dxf,png,_meta.json}` 만 생성·갱신.
    `floor_wall_original.*` 은 읽기 전용(덮어쓰기 금지).
 4. **층당 1회** — 한 bash에 전층 일괄 금지. 파일럿 층 보정 → 컨펌 → 다음 층.
@@ -51,7 +52,7 @@ python3 "$SCRIPTS/render_wall_diff.py" --artifacts "$ART" --floor 5F
 
 | 스크립트 | 역할 |
 | --- | --- |
-| `prepare_review.py` | `floor_wall_original.png` → `llm_review/` (층 전체 또는 레거시 타일 크롭) |
+| `prepare_review.py` | `floor_wall_original.png` → `llm_review/` 조각 (한 변 5000px 이하) + `tiles.json` |
 | `correct_walls_floor.py` | demote/promote → `floor_wall_validated.*` + `llm_review/corrections.json` |
 | `render_wall_diff.py` | original vs validated → `diff_original_vs_validated.png` (초록=promote, 파랑=demote) |
 | `lib_llm_correct.py` | 갭 승격·가구 강등·WALL DXF PNG 재렌더 |
@@ -62,7 +63,7 @@ python3 "$SCRIPTS/render_wall_diff.py" --artifacts "$ART" --floor 5F
 walldetector 산출
   floors/<F>/floor_wall_original.{dxf,png}   ← 입력(불변)
   ↓
-① prepare_review.py → llm_review/ (층 전체 또는 레거시 타일 크롭)
+① prepare_review.py → llm_review/R*C*.png (5000×5000 이하) + tiles.json
   ↓
 ② Vision: demote / promote 판정
   ↓
@@ -152,7 +153,7 @@ walldetector 산출
 
 ## review.json bbox 형식
 
-`llm_review/review.json`의 `demote_bboxes` / `promote_bboxes` 각 항목은 **mm 좌표**로:
+`llm_review/review.json`의 `demote_bboxes` / `promote_bboxes` 각 항목은 **층 전체 mm 좌표**다. 조각 파일과 그 범위는 `llm_review/tiles.json`의 `bbox_px` / `bbox_mm`에 있다.
 
 ```json
 {
@@ -182,7 +183,8 @@ $ARTIFACTS_DIR/<drawing_id>/floors/<F>/
   floor_wall_validated.dxf / .png / _meta.json  # llmvalidator 출력
   diff_original_vs_validated.png                # promote(초록)/demote(파랑) diff
   llm_review/
-    R0C0_wall_crop.png …
+    R0C0.png …            # 5000×5000 이하. bbox_mm는 tiles.json
+    tiles.json
     review.json
     corrections.json
 ```
