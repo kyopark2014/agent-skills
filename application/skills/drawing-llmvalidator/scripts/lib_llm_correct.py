@@ -633,6 +633,108 @@ def demote_line_furniture_boxes(
     return demote
 
 
+_MEETING_RE = re.compile(r"^접견실")
+
+
+def demote_meeting_room_interiors(
+    msp,
+    segs: list[AxisSeg],
+    *,
+    exclude_ids: set[int] | None = None,
+    inset_mm: float = 250.0,
+) -> set[int]:
+    """접견실 내부의 의자·프로젝터 받침대는 벽이 아니다.
+
+    실명 라벨을 감싼 외곽 안쪽에 선 전체가 들어간 것만 제거한다.
+    외벽과 H-Beam 기둥은 남긴다.
+    """
+    exclude_ids = exclude_ids or set()
+    labels = [
+        (x, y)
+        for x, y, s in _iter_text_labels(msp)
+        if _MEETING_RE.search(s.strip())
+    ]
+    if not labels:
+        return set()
+    # 좌우는 라벨을 지나는 장축. 상하는 그 폭을 거의 채우는 수평선(문 틈은 이어 붙임).
+    # 스크린·의자처럼 가운데만 있는 선은 외곽이 아니다.
+    vlong = [s for s in segs if s.is_v and s.layer == WALL_LAYER and s.length >= 2500.0]
+    hwall = [s for s in segs if s.is_h and s.layer == WALL_LAYER and s.length >= 200.0]
+
+    def _spans_room(cands: list[AxisSeg], a0: float, a1: float) -> bool:
+        # 문 폭(약 1.1m)은 이어 붙이고, 의자 사이 빈 구간(2m 이상)은 끊는다.
+        intervals = sorted((s.along0, s.along1) for s in cands)
+        if not intervals:
+            return False
+        merged: list[list[float]] = []
+        for a, b in intervals:
+            if not merged or a > merged[-1][1] + 1600.0:
+                merged.append([a, b])
+            else:
+                merged[-1][1] = max(merged[-1][1], b)
+        return any(a <= a0 + 800.0 and b >= a1 - 800.0 for a, b in merged)
+
+    boxes: list[tuple[float, float, float, float]] = []
+    for lx, ly in labels:
+        lefts = [
+            s.ortho
+            for s in vlong
+            if lx - 12000.0 < s.ortho < lx - 400.0
+            and s.along0 - 800.0 <= ly <= s.along1 + 800.0
+        ]
+        rights = [
+            s.ortho
+            for s in vlong
+            if lx + 400.0 < s.ortho < lx + 12000.0
+            and s.along0 - 800.0 <= ly <= s.along1 + 800.0
+        ]
+        if not (lefts and rights):
+            continue
+        x0, x1 = max(lefts), min(rights)
+        if not (3500.0 < x1 - x0 < 20000.0):
+            continue
+        bands: dict[int, list[AxisSeg]] = {}
+        for s in hwall:
+            if s.along1 < x0 - 200.0 or s.along0 > x1 + 200.0:
+                continue
+            bands.setdefault(int(round(s.ortho / 80.0)), []).append(s)
+        below: list[float] = []
+        above: list[float] = []
+        for key, cands in bands.items():
+            ortho = key * 80.0
+            if not _spans_room(cands, x0, x1):
+                continue
+            if ly - 12000.0 < ortho < ly - 400.0:
+                below.append(ortho)
+            elif ly + 400.0 < ortho < ly + 12000.0:
+                above.append(ortho)
+        if not (below and above):
+            continue
+        y0, y1 = max(below), min(above)
+        if not (3500.0 < y1 - y0 < 20000.0):
+            continue
+        boxes.append((x0, x1, y0, y1))
+    if not boxes:
+        return set()
+    demote: set[int] = set()
+    for s in segs:
+        if s.layer != WALL_LAYER or id(s.entity) in exclude_ids:
+            continue
+        for x0, x1, y0, y1 in boxes:
+            if not (
+                x0 + inset_mm < min(s.x0, s.x1)
+                and max(s.x0, s.x1) < x1 - inset_mm
+                and y0 + inset_mm < min(s.y0, s.y1)
+                and max(s.y0, s.y1) < y1 - inset_mm
+            ):
+                continue
+            if s.length > min(x1 - x0, y1 - y0) * 0.85:
+                continue
+            demote.add(id(s.entity))
+            break
+    return demote
+
+
 _FITNESS_RE = re.compile(r"(피트니스|FITNESS|헬스장|헬스\b|GX룸|GX\b)", re.IGNORECASE)
 
 
@@ -4026,23 +4128,140 @@ def find_double_door_openings(
     return openings
 
 
+def find_single_door_openings(
+    msp,
+    double_openings: list[tuple[bool, float, float, float]],
+) -> tuple[list[tuple[bool, float, float, float]], list[tuple[bool, float, float, float]]]:
+    """외여닫이 문. 1/4 스윙의 벽 방향이 개구, 수직으로 선 문짝은 벽이 아니다.
+
+    반환: (개구 목록, 문짝 목록). 둘 다 (세로인가, ortho, along0, along1).
+    """
+    swings: list[tuple[float, float, float, float, float]] = []
+    for e in msp:
+        if e.dxftype() != "ARC":
+            continue
+        try:
+            r = float(e.dxf.radius)
+            cx, cy = float(e.dxf.center.x), float(e.dxf.center.y)
+            sa, ea = float(e.dxf.start_angle), float(e.dxf.end_angle)
+        except Exception:  # noqa: BLE001
+            continue
+        sweep = (ea - sa) % 360.0
+        if not (650.0 <= r <= 1400.0) or not (50.0 <= sweep <= 130.0):
+            continue
+        if _door_hinge_used(cx, cy, double_openings):
+            continue
+        swings.append((cx, cy, r, sa, ea))
+
+    # 힌지 근처를 지나는 장축 — 문짝이 벽과 나란한 방향
+    long_h: list[tuple[float, float, float]] = []
+    long_v: list[tuple[float, float, float]] = []
+    for e in msp:
+        if e.dxftype() != "LINE":
+            continue
+        try:
+            x0, y0 = float(e.dxf.start.x), float(e.dxf.start.y)
+            x1, y1 = float(e.dxf.end.x), float(e.dxf.end.y)
+        except Exception:  # noqa: BLE001
+            continue
+        dx, dy = abs(x1 - x0), abs(y1 - y0)
+        length = math.hypot(dx, dy)
+        if length < 3000.0 or (dx > 80.0 and dy > 80.0):
+            continue
+        if dy >= dx:
+            long_v.append(((x0 + x1) * 0.5, min(y0, y1), max(y0, y1)))
+        else:
+            long_h.append(((y0 + y1) * 0.5, min(x0, x1), max(x0, x1)))
+
+    def _along_wall(cx: float, cy: float, horizontal: bool) -> bool:
+        if horizontal:
+            return any(
+                abs(cy - oo) <= 280.0 and a0 - 200.0 <= cx <= a1 + 200.0
+                for oo, a0, a1 in long_h
+            )
+        return any(
+            abs(cx - oo) <= 280.0 and a0 - 200.0 <= cy <= a1 + 200.0
+            for oo, a0, a1 in long_v
+        )
+
+    openings: list[tuple[bool, float, float, float]] = []
+    leaves: list[tuple[bool, float, float, float]] = []
+    seen: set[tuple[int, int, int]] = set()
+    for cx, cy, r, sa, ea in swings:
+        ends: list[tuple[float, float]] = []
+        for ang in (sa, ea):
+            rad = math.radians(ang)
+            ends.append((cx + r * math.cos(rad), cy + r * math.sin(rad)))
+        along: tuple[float, float] | None = None
+        perp: tuple[float, float] | None = None
+        for ex, ey in ends:
+            dx, dy = abs(ex - cx), abs(ey - cy)
+            if dx > 0.7 * r and dy < 0.35 * r:
+                along = (ex, ey)
+            elif dy > 0.7 * r and dx < 0.35 * r:
+                perp = (ex, ey)
+        if along is None or perp is None:
+            continue
+        horizontal = abs(along[1] - cy) <= abs(along[0] - cx)
+        if not _along_wall(cx, cy, horizontal):
+            continue
+        key = (round(cx / 50.0), round(cy / 50.0), round(r / 50.0))
+        if key in seen:
+            continue
+        seen.add(key)
+        if horizontal:
+            openings.append((False, cy, min(cx, along[0]), max(cx, along[0])))
+            leaves.append((True, cx, min(cy, perp[1]), max(cy, perp[1])))
+        else:
+            openings.append((True, cx, min(cy, along[1]), max(cy, along[1])))
+            leaves.append((False, cy, min(cx, perp[0]), max(cx, perp[0])))
+    return openings, leaves
+
+
+def _door_hinge_used(
+    cx: float,
+    cy: float,
+    openings: list[tuple[bool, float, float, float]],
+) -> bool:
+    for is_v, ortho, a0, a1 in openings:
+        if is_v:
+            if abs(cx - ortho) <= 50.0 and (abs(cy - a0) <= 50.0 or abs(cy - a1) <= 50.0):
+                return True
+        elif abs(cy - ortho) <= 50.0 and (abs(cx - a0) <= 50.0 or abs(cx - a1) <= 50.0):
+            return True
+    return False
+
+
 def correct_walls_around_doors(msp) -> tuple[int, int]:
     """문 개구를 가로지르는 WALL은 끊고, 개구 양옆 벽은 WALL로 둔다.
 
     문짝(개구 안 선)은 벽이 아니다. 양옆은 벽이다.
     """
     openings = find_double_door_openings(msp)
-    if not openings:
+    single_openings, door_leaves = find_single_door_openings(msp, openings)
+    openings = openings + single_openings
+    if not openings and not door_leaves:
         return (0, 0)
 
-    def _cuts_for(is_v: bool, ortho: float, a0: float, a1: float) -> list[tuple[float, float]]:
+    def _cuts_for(
+        is_v: bool,
+        ortho: float,
+        a0: float,
+        a1: float,
+        *,
+        include_leaves: bool = False,
+    ) -> list[tuple[float, float]]:
         cuts: list[tuple[float, float]] = []
-        for ov, oo, c0, c1 in openings:
-            if ov != is_v or abs(oo - ortho) > 280.0:
-                continue
-            lo, hi = max(a0, c0), min(a1, c1)
-            if hi - lo >= 400.0:
-                cuts.append((c0, c1))
+        pools = [(openings, 280.0)]
+        if include_leaves:
+            pools.append((door_leaves, 80.0))
+        for pool, tol in pools:
+            for ov, oo, c0, c1 in pool:
+                if ov != is_v or abs(oo - ortho) > tol:
+                    continue
+                lo, hi = max(a0, c0), min(a1, c1)
+                if hi - lo >= 250.0:
+                    cuts.append((c0, c1))
         if not cuts:
             return []
         cuts.sort()
@@ -4058,10 +4277,10 @@ def correct_walls_around_doors(msp) -> tuple[int, int]:
         pieces: list[tuple[float, float]] = []
         cursor = a0
         for c0, c1 in cuts:
-            if c0 - cursor >= 400.0:
+            if c0 - cursor >= 200.0:
                 pieces.append((cursor, c0))
             cursor = max(cursor, c1)
-        if a1 - cursor >= 400.0:
+        if a1 - cursor >= 200.0:
             pieces.append((cursor, a1))
         return pieces
 
@@ -4150,7 +4369,7 @@ def correct_walls_around_doors(msp) -> tuple[int, int]:
                 rebuilt.append((a, b))
                 continue
             is_v, ortho, a0, a1 = axis
-            cuts = _cuts_for(is_v, ortho, a0, a1)
+            cuts = _cuts_for(is_v, ortho, a0, a1, include_leaves=True)
             if not cuts:
                 rebuilt.append((a, b))
                 continue
@@ -4167,7 +4386,7 @@ def correct_walls_around_doors(msp) -> tuple[int, int]:
         msp.delete_entity(e)
         n_cut += 1
         for a, b in rebuilt:
-            if math.hypot(b[0] - a[0], b[1] - a[1]) < 400.0:
+            if math.hypot(b[0] - a[0], b[1] - a[1]) < 200.0:
                 continue
             msp.add_line(a, b, dxfattribs={"layer": WALL_LAYER, "color": WALL_COLOR})
 
@@ -4266,6 +4485,7 @@ def apply_corrections(
     if do_box_demote:
         furn_ids = demote_line_furniture_boxes(segs, exclude_ids=hbeam_ids)
         furn_ids |= demote_fitness_equipment(msp, segs, exclude_ids=hbeam_ids)
+        furn_ids |= demote_meeting_room_interiors(msp, segs, exclude_ids=hbeam_ids)
         furn_ids |= demote_landscape_walls(msp, segs, exclude_ids=hbeam_ids)
         promote = [s for s in promote if id(s.entity) not in furn_ids]
 
@@ -4301,6 +4521,7 @@ def apply_corrections(
         furniture_box_demote = demote_closed_furniture_boxes(msp, exclude_ids=hbeam_ids)
         furniture_line_demote = demote_line_furniture_boxes(segs, exclude_ids=hbeam_ids)
         fitness_demote = demote_fitness_equipment(msp, segs, exclude_ids=hbeam_ids)
+        fitness_demote |= demote_meeting_room_interiors(msp, segs, exclude_ids=hbeam_ids)
         landscape_demote = demote_landscape_walls(msp, segs, exclude_ids=hbeam_ids)
         demote_ids |= furniture_box_demote
         demote_ids |= furniture_line_demote
@@ -4385,6 +4606,7 @@ def apply_corrections(
         post_furn = demote_line_furniture_boxes(segs_after, exclude_ids=hbeam_ids)
         post_furn |= demote_closed_furniture_boxes(msp, exclude_ids=hbeam_ids)
         post_furn |= demote_fitness_equipment(msp, segs_after, exclude_ids=hbeam_ids)
+        post_furn |= demote_meeting_room_interiors(msp, segs_after, exclude_ids=hbeam_ids)
         post_furn |= demote_landscape_walls(msp, segs_after, exclude_ids=hbeam_ids)
         for e in list(msp):
             if e.dxf.layer == WALL_LAYER and id(e) in post_furn:
