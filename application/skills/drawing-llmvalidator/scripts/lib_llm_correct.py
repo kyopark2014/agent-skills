@@ -2250,6 +2250,25 @@ def _is_open_hall_interior_v_seg(
     return False
 
 
+def _closed_room_side(s: AxisSeg, segs: list[AxisSeg]) -> bool:
+    """양쪽 끝이 긴 수직벽에 물린 이중선이면 실의 한 면이다."""
+    if not s.is_h or not segs:
+        return False
+    same = [p for p in segs if p.is_h and p.length >= 800.0]
+    if not _has_parallel_pair(s, same, thick_min=80.0, thick_max=320.0):
+        return False
+    crosses = [p for p in segs if p.is_v and p.length >= 2000.0]
+
+    def _hits(along: float) -> bool:
+        return any(
+            abs(c.ortho - along) <= 200.0
+            and c.along0 - 200.0 <= s.ortho <= c.along1 + 200.0
+            for c in crosses
+        )
+
+    return _hits(s.along0) and _hits(s.along1)
+
+
 def _is_open_hall_interior_h_seg(
     s: AxisSeg,
     halls: list[
@@ -2325,6 +2344,13 @@ def _is_open_hall_interior_h_seg(
             continue
         if left_x is not None and right_x is not None:
             if s.along1 < left_x + 1000.0 or s.along0 > right_x - 1000.0:
+                continue
+            # 준비실처럼 홀을 마주 보는 실의 한 면. 양쪽이 실 측벽에 물린 이중선은 객석 줄이 아니다.
+            hall_w = right_x - left_x
+            if (
+                s.length < hall_w * 0.55
+                and _closed_room_side(s, all_segs or [])
+            ):
                 continue
         return True
     return False
@@ -4170,29 +4196,30 @@ def find_double_door_openings(
                 break
         else:
             centers.append([cx, cy, r])
-    used = [False] * len(centers)
-    openings: list[tuple[bool, float, float, float]] = []
+    # 간격이 지름에 가장 가까운 쌍부터 묶는다.
+    # 더 먼 이웃(옆 외여닫이)을 고르면 큰문 한가운데가 벽으로 남는다.
+    cands: list[tuple[float, int, int]] = []
     for i, a in enumerate(centers):
-        if used[i]:
-            continue
-        best: tuple[float, int] | None = None
-        for j, b in enumerate(centers):
-            if j <= i or used[j]:
-                continue
-            if abs(a[2] - b[2]) > 80.0:
+        for j in range(i + 1, len(centers)):
+            b = centers[j]
+            if abs(a[2] - b[2]) > 25.0:
                 continue
             dx, dy = abs(a[0] - b[0]), abs(a[1] - b[1])
-            dist = math.hypot(dx, dy)
             if dx > 40.0 and dy > 40.0:
                 continue
-            if not (1.6 * a[2] <= dist <= 2.4 * a[2]):
+            dist = math.hypot(dx, dy)
+            target = a[2] + b[2]
+            if not (0.8 * target <= dist <= 1.2 * target):
                 continue
-            if best is None or dist > best[0]:
-                best = (dist, j)
-        if best is None:
+            cands.append((abs(dist - target), i, j))
+    cands.sort()
+    used = [False] * len(centers)
+    openings: list[tuple[bool, float, float, float]] = []
+    for _score, i, j in cands:
+        if used[i] or used[j]:
             continue
-        b = centers[best[1]]
-        used[i] = used[best[1]] = True
+        a, b = centers[i], centers[j]
+        used[i] = used[j] = True
         is_v = abs(a[0] - b[0]) <= 40.0
         ortho = (a[0] + b[0]) * 0.5 if is_v else (a[1] + b[1]) * 0.5
         if is_v:
