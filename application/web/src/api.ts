@@ -104,6 +104,18 @@ export interface SessionInfo {
   graph_pattern?: GraphPattern | string;
 }
 
+export interface DrawingFloor {
+  id: string;
+  original: boolean;
+  wall: boolean;
+  validated: boolean;
+}
+
+export interface DrawingCatalog {
+  drawing_id: string;
+  floors: DrawingFloor[];
+}
+
 export interface DocumentsStatus {
   documents_dir: string;
   projects_dir?: string;
@@ -404,6 +416,7 @@ export const api = {
     });
   },
   getAdminDashboard: () => request<DashboardStats>("/api/admin/dashboard"),
+  getDrawingFloors: () => request<DrawingCatalog>("/api/drawings/floors"),
   getLlmGateway: () =>
     request<LlmGatewayConfig>("/api/config/llm-gateway"),
   verifyLlmGateway: (body: { url: string; key?: string }) =>

@@ -735,6 +735,408 @@ def demote_meeting_room_interiors(
     return demote
 
 
+_SERVING_RE = re.compile(r"배식대")
+_OTHER_ROOM_RE = re.compile(r"(실|창고|홀|조리|주방|식당|코어|계단)")
+
+
+def demote_kitchen_equipment(
+    msp,
+    segs: list[AxisSeg],
+    *,
+    exclude_ids: set[int] | None = None,
+) -> set[int]:
+    """조리실 조리기구는 벽이 아니다. 옆의 H-Beam 기둥만 남긴다."""
+    exclude_ids = exclude_ids or set()
+    kitchens = [
+        (x, y)
+        for x, y, s in _iter_text_labels(msp)
+        if "조리실" in s and "사무" not in s
+    ]
+    if not kitchens:
+        return set()
+    boxes: dict[int, list[float]] = {}
+    for s in segs:
+        if id(s.entity) not in exclude_ids or not (900.0 <= s.length <= 1600.0):
+            continue
+        b = boxes.setdefault(id(s.entity), [1e18, 1e18, -1e18, -1e18])
+        b[0] = min(b[0], s.x0, s.x1)
+        b[1] = min(b[1], s.y0, s.y1)
+        b[2] = max(b[2], s.x0, s.x1)
+        b[3] = max(b[3], s.y0, s.y1)
+    columns = [
+        b for b in boxes.values()
+        if 800.0 <= b[2] - b[0] <= 1800.0 and 800.0 <= b[3] - b[1] <= 1800.0
+        and any(abs((b[0] + b[2]) * 0.5 - lx) < 15000.0 and abs((b[1] + b[3]) * 0.5 - ly) < 15000.0 for lx, ly in kitchens)
+    ]
+    if not columns:
+        return set()
+
+    def _near_column(mx: float, my: float) -> bool:
+        for x0, y0, x1, y1 in columns:
+            dx = 0.0 if x0 <= mx <= x1 else min(abs(mx - x0), abs(mx - x1))
+            dy = 0.0 if y0 <= my <= y1 else min(abs(my - y0), abs(my - y1))
+            if dx * dx + dy * dy <= 2300.0 * 2300.0:
+                return True
+        return False
+
+    shorts = []
+    for s in segs:
+        if s.layer != WALL_LAYER or s.entity is None or id(s.entity) in exclude_ids:
+            continue
+        if not (300.0 <= s.length <= 1000.0):
+            continue
+        mx, my = (s.x0 + s.x1) * 0.5, (s.y0 + s.y1) * 0.5
+        if not any(abs(mx - lx) < 8000.0 and abs(my - ly) < 8000.0 for lx, ly in kitchens):
+            continue
+        if _near_column(mx, my):
+            shorts.append(s)
+    demote: set[int] = set()
+    for s in shorts:
+        mx, my = (s.x0 + s.x1) * 0.5, (s.y0 + s.y1) * 0.5
+        neighbors = 0
+        for o in shorts:
+            if abs((o.x0 + o.x1) * 0.5 - mx) > 1400.0 or abs((o.y0 + o.y1) * 0.5 - my) > 1400.0:
+                continue
+            neighbors += 1
+        if neighbors >= 4:
+            demote.add(id(s.entity))
+    return demote
+
+
+def demote_conveyor_belt(
+    msp,
+    segs: list[AxisSeg],
+    *,
+    exclude_ids: set[int] | None = None,
+) -> set[int]:
+    """세척실 컨베이어벨트. 롤러가 늘어선 얇은 평행선 다발은 벽이 아니다."""
+    exclude_ids = exclude_ids or set()
+    ticks: list[tuple[bool, float, float, float]] = []
+    for e in msp:
+        if e.dxftype() != "LWPOLYLINE":
+            continue
+        pts = [(float(p[0]), float(p[1])) for p in e.get_points("xy")]
+        if len(pts) < 8:
+            continue
+        xs = [p[0] for p in pts]
+        ys = [p[1] for p in pts]
+        w, h = max(xs) - min(xs), max(ys) - min(ys)
+        if min(w, h) > 250.0 or not (150.0 <= max(w, h) <= 500.0):
+            continue
+        vertical = h > w
+        ticks.append((vertical, (min(xs) + max(xs)) * 0.5, min(ys), max(ys)))
+    if len(ticks) < 8:
+        return set()
+    wash = [(x, y) for x, y, s in _iter_text_labels(msp) if "세척" in s]
+    if not wash:
+        return set()
+
+    demote: set[int] = set()
+    for vertical in (True, False):
+        group = [t for t in ticks if t[0] == vertical]
+        bands: dict[int, list[tuple[bool, float, float, float]]] = {}
+        for t in group:
+            bands.setdefault(round(t[2] / 200.0) * 200, []).append(t)
+        for group in bands.values():
+            group.sort(key=lambda t: t[1])
+            run: list[tuple[bool, float, float, float]] = []
+
+            def _flush(items: list[tuple[bool, float, float, float]]) -> None:
+                if len(items) < 8:
+                    return
+                y0 = min(t[2] for t in items)
+                y1 = max(t[3] for t in items)
+                x0, x1 = items[0][1], items[-1][1]
+                cy = (y0 + y1) * 0.5
+                if vertical:
+                    near = any(x0 - 3000.0 <= lx <= x1 + 3000.0 and abs(ly - cy) < 12000.0 for lx, ly in wash)
+                else:
+                    near = any(y0 - 3000.0 <= ly <= y1 + 3000.0 and abs(lx - cy) < 12000.0 for lx, ly in wash)
+                if not near:
+                    return
+                for s in segs:
+                    if s.layer != WALL_LAYER or s.entity is None or id(s.entity) in exclude_ids:
+                        continue
+                    if s.is_v == vertical or s.length < 2000.0:
+                        continue
+                    if not (y0 - 30.0 <= s.ortho <= y1 + 30.0):
+                        continue
+                    if min(s.along1, x1 + 800.0) - max(s.along0, x0 - 800.0) < 1500.0:
+                        continue
+                    demote.add(id(s.entity))
+
+            for t in group:
+                if run:
+                    gap = t[1] - run[-1][1]
+                    if gap < 400.0:
+                        continue
+                    same = min(t[3], run[-1][3]) - max(t[2], run[-1][2]) >= (t[3] - t[2]) * 0.6
+                    # 기둥 간격(약 5 m)은 같은 벨트다.
+                    if gap > 5600.0 or not same:
+                        _flush(run)
+                        run = []
+                run.append(t)
+            _flush(run)
+    return demote
+
+
+def demote_coffee_machine_row(
+    msp,
+    segs: list[AxisSeg],
+    *,
+    exclude_ids: set[int] | None = None,
+) -> set[int]:
+    """구성원 식당 아래 커피머신 줄. 머신 위·아래 선은 벽이 아니고 H-Beam 만 남긴다."""
+    exclude_ids = exclude_ids or set()
+    boxes: list[tuple[float, float, float, float]] = []
+    for e in msp:
+        if e.dxftype() != "LWPOLYLINE" or e.dxf.layer != BASE_LAYER:
+            continue
+        pts = [(float(p[0]), float(p[1])) for p in e.get_points("xy")]
+        if len(pts) < 4:
+            continue
+        xs = [p[0] for p in pts]
+        ys = [p[1] for p in pts]
+        w, h = max(xs) - min(xs), max(ys) - min(ys)
+        if not (1200.0 <= w <= 1400.0 and 750.0 <= h <= 900.0):
+            continue
+        boxes.append((min(xs), min(ys), max(xs), max(ys)))
+    if len(boxes) < 3:
+        return set()
+    halls = [(x, y) for x, y, s in _iter_text_labels(msp) if "구성원 식당" in s]
+    if not halls:
+        return set()
+    boxes.sort()
+    demote: set[int] = set()
+    run: list[tuple[float, float, float, float]] = []
+
+    def _flush(items: list[tuple[float, float, float, float]]) -> None:
+        if len(items) < 3:
+            return
+        x0, y0 = items[0][0], min(b[1] for b in items)
+        x1, y1 = items[-1][2], max(b[3] for b in items)
+        cx = (x0 + x1) * 0.5
+        if not any(abs(cx - lx) < 22000.0 and 4000.0 < ly - y1 < 14000.0 for lx, ly in halls):
+            return
+        for s in segs:
+            if s.layer != WALL_LAYER or s.is_v or s.entity is None or id(s.entity) in exclude_ids:
+                continue
+            if s.length < 2000.0:
+                continue
+            if not (y0 - 200.0 <= s.ortho <= y1 + 200.0):
+                continue
+            if min(s.along1, x1) - max(s.along0, x0) < 2000.0:
+                continue
+            demote.add(id(s.entity))
+
+    for b in boxes:
+        if run:
+            gap = b[0] - run[-1][2]
+            same = min(b[3], run[-1][3]) - max(b[1], run[-1][1]) > 400.0
+            if gap > 500.0 or gap < -200.0 or not same:
+                _flush(run)
+                run = []
+        run.append(b)
+    _flush(run)
+    return demote
+
+
+def demote_dining_hall_furniture(
+    msp,
+    segs: list[AxisSeg],
+    *,
+    exclude_ids: set[int] | None = None,
+) -> set[int]:
+    """구성원 식당#2 안은 벽이 없다. 식탁·배식대만 지우고 H-Beam 은 남긴다."""
+    exclude_ids = exclude_ids or set()
+    halls = [(x, y) for x, y, s in _iter_text_labels(msp) if "구성원 식당#2" in s]
+    if not halls:
+        return set()
+    long_walls = [s for s in segs if s.layer == WALL_LAYER and s.length >= 8000.0]
+
+    def _on_enclosure(s: AxisSeg) -> bool:
+        for w in long_walls:
+            if w.is_v != s.is_v or abs(w.ortho - s.ortho) > 80.0:
+                continue
+            if min(w.along1, s.along1) - max(w.along0, s.along0) > 0.0:
+                return True
+        return False
+
+    demote: set[int] = set()
+    for lx, ly in halls:
+        for s in segs:
+            if s.layer != WALL_LAYER or s.entity is None or id(s.entity) in exclude_ids:
+                continue
+            if not (250.0 <= s.length <= 5500.0):
+                continue
+            mx, my = (s.x0 + s.x1) * 0.5, (s.y0 + s.y1) * 0.5
+            if abs(mx - lx) > 20000.0:
+                continue
+            if not (-12000.0 <= my - ly <= 4500.0):
+                continue
+            if _on_enclosure(s):
+                continue
+            demote.add(id(s.entity))
+    return demote
+
+
+def demote_cafeteria_counter_lines(
+    msp,
+    segs: list[AxisSeg],
+    *,
+    exclude_ids: set[int] | None = None,
+) -> set[int]:
+    """식당 안 배식대의 평행 이중선은 벽이 아니다. 끝의 H-Beam 기둥은 남긴다."""
+    exclude_ids = exclude_ids or set()
+    cafes = [
+        (x, y)
+        for x, y, s in _iter_text_labels(msp)
+        if "식당" in s and "창고" not in s and "배식" not in s
+    ]
+    if not cafes:
+        return set()
+    faces = [
+        s for s in segs
+        if id(s.entity) in exclude_ids and 900.0 <= s.length <= 1600.0
+    ]
+    cands = [
+        s for s in segs
+        if s.layer == WALL_LAYER and s.entity is not None
+        and id(s.entity) not in exclude_ids
+        and 2000.0 <= s.length <= 5000.0
+    ]
+
+    def _near(s: AxisSeg) -> bool:
+        mx = (s.along0 + s.along1) * 0.5 if not s.is_v else s.ortho
+        my = s.ortho if not s.is_v else (s.along0 + s.along1) * 0.5
+        return any(abs(mx - lx) < 16000.0 and abs(my - ly) < 8000.0 for lx, ly in cafes)
+
+    def _butts(s: AxisSeg) -> bool:
+        for f in faces:
+            if f.is_v == s.is_v:
+                continue
+            if not (f.along0 - 80.0 <= s.ortho <= f.along1 + 80.0):
+                continue
+            if min(abs(s.along0 - f.ortho), abs(s.along1 - f.ortho)) <= 120.0:
+                return True
+        return False
+
+    demote: set[int] = set()
+    pool = [s for s in cands if _near(s)]
+    for i, a in enumerate(pool):
+        for b in pool[i + 1:]:
+            if a.is_v != b.is_v:
+                continue
+            thick = abs(a.ortho - b.ortho)
+            if not (180.0 <= thick <= 400.0):
+                continue
+            ov = min(a.along1, b.along1) - max(a.along0, b.along0)
+            if ov < 2000.0 or ov < min(a.length, b.length) * 0.8:
+                continue
+            if not (_butts(a) and _butts(b)):
+                continue
+            demote.add(id(a.entity))
+            demote.add(id(b.entity))
+    return demote
+
+
+def demote_serving_counter_walls(
+    msp,
+    segs: list[AxisSeg],
+    *,
+    exclude_ids: set[int] | None = None,
+) -> set[int]:
+    """배식대 안에는 벽이 없다. H-Beam 기둥만 남긴다."""
+    exclude_ids = exclude_ids or set()
+    cafe = demote_cafeteria_counter_lines(msp, segs, exclude_ids=exclude_ids)
+    cafe |= demote_conveyor_belt(msp, segs, exclude_ids=exclude_ids)
+    cafe |= demote_kitchen_equipment(msp, segs, exclude_ids=exclude_ids)
+    cafe |= demote_dining_hall_furniture(msp, segs, exclude_ids=exclude_ids)
+    cafe |= demote_coffee_machine_row(msp, segs, exclude_ids=exclude_ids)
+    labels = [(x, y) for x, y, s in _iter_text_labels(msp) if _SERVING_RE.search(s)]
+    if not labels:
+        return cafe
+    others = [
+        (x, y)
+        for x, y, s in _iter_text_labels(msp)
+        if _OTHER_ROOM_RE.search(s) and not _SERVING_RE.search(s)
+    ]
+    verts = [s for s in segs if s.is_v and s.length >= 3500.0]
+    hors = [s for s in segs if s.is_h and s.length >= 2500.0]
+    boxes: list[tuple[float, float, float, float]] = []
+    for lx, ly in labels:
+        lefts = [
+            s.ortho
+            for s in verts
+            if lx - 8000.0 < s.ortho < lx - 200.0 and s.along0 - 400.0 <= ly <= s.along1 + 400.0
+        ]
+        rights = [
+            s.ortho
+            for s in verts
+            if lx + 200.0 < s.ortho < lx + 8000.0 and s.along0 - 400.0 <= ly <= s.along1 + 400.0
+        ]
+        if not lefts or not rights:
+            continue
+        near_l, near_r = max(lefts), min(rights)
+        if not (2500.0 < near_r - near_l < 12000.0):
+            continue
+        x0 = min((o for o in lefts if near_l - 600.0 <= o <= near_l), default=near_l)
+        x1 = max((o for o in rights if near_r <= o <= near_r + 600.0), default=near_r)
+
+        def _spans(s: AxisSeg) -> bool:
+            return min(s.along1, x1) - max(s.along0, x0) >= (x1 - x0) * 0.55
+
+        below = [s.ortho for s in hors if _spans(s) and ly - 10000.0 < s.ortho < ly - 200.0]
+        above = [s.ortho for s in hors if _spans(s) and ly + 200.0 < s.ortho < ly + 14000.0]
+        if not below:
+            continue
+        y0 = max(below)
+        y0 = min((o for o in below if y0 - 600.0 <= o <= y0), default=y0)
+
+        def _blocked(ortho: float) -> bool:
+            return any(x0 < ox < x1 and min(ly, ortho) < oy < max(ly, ortho) for ox, oy in others)
+
+        above = [o for o in above if not _blocked(o)]
+        if above:
+            y1 = min(above)
+            y1 = max((o for o in above if y1 <= o <= y1 + 600.0), default=y1)
+        else:
+            caps = [
+                s.along1
+                for s in verts
+                if abs(s.ortho - x0) <= 40.0 or abs(s.ortho - x1) <= 40.0 or abs(s.ortho - near_l) <= 40.0 or abs(s.ortho - near_r) <= 40.0
+            ]
+            caps = [c for c in caps if ly + 1500.0 < c < ly + 8000.0 and not _blocked(c)]
+            if not caps:
+                continue
+            y1 = max(caps)
+        if not (4000.0 < y1 - y0 < 18000.0):
+            continue
+        if any(x0 + 400.0 < ox < x1 - 400.0 and y0 + 400.0 < oy < y1 - 400.0 for ox, oy in others):
+            continue
+        boxes.append((x0, x1, y0, y1))
+    if not boxes:
+        return cafe
+    demote: set[int] = set()
+    for s in segs:
+        if s.layer != WALL_LAYER or s.entity is None or id(s.entity) in exclude_ids:
+            continue
+        for x0, x1, y0, y1 in boxes:
+            if s.is_h:
+                if not (y0 - 80.0 <= s.ortho <= y1 + 80.0):
+                    continue
+                span = x1 - x0
+            else:
+                if not (x0 - 80.0 <= s.ortho <= x1 + 80.0):
+                    continue
+                span = y1 - y0
+            ov = min(s.along1, (x1 if s.is_h else y1) + 80.0) - max(s.along0, (x0 if s.is_h else y0) - 80.0)
+            if ov >= 40.0 and ov >= min(s.length * 0.7, span * 0.45):
+                demote.add(id(s.entity))
+                break
+    return demote | cafe
+
+
 _FITNESS_RE = re.compile(r"(피트니스|FITNESS|헬스장|헬스\b|GX룸|GX\b)", re.IGNORECASE)
 
 
@@ -1415,6 +1817,76 @@ def find_hbeam_column_entities(msp) -> set[int]:
 
 
 
+def _hbeam_column_boxes(msp) -> list[tuple[float, float, float, float]]:
+    """'_' 가 있는 H-Beam 정사각의 중심과 크기."""
+    squares = _iter_closed_squares(msp, min_mm=450.0, max_mm=1500.0)
+    dashes = _iter_hbeam_dashes(msp)
+    arc_pts = _pictogram_arc_points(msp)
+    found: list[tuple[float, float, float, float]] = []
+    for cx, cy, w, h, _e in squares:
+        side = max(w, h)
+        n_dash = 0
+        for mx, my, length, _de in dashes:
+            if length > min(w, h) * 0.85:
+                continue
+            if abs(mx - cx) <= side * 0.35 and abs(my - cy) <= side * 0.35:
+                n_dash += 1
+        if n_dash < 1:
+            continue
+        x0, y0 = cx - w * 0.5, cy - h * 0.5
+        x1, y1 = cx + w * 0.5, cy + h * 0.5
+        n_arc = sum(1 for ax, ay in arc_pts if x0 <= ax <= x1 and y0 <= ay <= y1)
+        if n_arc >= 2 or n_dash >= 6:
+            continue
+        if any(abs(cx - ox) <= 120.0 and abs(cy - oy) <= 120.0 for ox, oy, _ow, _oh in found):
+            continue
+        found.append((cx, cy, w, h))
+    return found
+
+
+def promote_hbeam_sleeves(msp) -> int:
+    """H-Beam 을 감싼 닫힌 외곽 사각형은 기둥 외벽이다."""
+    boxes = _hbeam_column_boxes(msp)
+    if not boxes:
+        return 0
+    n = 0
+    for e in msp:
+        if e.dxftype() != "LWPOLYLINE" or not e.closed:
+            continue
+        if getattr(e.dxf, "layer", None) != BASE_LAYER:
+            continue
+        pts = [(float(p[0]), float(p[1])) for p in e.get_points("xy")]
+        if len(pts) < 4 or len(pts) > 5:
+            continue
+        xs = [p[0] for p in pts]
+        ys = [p[1] for p in pts]
+        x0, x1 = min(xs), max(xs)
+        y0, y1 = min(ys), max(ys)
+        rw, rh = x1 - x0, y1 - y0
+        if not (1000.0 <= rw <= 2600.0 and 1000.0 <= rh <= 2600.0):
+            continue
+        for cx, cy, w, h in boxes:
+            if not (x0 < cx < x1 and y0 < cy < y1):
+                continue
+            inset_l = (cx - w * 0.5) - x0
+            inset_r = x1 - (cx + w * 0.5)
+            inset_b = (cy - h * 0.5) - y0
+            inset_t = y1 - (cy + h * 0.5)
+            insets = (inset_l, inset_r, inset_b, inset_t)
+            if not all(60.0 <= v <= 800.0 for v in insets):
+                continue
+            if not (w + 100.0 <= rw <= w + 1000.0 and h + 100.0 <= rh <= h + 1000.0):
+                continue
+            e.dxf.layer = WALL_LAYER
+            try:
+                e.dxf.color = WALL_COLOR
+            except Exception:  # noqa: BLE001
+                pass
+            n += 1
+            break
+    return n
+
+
 def promote_hbeam_columns(msp) -> int:
     """H-Beam 기둥 BASE → WALL (레이어·색 변경). Returns n promoted ents."""
     ids = find_hbeam_column_entities(msp)
@@ -1729,6 +2201,89 @@ def _nearest_hall_side_walls(
     return left_x, right_x
 
 
+def _seat_door_wall_orthos(segs: list[AxisSeg]) -> set[float]:
+    """의자 사이를 지나고 문 스윙 안에 있는 긴 세로선의 x.
+
+    더 바깥에 실제 벽이 있을 때만. 문틀이 된 바깥 벽은 넣지 않는다.
+    벽두께 반대면도 같은 벽으로 포함한다.
+    """
+    cached = getattr(_seat_door_wall_orthos, "_cache", None)
+    if cached is not None and cached[0] is segs:
+        return cached[1]
+    longs = [p for p in segs if p.is_v and p.length >= 6000.0 and p.entity is not None]
+    chairs = [c for c in segs if c.is_v and 300.0 <= c.length <= 1000.0]
+    hinges: list[tuple[float, float, float]] = []
+    msp = None
+    for s in longs:
+        try:
+            msp = s.entity.doc.modelspace()
+            break
+        except Exception:  # noqa: BLE001
+            continue
+    if msp is not None:
+        for e in msp:
+            if e.dxftype() != "ARC":
+                continue
+            r = float(e.dxf.radius)
+            if 650.0 <= r <= 1400.0:
+                c = e.dxf.center
+                hinges.append((float(c.x), float(c.y), r))
+    faces: list[float] = []
+    for s in longs:
+        if not _has_parallel_pair(s, longs, thick_min=40.0, thick_max=400.0):
+            continue
+        if not any(
+            s.along0 - 800.0 <= hy <= s.along1 + 800.0 and abs(hx - s.ortho) < r + 80.0
+            for hx, hy, r in hinges
+        ):
+            continue
+        chair_l = 0
+        chair_r = 0
+        buckets: set[int] = set()
+        for c in chairs:
+            if abs(c.ortho - s.ortho) > 1200.0:
+                continue
+            ov = min(s.along1, c.along1) - max(s.along0, c.along0)
+            if ov < 200.0:
+                continue
+            buckets.add(round(c.ortho / 80.0))
+            if c.ortho < s.ortho:
+                chair_l += 1
+            else:
+                chair_r += 1
+        if len(buckets) < 8:
+            continue
+        # 의자 가장자리의 문 벽은 남긴다. 의자 양쪽을 가르는 선만 뺀다.
+        if min(chair_l, chair_r) < 2:
+            continue
+        outward = 1.0 if chair_l >= chair_r else -1.0
+        if any(
+            p is not s
+            and _has_parallel_pair(p, longs, thick_min=40.0, thick_max=400.0)
+            and 1500.0 <= (p.ortho - s.ortho) * outward <= 6000.0
+            for p in longs
+        ):
+            faces.append(s.ortho)
+    orthos = set(faces)
+    for s in longs:
+        if any(40.0 <= abs(s.ortho - face) <= 400.0 for face in faces):
+            orthos.add(s.ortho)
+    _seat_door_wall_orthos._cache = (segs, orthos)  # type: ignore[attr-defined]
+    return orthos
+
+
+def _is_seat_door_wall(s: AxisSeg, segs: list[AxisSeg]) -> bool:
+    if not s.is_v or s.length < 6000.0:
+        return False
+    return any(abs(s.ortho - ortho) <= 1.0 for ortho in _seat_door_wall_orthos(segs))
+
+
+def _near_seat_door_wall(is_v: bool, ortho: float, segs: list[AxisSeg]) -> bool:
+    if not is_v:
+        return False
+    return any(abs(ortho - banned) <= 450.0 for banned in _seat_door_wall_orthos(segs))
+
+
 def _nearest_hall_end_walls(
     segs: list[AxisSeg],
     lx: float,
@@ -1869,6 +2424,56 @@ def _stage_enclosure_runs(
                 break
         if hall is None:
             continue
+        lx, ly = hall[0], hall[1]
+        # 객석이 무대 위·아래에 있으면 뒤벽은 가로 이중선이다. 정면(객석 쪽)은 열어둠.
+        if abs(ly - sy) > max(abs(lx - sx) * 1.5, 4000.0):
+            aud_y = 1.0 if ly >= sy else -1.0
+            hcands: list[AxisSeg] = []
+            for s in hors:
+                if s.length < 2500.0:
+                    continue
+                back = aud_y * (sy - s.ortho)
+                if not (500.0 <= back <= 2200.0):
+                    continue
+                if not (s.along0 - 2000.0 <= sx <= s.along1 + 2000.0):
+                    continue
+                if not _has_parallel_pair(s, hors):
+                    continue
+                hcands.append(s)
+            if hcands:
+                orthos_h: set[float] = set()
+                for s in hors:
+                    if s.length < 2000.0:
+                        continue
+                    back = aud_y * (sy - s.ortho)
+                    if not (400.0 <= back <= 2400.0):
+                        continue
+                    if not any(
+                        abs(s.ortho - c.ortho) <= 40.0
+                        or 50.0 <= abs(s.ortho - c.ortho) <= 420.0
+                        for c in hcands
+                    ):
+                        continue
+                    ov = max(
+                        min(s.along1, c.along1) - max(s.along0, c.along0) for c in hcands
+                    )
+                    if ov < 1500.0:
+                        continue
+                    orthos_h.add(s.ortho)
+                for o in orthos_h:
+                    pieces = [
+                        s
+                        for s in hors
+                        if abs(s.ortho - o) <= 40.0
+                        and s.length >= 2000.0
+                        and s.along0 - 2000.0 <= sx <= s.along1 + 2000.0
+                    ]
+                    if not pieces:
+                        continue
+                    runs.append(
+                        (True, o, min(s.along0 for s in pieces), max(s.along1 for s in pieces))
+                    )
+                continue
         cx = hall[3]
         aud = 1.0 if cx >= sx else -1.0
         cands: list[AxisSeg] = []
@@ -2412,6 +3017,19 @@ def demote_open_hall_center_walls(
             continue
         if _is_open_hall_interior_seg(s, halls, segs, min_len_mm=min_len_mm):
             demote.add(id(s.entity))
+        elif _is_seat_door_wall(s, segs):
+            demote.add(id(s.entity))
+            for p in segs:
+                if (
+                    p.layer != WALL_LAYER
+                    or not p.is_v
+                    or p.length > 2200.0
+                    or abs(p.ortho - s.ortho) > 450.0
+                ):
+                    continue
+                if p.along1 < s.along0 - 1500.0 or p.along0 > s.along1 + 1500.0:
+                    continue
+                demote.add(id(p.entity))
 
     # 중앙 오검출이 벽두께 쌍으로 잡힌 경우, 짝도 함께 제거 (V·H)
     for is_v in (True, False):
@@ -2587,7 +3205,81 @@ def demote_open_hall_center_walls(
             )
         ):
             demote.add(id(s.entity))
+    _demote_main_hall_stage_face(msp, segs, demote)
     return demote
+
+
+def _demote_main_hall_stage_face(msp, segs: list[AxisSeg], demote: set[int]) -> None:
+    """중강당 왼쪽(무대쪽) 세로 이중선과 객석 위 짧은 선은 벽이 아니다.
+
+    라벨 높이를 지나고, 더 바깥에 긴 벽이 있는 가장 가까운 이중선만 뺀다.
+    건물 외벽은 바깥쪽이 비어 있으므로 남긴다.
+    """
+    labels = [(x, y) for x, y, s in _iter_text_labels(msp) if "중강당" in s]
+    if not labels:
+        return
+    # 위치는 BASE가 남아 있어도 잡는다. WALL만 뺀다.
+    verts = [s for s in segs if s.is_v and s.length >= 8000.0]
+    face_spans: list[tuple[float, float, float, float]] = []
+    for lx, ly in labels:
+        cands = []
+        for s in verts:
+            if not (lx - 20000.0 < s.ortho < lx - 5000.0):
+                continue
+            if not (s.along0 <= ly <= s.along1):
+                continue
+            has_mate = any(
+                80.0 <= abs(p.ortho - s.ortho) <= 400.0
+                and min(s.along1, p.along1) - max(s.along0, p.along0) >= 6000.0
+                for p in verts
+            )
+            if not has_mate:
+                continue
+            outside = any(
+                1500.0 <= s.ortho - q.ortho <= 12000.0
+                and min(s.along1, q.along1) - max(s.along0, q.along0) >= 4000.0
+                for q in verts
+            )
+            if outside:
+                cands.append(s)
+        if not cands:
+            continue
+        face_x = max(s.ortho for s in cands)
+        y0 = min(s.along0 for s in cands if abs(s.ortho - face_x) <= 400.0)
+        y1 = max(s.along1 for s in cands if abs(s.ortho - face_x) <= 400.0)
+        face_spans.append((face_x, y0, y1, lx))
+        for s in verts:
+            if not (s.along0 <= ly <= s.along1):
+                continue
+            if abs(s.ortho - face_x) <= 400.0 or any(
+                80.0 <= abs(s.ortho - c.ortho) <= 400.0
+                for c in cands
+                if abs(c.ortho - face_x) <= 400.0
+            ):
+                demote.add(id(s.entity))
+    if not face_spans:
+        return
+    shorts = [
+        s
+        for s in iter_axis_segs(msp, min_len_mm=200.0)
+        if s.is_h and s.layer == WALL_LAYER and 250.0 <= s.length <= 800.0
+    ]
+    for s in shorts:
+        mx = (s.along0 + s.along1) * 0.5
+        my = s.ortho
+        if not any(
+            y0 + 500.0 < my < y1 - 500.0 and face_x + 1500.0 < mx < lx + 4000.0
+            for face_x, y0, y1, lx in face_spans
+        ):
+            continue
+        near = sum(
+            1
+            for p in shorts
+            if abs(p.ortho - my) < 800.0
+            and abs((p.along0 + p.along1) * 0.5 - mx) < 800.0
+        )
+        if near >= 2:
+            demote.add(id(s.entity))
 
 
 def filter_promote_away_from_open_halls(
@@ -4365,6 +5057,150 @@ def promote_butt_partitions(
     return out
 
 
+def promote_room_corner_returns(
+    segs: list[AxisSeg],
+    *,
+    min_len_mm: float = 1600.0,
+    max_len_mm: float = 2600.0,
+    end_tol_mm: float = 250.0,
+    wall_min_mm: float = 2500.0,
+) -> list[AxisSeg]:
+    """긴 벽에 물린 짧은 L자 꺾임은 실의 모서리 벽이다.
+
+    면이 2.8m에 못 미치면 검출기가 빼 둔다. 창고#3 오른쪽 위처럼
+    한쪽은 긴 벽, 다른 쪽은 짝이 되는 꺾임에 닿는 이중선만 올린다.
+    """
+    walls = [s for s in segs if s.layer == WALL_LAYER and s.length >= wall_min_mm]
+    base = [
+        s
+        for s in segs
+        if s.layer == BASE_LAYER and min_len_mm <= s.length <= max_len_mm
+    ]
+
+    def _pair_orthos(s: AxisSeg) -> set[int]:
+        orthos = {round(s.ortho / 40.0)}
+        for o in base:
+            if o.is_h != s.is_h or o is s:
+                continue
+            d = abs(o.ortho - s.ortho)
+            if not (80.0 <= d <= 320.0):
+                continue
+            ov = min(s.along1, o.along1) - max(s.along0, o.along0)
+            if ov >= min(s.length, o.length) * 0.7 and abs(o.length - s.length) <= 400.0:
+                orthos.add(round(o.ortho / 40.0))
+        return orthos
+
+    # 문틀·멀리언처럼 평행선이 3개 이상이면 모서리가 아니다.
+    cands = [s for s in base if len(_pair_orthos(s)) == 2]
+
+    def _hits_wall(s: AxisSeg, end_along: float) -> bool:
+        return any(
+            w.is_h != s.is_h
+            and abs(w.ortho - end_along) <= end_tol_mm
+            and w.along0 - end_tol_mm <= s.ortho <= w.along1 + end_tol_mm
+            for w in walls
+        )
+
+    def _legs_at(s: AxisSeg, end_along: float) -> list[AxisSeg]:
+        return [
+            o
+            for o in cands
+            if o.is_h != s.is_h
+            and abs(o.ortho - end_along) <= end_tol_mm
+            and o.along0 - end_tol_mm <= s.ortho <= o.along1 + end_tol_mm
+        ]
+
+    out: list[AxisSeg] = []
+    seen: set[tuple[float, float, float, float]] = set()
+    for s in cands:
+        if _is_stair_tread_seg(s, segs) or _is_stair_nosing_seg(s, segs):
+            continue
+        ends = (s.along0, s.along1)
+        wall_ends = [e for e in ends if _hits_wall(s, e)]
+        if len(wall_ends) != 1:
+            continue
+        other = s.along1 if wall_ends[0] == s.along0 else s.along0
+        legs = _legs_at(s, other)
+        if not legs:
+            continue
+        if not any(
+            _hits_wall(leg, leg.along0) or _hits_wall(leg, leg.along1) for leg in legs
+        ):
+            continue
+        key = (round(s.x0, 1), round(s.y0, 1), round(s.x1, 1), round(s.y1, 1))
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(s)
+    return out
+
+
+def promote_wall_mate_faces(
+    segs: list[AxisSeg],
+    *,
+    thick_min_mm: float = 150.0,
+    thick_max_mm: float = 320.0,
+) -> list[AxisSeg]:
+    """이미 벽인 면이 짧은 모서리 앞에서 끊기고, 회색 이중선만 모서리까지 이어진 경우.
+
+    행사용품 위쪽처럼 왼쪽 끝만 회색인 벽을 그 모서리까지 올린다.
+    """
+    walls = [s for s in segs if s.layer == WALL_LAYER]
+    base = [s for s in segs if s.layer == BASE_LAYER and 2500.0 <= s.length <= 8000.0]
+    out: list[AxisSeg] = []
+    seen: set[tuple[float, float, float, float]] = set()
+
+    def _short_butt(s: AxisSeg, end: float) -> bool:
+        for w in walls:
+            if w.is_h == s.is_h or not (400.0 <= w.length <= 1600.0):
+                continue
+            if abs(w.ortho - end) > 80.0:
+                continue
+            if w.along0 - 80.0 <= s.ortho <= w.along1 + 80.0:
+                return True
+        return False
+
+    for s in base:
+        covered = 0.0
+        for w in walls:
+            if w.is_h != s.is_h or abs(w.ortho - s.ortho) > 40.0:
+                continue
+            covered = max(
+                covered,
+                min(s.along1, w.along1) - max(s.along0, w.along0),
+            )
+        if covered >= s.length * 0.8:
+            continue
+        hit = False
+        for w in walls:
+            if w.is_h != s.is_h or w.length < 2000.0:
+                continue
+            if not (thick_min_mm <= abs(w.ortho - s.ortho) <= thick_max_mm):
+                continue
+            ov = min(s.along1, w.along1) - max(s.along0, w.along0)
+            if ov < 1500.0:
+                continue
+            if s.along0 < w.along0 - 800.0 and s.along1 <= w.along1 + 250.0:
+                end = s.along0
+                extra = w.along0 - s.along0
+            elif s.along1 > w.along1 + 800.0 and s.along0 >= w.along0 - 250.0:
+                end = s.along1
+                extra = s.along1 - w.along1
+            else:
+                continue
+            if 800.0 <= extra <= 2000.0 and _short_butt(s, end):
+                hit = True
+                break
+        if not hit:
+            continue
+        key = (round(s.x0, 1), round(s.y0, 1), round(s.x1, 1), round(s.y1, 1))
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(s)
+    return out
+
+
 def find_double_door_openings(
     msp,
 ) -> list[tuple[bool, float, float, float]]:
@@ -4452,6 +5288,9 @@ def find_single_door_openings(
     # 사무실·상담실처럼 벽이 LWPOLYLINE 인 경우도 포함한다.
     long_h: list[tuple[float, float, float]] = []
     long_v: list[tuple[float, float, float]] = []
+    # 문 양옆처럼 1400 mm 보다 짧아도 개구에 맞닿는 면.
+    jamb_h: list[tuple[float, float, float]] = []
+    jamb_v: list[tuple[float, float, float]] = []
     for e in msp:
         t = e.dxftype()
         pairs: list[tuple[float, float, float, float]] = []
@@ -4478,12 +5317,20 @@ def find_single_door_openings(
             dx, dy = abs(x1 - x0), abs(y1 - y0)
             length = math.hypot(dx, dy)
             # 1400: 문 양옆 짧은 벽(창고#2 위·아래)도 호스트. 긴 벽은 중간 힌지도 허용.
-            if length < 1400.0 or (dx > 80.0 and dy > 80.0):
+            if length < 400.0 or (dx > 80.0 and dy > 80.0):
                 continue
             if dy >= dx:
-                long_v.append(((x0 + x1) * 0.5, min(y0, y1), max(y0, y1), length))
+                ortho = (x0 + x1) * 0.5
+                span = (ortho, min(y0, y1), max(y0, y1), length)
+                jamb_v.append(span)
+                if length >= 1400.0:
+                    long_v.append(span)
             else:
-                long_h.append(((y0 + y1) * 0.5, min(x0, x1), max(x0, x1), length))
+                ortho = (y0 + y1) * 0.5
+                span = (ortho, min(x0, x1), max(x0, x1), length)
+                jamb_h.append(span)
+                if length >= 1400.0:
+                    long_h.append(span)
 
     def _nearest_wall(
         cx: float,
@@ -4553,11 +5400,76 @@ def find_single_door_openings(
             horizontal_hit = v_hit is None or (h_hit is not None and h_hit[0] <= v_hit[0])
             return horizontal_hit, (h_hit if horizontal_hit else v_hit)
 
-        # 짧은 벽이 더 가까우면 문 틈의 한쪽으로 본다. 아니면 긴 벽을 쓴다.
+        def _opening_on_other_wall(horizontal_wall: bool, ex: float, ey: float) -> bool:
+            """반대쪽 끝이 맞닿은 긴 벽 개구 위에 있는지.
+
+            그 벽이 힌지 반대편으로도 이어질 때만 개구다. 모서리에서 끝나는
+            벽은 식당창고#3 위쪽 문처럼 접힌 면이 아니다.
+            """
+            pool = long_v if horizontal_wall else long_h
+            for oo, a0, a1, length in pool:
+                if length < 2500.0:
+                    continue
+                if horizontal_wall:
+                    if not (abs(ex - oo) <= 280.0 and a0 - 200.0 <= ey <= a1 + 200.0):
+                        continue
+                    if ey < cy - 50.0 and a1 < cy + 200.0:
+                        continue
+                    if ey > cy + 50.0 and a0 > cy - 200.0:
+                        continue
+                    return True
+                if not (abs(ey - oo) <= 280.0 and a0 - 200.0 <= ex <= a1 + 200.0):
+                    continue
+                if ex < cx - 50.0 and a1 < cx + 200.0:
+                    continue
+                if ex > cx + 50.0 and a0 > cx - 200.0:
+                    continue
+                return True
+            return False
+
+        def _leaf_folds_on(horizontal: bool) -> bool:
+            """문짝이 맞닿아 접히는 벽. 그 벽은 개구가 아니다.
+
+            힌지가 그 벽 끝이고, 문짝 끝이 벽 위에 있으며, 다른 끝은
+            맞닿은 벽에 있어야 한다. 자기 벽 안의 문(방풍실#5)은 해당 없다.
+            """
+            pool = long_h if horizontal else long_v
+            for oo, a0, a1, length in pool:
+                if length < 2500.0:
+                    continue
+                # 벽이 힌지에서 끝나는 경우만. 문 개구를 지나 이어진 벽은 그 문의 호스트다.
+                if horizontal:
+                    if min(abs(cx - a0), abs(cx - a1)) > 150.0 or abs(cy - oo) > 280.0:
+                        continue
+                elif min(abs(cy - a0), abs(cy - a1)) > 150.0 or abs(cx - oo) > 280.0:
+                    continue
+                for ex, ey in ends:
+                    on_wall = (
+                        abs(ey - oo) <= 80.0 and a0 + 200.0 < ex < a1 - 200.0
+                        if horizontal
+                        else abs(ex - oo) <= 80.0 and a0 + 200.0 < ey < a1 - 200.0
+                    )
+                    if not on_wall:
+                        continue
+                    other = next((p for p in ends if p != (ex, ey)), None)
+                    if other and _opening_on_other_wall(horizontal, other[0], other[1]):
+                        return True
+            return False
+
+        # 모서리 힌지: 더 가까운 벽이 문짝이 접히는 벽이면, 개구는 다른 쪽 벽이다.
+        # 락커룸(여) 오른쪽 문처럼 세로 개구를 가로벽으로 자르지 않는다.
         chosen = None
+        if long_h_hit is not None and long_v_hit is not None:
+            fold_h, fold_v = _leaf_folds_on(True), _leaf_folds_on(False)
+            if fold_h and not fold_v:
+                along, perp = perp, along
+                chosen = (False, long_v_hit[1])
+            elif fold_v and not fold_h:
+                chosen = (True, long_h_hit[1])
+        # 짧은 벽이 더 가까우면 문 틈의 한쪽으로 본다. 아니면 긴 벽을 쓴다.
         short = _pick(short_h_hit, short_v_hit)
         long = _pick(long_h_hit, long_v_hit)
-        if short is not None and (long is None or short[1][0] <= long[1][0]):
+        if chosen is None and short is not None and (long is None or short[1][0] <= long[1][0]):
             horizontal, hit = short
             _saved_along, _saved_perp = along, perp
             if not horizontal:
@@ -4590,6 +5502,39 @@ def find_single_door_openings(
                 along, perp = perp, along
             chosen = (horizontal, hit[1])
         if chosen is None:
+            # 힌지 면이 짧아 호스트가 없다. 문 양쪽에서 끊긴 벽면이 있으면 그 면이 개구다.
+            # 창고#1 위쪽 1100처럼 양옆만 벽이고 문짝은 아니다.
+            o0, o1 = min(cx, along[0]), max(cx, along[0])
+            if o1 - o0 >= 650.0 and abs(along[1] - cy) <= 0.4 * r:
+                sides_at: dict[int, set[str]] = {}
+                ortho_at: dict[int, float] = {}
+                for oo, a0, a1, length in jamb_h:
+                    if length < 400.0 or abs(oo - cy) > 520.0:
+                        continue
+                    if min(a1, o1) - max(a0, o0) > 80.0:
+                        continue
+                    side = ""
+                    if abs(a1 - o0) <= 120.0 and a0 <= o0 - 300.0:
+                        side = "L"
+                    elif abs(a0 - o1) <= 120.0 and a1 >= o1 + 300.0:
+                        side = "R"
+                    if not side:
+                        continue
+                    bucket = round(oo / 40.0)
+                    sides_at.setdefault(bucket, set()).add(side)
+                    ortho_at[bucket] = oo
+                faces = [
+                    ortho_at[b]
+                    for b, sides in sides_at.items()
+                    if sides >= {"L", "R"}
+                ]
+                if faces and any(abs(oo - cy) <= 80.0 for oo in faces):
+                    key = (round(cx / 50.0), round(cy / 50.0), round(r / 50.0))
+                    if key not in seen:
+                        seen.add(key)
+                        for oo in faces:
+                            openings.append((False, oo, o0, o1))
+                        leaves.append((True, cx, min(cy, perp[1]), max(cy, perp[1])))
             continue
         horizontal, host = chosen
         key = (round(cx / 50.0), round(cy / 50.0), round(r / 50.0))
@@ -4619,6 +5564,92 @@ def _door_hinge_used(
     return False
 
 
+def find_narrow_leaf_openings(
+    msp,
+    existing: list[tuple[bool, float, float, float]],
+) -> list[tuple[bool, float, float, float]]:
+    """스윙이 30° 정도인 문. 문짝이 벽 위에 있고 벽이 양쪽으로 이어지면 그 구간은 개구다.
+
+    냉장실#1 오른쪽 문처럼 1/4 스윙이 아닌 문도 양옆은 벽이다.
+    """
+    walls_h: list[tuple[float, float, float]] = []
+    walls_v: list[tuple[float, float, float]] = []
+    for e in msp:
+        t = e.dxftype()
+        pairs: list[tuple[float, float, float, float]] = []
+        try:
+            if t == "LINE":
+                pairs.append((
+                    float(e.dxf.start.x), float(e.dxf.start.y),
+                    float(e.dxf.end.x), float(e.dxf.end.y),
+                ))
+            elif t == "LWPOLYLINE":
+                pts = [(float(p[0]), float(p[1])) for p in e.get_points("xy")]
+                pairs.extend((a[0], a[1], b[0], b[1]) for a, b in zip(pts, pts[1:]))
+        except Exception:  # noqa: BLE001
+            continue
+        for x0, y0, x1, y1 in pairs:
+            dx, dy = abs(x1 - x0), abs(y1 - y0)
+            length = math.hypot(dx, dy)
+            if length < 2000.0 or (dx > 80.0 and dy > 80.0):
+                continue
+            if dy >= dx:
+                walls_v.append(((x0 + x1) * 0.5, min(y0, y1), max(y0, y1)))
+            else:
+                walls_h.append(((y0 + y1) * 0.5, min(x0, x1), max(x0, x1)))
+    out: list[tuple[bool, float, float, float]] = []
+    seen: set[tuple[int, int]] = set()
+    for e in msp:
+        if e.dxftype() != "ARC":
+            continue
+        try:
+            r = float(e.dxf.radius)
+            cx, cy = float(e.dxf.center.x), float(e.dxf.center.y)
+            sweep = (float(e.dxf.end_angle) - float(e.dxf.start_angle)) % 360.0
+            sa, ea = float(e.dxf.start_angle), float(e.dxf.end_angle)
+        except Exception:  # noqa: BLE001
+            continue
+        if not (700.0 <= r <= 1200.0) or not (20.0 <= sweep <= 45.0):
+            continue
+        key = (round(cx / 40.0), round(cy / 40.0))
+        if key in seen:
+            continue
+        ends = []
+        for ang in (sa, ea):
+            rad = math.radians(ang)
+            ends.append((cx + r * math.cos(rad), cy + r * math.sin(rad)))
+        opening: tuple[bool, float, float, float] | None = None
+        for ex, ey in ends:
+            if abs(ex - cx) <= 80.0 and abs(ey - cy) > 0.7 * r:
+                opening = (True, cx, min(cy, ey), max(cy, ey))
+                break
+            if abs(ey - cy) <= 80.0 and abs(ex - cx) > 0.7 * r:
+                opening = (False, cy, min(cx, ex), max(cx, ex))
+                break
+        if opening is None:
+            continue
+        is_v, ortho, a0, a1 = opening
+        if any(
+            ov == is_v and abs(oo - ortho) <= 400.0
+            and min(a1, c1) - max(a0, c0) > (a1 - a0) * 0.5
+            for ov, oo, c0, c1 in existing
+        ):
+            continue
+        pool = walls_v if is_v else walls_h
+        faces = 0
+        for oo, b0, b1 in pool:
+            if abs(oo - ortho) > 280.0:
+                continue
+            if a0 - b0 < 600.0 or b1 - a1 < 600.0:
+                continue
+            faces += 1
+        if faces < 2:
+            continue
+        seen.add(key)
+        out.append(opening)
+    return out
+
+
 def correct_walls_around_doors(msp) -> tuple[int, int]:
     """문 개구를 가로지르는 WALL은 끊고, 개구 양옆 벽은 WALL로 둔다.
 
@@ -4627,6 +5658,7 @@ def correct_walls_around_doors(msp) -> tuple[int, int]:
     openings = find_double_door_openings(msp)
     single_openings, door_leaves = find_single_door_openings(msp, openings)
     openings = openings + single_openings
+    openings = openings + find_narrow_leaf_openings(msp, openings)
     if not openings and not door_leaves:
         return (0, 0)
 
@@ -4664,10 +5696,10 @@ def correct_walls_around_doors(msp) -> tuple[int, int]:
         pieces: list[tuple[float, float]] = []
         cursor = a0
         for c0, c1 in cuts:
-            if c0 - cursor >= 200.0:
+            if c0 - cursor >= 100.0:
                 pieces.append((cursor, c0))
             cursor = max(cursor, c1)
-        if a1 - cursor >= 200.0:
+        if a1 - cursor >= 100.0:
             pieces.append((cursor, a1))
         return pieces
 
@@ -4722,6 +5754,19 @@ def correct_walls_around_doors(msp) -> tuple[int, int]:
                 return True
         return False
 
+    def _is_opening_host(is_v: bool, ortho: float, a0: float, a1: float) -> bool:
+        """이 선이 문의 호스트다. 의자선 자체는 빼고, 그 옆의 문 벽만 양옆을 남긴다."""
+        if any(abs(ortho - ban) <= 1.0 for ban in _seat_door_wall_orthos(seat_segs)):
+            return False
+        for ov, oo, c0, c1 in openings:
+            if ov != is_v or abs(oo - ortho) > 280.0:
+                continue
+            if min(a1, c1) - max(a0, c0) < 250.0:
+                continue
+            if a0 < c0 - 300.0 or a1 > c1 + 300.0:
+                return True
+        return False
+
     def _axis(x0: float, y0: float, x1: float, y1: float):
         dx, dy = abs(x1 - x0), abs(y1 - y0)
         length = math.hypot(dx, dy)
@@ -4732,8 +5777,41 @@ def correct_walls_around_doors(msp) -> tuple[int, int]:
         a0, a1 = (min(y0, y1), max(y0, y1)) if is_v else (min(x0, x1), max(x0, x1))
         return is_v, ortho, a0, a1
 
+    def _is_door_panel_beside_hinge(is_v: bool, ortho: float, a0: float, a1: float) -> bool:
+        """힌지에서 개구 반대편으로 문 폭만큼 나간 선은 문짝이다.
+
+        직각 벽에서 끝나는 짧은 벽은 남긴다.
+        """
+        length = a1 - a0
+        if not (800.0 <= length <= 1600.0):
+            return False
+        for ov, oo, c0, c1 in openings:
+            if ov != is_v:
+                continue
+            width = c1 - c0
+            if abs(length - width) > 80.0 or abs(ortho - oo) > 280.0:
+                continue
+            if min(a1, c1) - max(a0, c0) > 80.0:
+                continue
+            for hinge in (c0, c1):
+                if min(abs(a0 - hinge), abs(a1 - hinge)) > 50.0:
+                    continue
+                far = a1 if abs(a0 - hinge) <= abs(a1 - hinge) else a0
+                stopped = any(
+                    iv != is_v
+                    and layer == WALL_LAYER
+                    and b1 - b0 >= 1500.0
+                    and abs(wo - far) <= 200.0
+                    and b0 - 200.0 <= ortho <= b1 + 200.0
+                    for iv, wo, b0, b1, layer in raw
+                )
+                if not stopped:
+                    return True
+        return False
+
     n_cut = 0
     n_flank = 0
+    seat_segs = iter_axis_segs(msp, min_len_mm=70.0)
     wall_ents = [
         e
         for e in list(msp)
@@ -4758,6 +5836,16 @@ def correct_walls_around_doors(msp) -> tuple[int, int]:
                 rebuilt.append((a, b))
                 continue
             is_v, ortho, a0, a1 = axis
+            # 의자 위를 지나 문 스윙 안에 있는 선은 양옆 벽으로 다시 만들지 않는다.
+            if _near_seat_door_wall(is_v, ortho, seat_segs) and not _is_opening_host(
+                is_v, ortho, a0, a1
+            ):
+                hit = True
+                continue
+            # 힌지 밖 문 폭 선은 벽이 아니다.
+            if _is_door_panel_beside_hinge(is_v, ortho, a0, a1):
+                hit = True
+                continue
             # 문짝과 겹치는 긴 벽은 문짝이 아니다. 문짝 길이의 선만 제거한다.
             cuts = _cuts_for(
                 is_v,
@@ -4782,12 +5870,18 @@ def correct_walls_around_doors(msp) -> tuple[int, int]:
         msp.delete_entity(e)
         n_cut += 1
         for a, b in rebuilt:
-            if math.hypot(b[0] - a[0], b[1] - a[1]) < 200.0:
+            if math.hypot(b[0] - a[0], b[1] - a[1]) < 100.0:
                 continue
             msp.add_line(a, b, dxfattribs={"layer": WALL_LAYER, "color": WALL_COLOR})
 
     for is_v, ortho, a0, a1, layer in raw:
         if layer != BASE_LAYER:
+            continue
+        if _near_seat_door_wall(is_v, ortho, seat_segs) and not _is_opening_host(
+            is_v, ortho, a0, a1
+        ):
+            continue
+        if _is_door_panel_beside_hinge(is_v, ortho, a0, a1):
             continue
         cuts = _cuts_for(is_v, ortho, a0, a1)
         pieces: list[tuple[float, float]] = []
@@ -4817,6 +5911,1512 @@ def correct_walls_around_doors(msp) -> tuple[int, int]:
             covered.append((is_v, ortho, p0, p1))
             n_flank += 1
     return (n_cut, n_flank)
+
+
+def promote_marked_door_flanks(msp) -> int:
+    """대각선으로 표시된 문. 문이 놓인 이중벽의 양옆만 WALL로 둔다.
+
+    배식대#2 뒤쪽 문처럼 스윙 호가 없고 사각형에 대각선만 있는 문.
+    """
+    segs = iter_axis_segs(msp, min_len_mm=200.0)
+    hors = [s for s in segs if not s.is_v]
+    diags: list[tuple[float, float, float, float]] = []
+    seen_d: set[tuple[int, int]] = set()
+    for e in msp:
+        if e.dxftype() != "LINE":
+            continue
+        try:
+            x0, y0 = float(e.dxf.start.x), float(e.dxf.start.y)
+            x1, y1 = float(e.dxf.end.x), float(e.dxf.end.y)
+        except Exception:  # noqa: BLE001
+            continue
+        dx, dy = abs(x1 - x0), abs(y1 - y0)
+        length = math.hypot(dx, dy)
+        if dx <= 200.0 or dy <= 200.0 or not (1400.0 <= length <= 1900.0):
+            continue
+        bx0, bx1 = min(x0, x1), max(x0, x1)
+        by0, by1 = min(y0, y1), max(y0, y1)
+        if not (650.0 <= bx1 - bx0 <= 1100.0 and 1200.0 <= by1 - by0 <= 1800.0):
+            continue
+        key = (round(bx0 / 40.0), round(by0 / 40.0))
+        if key in seen_d:
+            continue
+        seen_d.add(key)
+        diags.append((bx0, bx1, by0, by1))
+
+    added: set[tuple[int, int, int]] = set()
+    n = 0
+
+    def _covered(ortho: float, a0: float, a1: float) -> bool:
+        span = a1 - a0
+        if span < 100.0:
+            return True
+        for s in hors:
+            if s.layer != WALL_LAYER or abs(s.ortho - ortho) > 40.0:
+                continue
+            if min(s.along1, a1) - max(s.along0, a0) >= span * 0.8:
+                return True
+        return False
+
+    def _add(ortho: float, a0: float, a1: float) -> None:
+        nonlocal n
+        if a1 - a0 < 100.0 or _covered(ortho, a0, a1):
+            return
+        key = (round(ortho), round(a0), round(a1))
+        if key in added:
+            return
+        added.add(key)
+        msp.add_line(
+            (a0, ortho), (a1, ortho),
+            dxfattribs={"layer": WALL_LAYER, "color": WALL_COLOR},
+        )
+        n += 1
+
+    for bx0, bx1, by0, by1 in diags:
+        for edge in (by0, by1):
+            hosts = [
+                s for s in hors
+                if s.length >= 1800.0 and abs(s.ortho - edge) <= 80.0
+                and s.along0 <= bx0 + 80.0 and s.along1 >= bx1 - 80.0
+            ]
+            if not hosts:
+                continue
+            host = max(hosts, key=lambda s: s.length)
+            if bx0 - host.along0 < 600.0 and host.along1 - bx1 < 600.0:
+                continue
+            mates = [
+                s for s in hors
+                if 120.0 <= abs(s.ortho - host.ortho) <= 350.0
+                and min(host.along1, s.along1) - max(host.along0, s.along0) >= 1500.0
+                and s.length >= 1500.0
+            ]
+            faces = [host] + mates
+            seen_o: set[int] = set()
+            for face in faces:
+                oy = round(face.ortho)
+                if oy in seen_o:
+                    continue
+                seen_o.add(oy)
+                if bx0 - face.along0 >= 100.0:
+                    _add(face.ortho, face.along0, min(face.along1, bx0))
+                if face.along1 - bx1 >= 100.0:
+                    _add(face.ortho, max(face.along0, bx1), face.along1)
+            # 문 오른쪽이 같은 선에서 끊기고, 조금 떨어진 이중선으로 이어지면 그 선도 벽이다.
+            for s in hors:
+                if s.along0 < bx1 - 40.0 or s.along0 > bx1 + 400.0:
+                    continue
+                if not (400.0 <= s.length <= 2500.0):
+                    continue
+                if not any(abs(s.ortho - face.ortho) <= 80.0 for face in faces):
+                    continue
+                mate = next(
+                    (
+                        o for o in hors
+                        if o is not s and 120.0 <= abs(o.ortho - s.ortho) <= 350.0
+                        and o.along0 <= s.along0 + 80.0 and o.along1 >= s.along1 - 80.0
+                        and 400.0 <= o.length <= 2500.0
+                    ),
+                    None,
+                )
+                if mate is None:
+                    continue
+                _add(s.ortho, s.along0, s.along1)
+                _add(mate.ortho, s.along0, s.along1)
+            break
+    return n
+
+
+def promote_serving_end_door_flanks(msp) -> int:
+    """배식대 아래쪽 끝의 문. 문짝은 두고, 그 양옆 벽만 WALL로 둔다."""
+    labels = [(x, y) for x, y, s in _iter_text_labels(msp) if _SERVING_RE.search(s)]
+    if not labels:
+        return 0
+    segs = iter_axis_segs(msp, min_len_mm=200.0)
+    hors = [s for s in segs if not s.is_v]
+    swings: list[tuple[float, float, float, float, float]] = []
+    seen_h: set[tuple[int, int]] = set()
+    for e in msp:
+        if e.dxftype() != "ARC":
+            continue
+        try:
+            r = float(e.dxf.radius)
+            cx, cy = float(e.dxf.center.x), float(e.dxf.center.y)
+            sweep = (float(e.dxf.end_angle) - float(e.dxf.start_angle)) % 360.0
+            sa, ea = float(e.dxf.start_angle), float(e.dxf.end_angle)
+        except Exception:  # noqa: BLE001
+            continue
+        if not (900.0 <= r <= 1200.0) or not (70.0 <= sweep <= 110.0):
+            continue
+        key = (round(cx / 40.0), round(cy / 40.0))
+        if key in seen_h:
+            continue
+        seen_h.add(key)
+        swings.append((cx, cy, r, sa, ea))
+
+    added: set[tuple[int, int, int]] = set()
+    n = 0
+
+    def _covered(ortho: float, a0: float, a1: float) -> bool:
+        span = a1 - a0
+        if span < 100.0:
+            return True
+        return any(
+            (not s.is_v) and s.layer == WALL_LAYER and abs(s.ortho - ortho) <= 40.0
+            and min(s.along1, a1) - max(s.along0, a0) >= span * 0.8
+            for s in segs
+        )
+
+    def _add(ortho: float, a0: float, a1: float) -> None:
+        nonlocal n
+        if a1 - a0 < 100.0 or _covered(ortho, a0, a1):
+            return
+        key = (round(ortho), round(a0), round(a1))
+        if key in added:
+            return
+        added.add(key)
+        msp.add_line(
+            (a0, ortho), (a1, ortho),
+            dxfattribs={"layer": WALL_LAYER, "color": WALL_COLOR},
+        )
+        n += 1
+
+    for lx, ly in labels:
+        bottoms = [
+            s for s in hors
+            if s.length >= 2500.0 and ly - 8000.0 < s.ortho < ly - 1500.0
+            and s.along0 - 500.0 <= lx <= s.along1 + 500.0
+        ]
+        if not bottoms:
+            continue
+        for cx, cy, r, sa, ea in swings:
+            if abs(cx - lx) > 8000.0 or not (ly - 8000.0 < cy < ly - 800.0):
+                continue
+            along = None
+            for ang in (sa, ea):
+                rad = math.radians(ang)
+                ex, ey = cx + r * math.cos(rad), cy + r * math.sin(rad)
+                if abs(ex - cx) > 0.7 * r and abs(ey - cy) < 0.35 * r:
+                    along = (ex, ey)
+            if along is None:
+                continue
+            ex, ey = along
+            span0, span1 = min(cx, ex), max(cx, ex)
+            if not (800.0 <= span1 - span0 <= 1200.0):
+                continue
+            hosts = [
+                s for s in bottoms
+                if 80.0 <= abs(s.ortho - ey) <= 220.0
+                and s.along0 <= span0 + 80.0 and s.along1 >= span1 - 80.0
+                and min(abs(cx - s.along0), abs(cx - s.along1)) <= 200.0
+            ]
+            if not hosts:
+                continue
+            host = min(hosts, key=lambda s: abs(s.ortho - ey))
+            far = ex
+            jamb = (far - host.along0) if far < cx else (host.along1 - far)
+            if jamb < 1500.0:
+                continue
+            mates = [
+                s for s in hors
+                if 120.0 <= abs(s.ortho - host.ortho) <= 350.0
+                and min(host.along1, s.along1) - max(host.along0, s.along0) >= 1500.0
+                and s.length >= 1500.0
+            ]
+            faces = [host] + mates
+            seen_o: set[int] = set()
+            for face in faces:
+                oy = round(face.ortho)
+                if oy in seen_o:
+                    continue
+                seen_o.add(oy)
+                if span0 - face.along0 >= 100.0:
+                    _add(face.ortho, face.along0, min(face.along1, span0))
+                if face.along1 - span1 >= 100.0:
+                    _add(face.ortho, max(face.along0, span1), face.along1)
+    return n
+
+
+def promote_stacked_room_side_wall(msp) -> int:
+    """위·아래로 붙은 식당창고와 배식대의 같은 쪽 벽. 두 실을 잇는 이중선은 벽이다."""
+    labels = [(x, y, s) for x, y, s in _iter_text_labels(msp)]
+    stores = [(x, y) for x, y, s in labels if "식당창고" in s]
+    servings = [(x, y) for x, y, s in labels if _SERVING_RE.search(s)]
+    if not stores or not servings:
+        return 0
+    segs = iter_axis_segs(msp, min_len_mm=400.0)
+    verts = [s for s in segs if s.is_v and s.length >= 1200.0]
+    n = 0
+    added: set[tuple[int, int, int]] = set()
+
+    def _covered(ortho: float, a0: float, a1: float) -> bool:
+        span = max(a1 - a0, 1.0)
+        return any(
+            s.is_v and s.layer == WALL_LAYER and abs(s.ortho - ortho) <= 40.0
+            and min(s.along1, a1) - max(s.along0, a0) >= span * 0.8
+            for s in verts
+        )
+
+    for sx, sy in stores:
+        for bx, by in servings:
+            if abs(sx - bx) > 2500.0 or not (3000.0 < abs(sy - by) < 12000.0):
+                continue
+            y_lo, y_hi = min(sy, by), max(sy, by)
+            span0, span1 = y_lo - 6000.0, y_hi + 4000.0
+            best = None
+            for side in (-1, 1):
+                cands = [
+                    s for s in verts
+                    if side * (s.ortho - sx) > 400.0
+                    and abs(s.ortho - sx) < 5000.0
+                    and s.along1 > span0 and s.along0 < span1
+                    and s.length >= 5000.0
+                ]
+                orthos = sorted({round(s.ortho) for s in cands})
+                for i, o0 in enumerate(orthos):
+                    for o1 in orthos[i + 1:]:
+                        if not (150 <= o1 - o0 <= 350):
+                            continue
+                        faces = [s for s in cands if abs(s.ortho - o0) <= 60 or abs(s.ortho - o1) <= 60]
+                        base_len = sum(s.length for s in faces if s.layer != WALL_LAYER)
+                        if best is None or base_len > best[0]:
+                            best = (base_len, o0, o1)
+            if best is None or best[0] < 4000.0:
+                continue
+            _, o0, o1 = best
+            for s in verts:
+                if abs(s.ortho - o0) > 60.0 and abs(s.ortho - o1) > 60.0:
+                    continue
+                if s.along1 < span0 or s.along0 > span1 or s.length < 1200.0:
+                    continue
+                a0, a1 = max(s.along0, span0), min(s.along1, span1)
+                if a1 - a0 < 1200.0 or _covered(s.ortho, a0, a1):
+                    continue
+                key = (round(s.ortho), round(a0), round(a1))
+                if key in added:
+                    continue
+                added.add(key)
+                msp.add_line(
+                    (s.ortho, a0), (s.ortho, a1),
+                    dxfattribs={"layer": WALL_LAYER, "color": WALL_COLOR},
+                )
+                n += 1
+    return n
+
+
+def open_serving_corner_door(msp) -> int:
+    """배식대 모서리 문. 옆벽 이중선에서 문 높이만 개구로 두고 위·아래는 벽이다."""
+    labels = [(x, y) for x, y, s in _iter_text_labels(msp) if _SERVING_RE.search(s)]
+    if not labels:
+        return 0
+    swings: list[tuple[float, float, float, float, float]] = []
+    seen_h: set[tuple[int, int]] = set()
+    for e in msp:
+        if e.dxftype() != "ARC":
+            continue
+        try:
+            r = float(e.dxf.radius)
+            cx, cy = float(e.dxf.center.x), float(e.dxf.center.y)
+            sweep = (float(e.dxf.end_angle) - float(e.dxf.start_angle)) % 360.0
+            sa, ea = float(e.dxf.start_angle), float(e.dxf.end_angle)
+        except Exception:  # noqa: BLE001
+            continue
+        if not (900.0 <= r <= 1200.0) or not (70.0 <= sweep <= 110.0):
+            continue
+        key = (round(cx / 40.0), round(cy / 40.0))
+        if key in seen_h:
+            continue
+        seen_h.add(key)
+        swings.append((cx, cy, r, sa, ea))
+
+    n = 0
+    for lx, ly in labels:
+        for cx, cy, r, sa, ea in swings:
+            if abs(cx - lx) > 8000.0 or not (ly - 8000.0 < cy < ly - 800.0):
+                continue
+            up = None
+            for ang in (sa, ea):
+                rad = math.radians(ang)
+                ex = cx + r * math.cos(rad)
+                ey = cy + r * math.sin(rad)
+                if abs(ex - cx) < 0.35 * r and abs(ey - cy) > 0.7 * r:
+                    up = ey
+            if up is None:
+                continue
+            y0, y1 = (cy, up) if cy < up else (up, cy)
+            hits = [
+                s for s in iter_axis_segs(msp, min_len_mm=80.0)
+                if s.is_v and s.layer == WALL_LAYER and s.entity.dxftype() == "LINE"
+                and abs(s.ortho - cx) <= 280.0
+                and min(s.along1, y1) - max(s.along0, y0) > 80.0
+            ]
+            seen_e: set[int] = set()
+            for s in hits:
+                eid = id(s.entity)
+                if eid in seen_e:
+                    continue
+                seen_e.add(eid)
+                a0, a1, x = s.along0, s.along1, s.ortho
+                msp.delete_entity(s.entity)
+                if y0 - a0 >= 100.0:
+                    msp.add_line(
+                        (x, a0), (x, y0),
+                        dxfattribs={"layer": WALL_LAYER, "color": WALL_COLOR},
+                    )
+                    n += 1
+                if a1 - y1 >= 100.0:
+                    msp.add_line(
+                        (x, y1), (x, a1),
+                        dxfattribs={"layer": WALL_LAYER, "color": WALL_COLOR},
+                    )
+                    n += 1
+    return n
+
+
+def promote_control_booth_bottom(msp) -> int:
+    """소강당 조정실이 홀을 보는 아래쪽 이중선은 벽이다.
+
+    조각으로 끊겨 양 끝이 측벽에 직접 물리지 않으면 강당 demote가 지운다.
+    라벨 바로 아래의 벽두께 쌍만 다시 올린다.
+    """
+    labels = [
+        (x, y)
+        for x, y, s in _iter_text_labels(msp)
+        if "소강당" in s and "조정실" in s
+    ]
+    if not labels:
+        return 0
+    segs = iter_axis_segs(msp, min_len_mm=150.0)
+    n = 0
+    for lx, ly in labels:
+        hs = [
+            s
+            for s in segs
+            if s.is_h
+            and s.length >= 1500.0
+            and ly - 5000.0 < s.ortho < ly - 500.0
+            and s.along0 < lx + 12000.0
+            and s.along1 > lx - 12000.0
+        ]
+        orthos = sorted({round(s.ortho) for s in hs})
+        best = None
+        for i, o0 in enumerate(orthos):
+            for o1 in orthos[i + 1 :]:
+                if not (120.0 <= o1 - o0 <= 350.0):
+                    continue
+                a = [s for s in hs if abs(s.ortho - o0) <= 40.0]
+                b = [s for s in hs if abs(s.ortho - o1) <= 40.0]
+                if not a or not b:
+                    continue
+                ov0 = max(min(s.along0 for s in a), min(s.along0 for s in b))
+                ov1 = min(max(s.along1 for s in a), max(s.along1 for s in b))
+                if ov1 - ov0 < 6000.0 or not (ov0 - 1500.0 <= lx <= ov1 + 1500.0):
+                    continue
+                dist = ly - o1
+                if dist < 400.0:
+                    continue
+                score = (dist, -(ov1 - ov0))
+                if best is None or score < best[0]:
+                    best = (score, o0, o1, ov0, ov1)
+        if best is None:
+            continue
+        _, o0, o1, ov0, ov1 = best
+        walls = [
+            s
+            for s in segs
+            if s.is_h
+            and s.layer == WALL_LAYER
+            and (abs(s.ortho - o0) <= 40.0 or abs(s.ortho - o1) <= 40.0)
+        ]
+
+        def _covered(ortho: float, a0: float, a1: float) -> bool:
+            span = max(a1 - a0, 1.0)
+            return any(
+                abs(w.ortho - ortho) <= 40.0
+                and min(w.along1, a1) - max(w.along0, a0) >= span * 0.85
+                for w in walls
+            )
+
+        for s in segs:
+            if not s.is_h or s.layer == WALL_LAYER:
+                continue
+            if abs(s.ortho - o0) > 40.0 and abs(s.ortho - o1) > 40.0:
+                continue
+            a0 = max(s.along0, ov0 - 300.0)
+            a1 = min(s.along1, ov1 + 300.0)
+            if a1 - a0 < 150.0 or _covered(s.ortho, a0, a1):
+                continue
+            e = s.entity
+            full = abs((s.along1 - s.along0) - (a1 - a0)) < 30.0
+            if (
+                e is not None
+                and e.dxftype() == "LINE"
+                and getattr(e.dxf, "layer", None) == BASE_LAYER
+                and full
+            ):
+                e.dxf.layer = WALL_LAYER
+                try:
+                    e.dxf.color = WALL_COLOR
+                except Exception:  # noqa: BLE001
+                    pass
+            else:
+                msp.add_line(
+                    (a0, s.ortho),
+                    (a1, s.ortho),
+                    dxfattribs={"layer": WALL_LAYER, "color": WALL_COLOR},
+                )
+            n += 1
+    return n
+
+
+def promote_stair_eps_party_wall(msp) -> int:
+    """계단실과 바로 옆 EPS 사이 이중선은 벽이다.
+
+    같은 x가 객석 문벽으로 지워져도, 두 실이 맞닿은 구간만 다시 올린다.
+    """
+    labels = list(_iter_text_labels(msp))
+    stairs = [(x, y) for x, y, s in labels if "계단실" in s]
+    epss = [(x, y) for x, y, s in labels if "EPS" in s]
+    if not stairs or not epss:
+        return 0
+    segs = iter_axis_segs(msp, min_len_mm=400.0)
+    n = 0
+    for sx, sy in stairs:
+        for ex, ey in epss:
+            if not (1500.0 < ex - sx < 8000.0) or abs(sy - ey) > 8000.0:
+                continue
+            y_lo, y_hi = min(sy, ey) - 8000.0, max(sy, ey) + 3500.0
+            verts = [
+                s
+                for s in segs
+                if s.is_v
+                and s.length >= 2000.0
+                and sx + 1200.0 < s.ortho < ex + 800.0
+                and s.along1 > y_lo
+                and s.along0 < y_hi
+            ]
+            orthos = sorted({round(s.ortho) for s in verts})
+            best = None
+            for i, o0 in enumerate(orthos):
+                for o1 in orthos[i + 1 :]:
+                    if not (150.0 <= o1 - o0 <= 400.0):
+                        continue
+                    if not (sx + 800.0 < o0 < ex and sx + 800.0 < o1 < ex + 400.0):
+                        continue
+                    a = [s for s in verts if abs(s.ortho - o0) <= 40.0]
+                    b = [s for s in verts if abs(s.ortho - o1) <= 40.0]
+                    if not a or not b:
+                        continue
+                    base_len = sum(s.length for s in a + b if s.layer != WALL_LAYER)
+                    if best is None or base_len > best[0]:
+                        best = (base_len, o0, o1)
+            if best is None or best[0] < 2000.0:
+                continue
+            _, o0, o1 = best
+            walls = [
+                s
+                for s in segs
+                if s.is_v and s.layer == WALL_LAYER and (abs(s.ortho - o0) <= 40.0 or abs(s.ortho - o1) <= 40.0)
+            ]
+
+            def _covered(ortho: float, a0: float, a1: float) -> bool:
+                span = max(a1 - a0, 1.0)
+                return any(
+                    abs(w.ortho - ortho) <= 40.0
+                    and min(w.along1, a1) - max(w.along0, a0) >= span * 0.85
+                    for w in walls
+                )
+
+            for s in segs:
+                if not s.is_v or s.layer == WALL_LAYER or s.length < 800.0:
+                    continue
+                if abs(s.ortho - o0) > 40.0 and abs(s.ortho - o1) > 40.0:
+                    continue
+                if s.along1 < y_lo or s.along0 > y_hi:
+                    continue
+                a0, a1 = max(s.along0, y_lo), min(s.along1, y_hi)
+                if a1 - a0 < 800.0 or _covered(s.ortho, a0, a1):
+                    continue
+                e = s.entity
+                full = abs((s.along1 - s.along0) - (a1 - a0)) < 30.0
+                if (
+                    e is not None
+                    and e.dxftype() == "LINE"
+                    and getattr(e.dxf, "layer", None) == BASE_LAYER
+                    and full
+                ):
+                    e.dxf.layer = WALL_LAYER
+                    try:
+                        e.dxf.color = WALL_COLOR
+                    except Exception:  # noqa: BLE001
+                        pass
+                else:
+                    msp.add_line(
+                        (s.ortho, a0),
+                        (s.ortho, a1),
+                        dxfattribs={"layer": WALL_LAYER, "color": WALL_COLOR},
+                    )
+                n += 1
+    return n
+
+
+def promote_waiting_store_wall(msp) -> int:
+    """대기실과 옆 창고 사이 이중선은 벽이다.
+
+    강당 demote가 짧은 칸막이로 보고 지운다. 두 실 라벨 사이의 벽두께만 다시 올린다.
+    """
+    labels = list(_iter_text_labels(msp))
+    waits = [(x, y) for x, y, s in labels if "대기실" in s]
+    stores = [(x, y) for x, y, s in labels if "창고" in s]
+    if not waits or not stores:
+        return 0
+    segs = iter_axis_segs(msp, min_len_mm=400.0)
+    n = 0
+    for wx, wy in waits:
+        for sx, sy in stores:
+            if not (2500.0 < sx - wx < 14000.0) or abs(sy - wy) > 4000.0:
+                continue
+            y_lo, y_hi = min(wy, sy) - 6000.0, max(wy, sy) + 4000.0
+            verts = [
+                s
+                for s in segs
+                if s.is_v
+                and s.length >= 3000.0
+                and wx + 1500.0 < s.ortho < sx - 500.0
+                and s.along1 > y_lo
+                and s.along0 < y_hi
+            ]
+            orthos = sorted({round(s.ortho) for s in verts})
+            best = None
+            for i, o0 in enumerate(orthos):
+                for o1 in orthos[i + 1 :]:
+                    if not (100.0 <= o1 - o0 <= 350.0):
+                        continue
+                    a = [s for s in verts if abs(s.ortho - o0) <= 40.0]
+                    b = [s for s in verts if abs(s.ortho - o1) <= 40.0]
+                    if not a or not b:
+                        continue
+                    base_len = sum(s.length for s in a + b if s.layer != WALL_LAYER)
+                    if best is None or base_len > best[0]:
+                        best = (base_len, o0, o1)
+            if best is None or best[0] < 3000.0:
+                continue
+            _, o0, o1 = best
+            walls = [
+                s
+                for s in segs
+                if s.is_v
+                and s.layer == WALL_LAYER
+                and (abs(s.ortho - o0) <= 40.0 or abs(s.ortho - o1) <= 40.0)
+            ]
+
+            def _covered(ortho: float, a0: float, a1: float) -> bool:
+                span = max(a1 - a0, 1.0)
+                return any(
+                    abs(w.ortho - ortho) <= 40.0
+                    and min(w.along1, a1) - max(w.along0, a0) >= span * 0.85
+                    for w in walls
+                )
+
+            for s in segs:
+                if not s.is_v or s.layer == WALL_LAYER or s.length < 1500.0:
+                    continue
+                if abs(s.ortho - o0) > 40.0 and abs(s.ortho - o1) > 40.0:
+                    continue
+                if s.along1 < y_lo or s.along0 > y_hi:
+                    continue
+                a0, a1 = max(s.along0, y_lo), min(s.along1, y_hi)
+                if a1 - a0 < 1500.0 or _covered(s.ortho, a0, a1):
+                    continue
+                e = s.entity
+                full = abs((s.along1 - s.along0) - (a1 - a0)) < 30.0
+                if (
+                    e is not None
+                    and e.dxftype() == "LINE"
+                    and getattr(e.dxf, "layer", None) == BASE_LAYER
+                    and full
+                ):
+                    e.dxf.layer = WALL_LAYER
+                    try:
+                        e.dxf.color = WALL_COLOR
+                    except Exception:  # noqa: BLE001
+                        pass
+                else:
+                    msp.add_line(
+                        (s.ortho, a0),
+                        (s.ortho, a1),
+                        dxfattribs={"layer": WALL_LAYER, "color": WALL_COLOR},
+                    )
+                n += 1
+    return n
+
+
+def promote_hall_beam_span(msp) -> int:
+    """HALL#2 아래 H-Beam 사이를 잇는 가로선은 벽이다.
+
+    같은 높이의 컨베이어와 한 줄로 보여도, 라벨 아래 기둥 사이만 다시 올린다.
+    """
+    halls = [(x, y) for x, y, s in _iter_text_labels(msp) if "HALL#2" in s]
+    if not halls:
+        return 0
+    segs = iter_axis_segs(msp, min_len_mm=200.0)
+    cols = [
+        s
+        for s in segs
+        if s.is_v and s.layer == WALL_LAYER and 600.0 <= s.length <= 2500.0
+    ]
+    n = 0
+    added: set[tuple[int, int, int]] = set()
+    for lx, ly in halls:
+        seeds = []
+        for s in segs:
+            if not s.is_h or not (4000.0 <= s.length <= 20000.0):
+                continue
+            if not (ly - 6000.0 < s.ortho < ly - 800.0):
+                continue
+            if not (s.along0 < lx < s.along1):
+                continue
+            butt_l = any(
+                abs(c.ortho - s.along0) <= 500.0
+                and c.along0 - 1500.0 <= s.ortho <= c.along1 + 1500.0
+                for c in cols
+            )
+            butt_r = any(
+                abs(c.ortho - s.along1) <= 500.0
+                and c.along0 - 1500.0 <= s.ortho <= c.along1 + 1500.0
+                for c in cols
+            )
+            if butt_l and butt_r:
+                seeds.append(s)
+        if not seeds:
+            continue
+        for s in segs:
+            if not s.is_h or s.layer == WALL_LAYER or s.length < 4000.0:
+                continue
+            if not any(abs(s.ortho - seed.ortho) <= 400.0 for seed in seeds):
+                continue
+            if not any(
+                min(s.along1, seed.along1) - max(s.along0, seed.along0) >= seed.length * 0.7
+                for seed in seeds
+            ):
+                continue
+            key = (round(s.ortho), round(s.along0), round(s.along1))
+            if key in added:
+                continue
+            covered = any(
+                w.is_h
+                and w.layer == WALL_LAYER
+                and abs(w.ortho - s.ortho) <= 40.0
+                and min(w.along1, s.along1) - max(w.along0, s.along0) >= s.length * 0.85
+                for w in segs
+            )
+            if covered:
+                continue
+            added.add(key)
+            msp.add_line(
+                (s.along0, s.ortho),
+                (s.along1, s.ortho),
+                dxfattribs={"layer": WALL_LAYER, "color": WALL_COLOR},
+            )
+            n += 1
+    return n
+
+
+def promote_tbd_beam_span(msp) -> int:
+    """TBD#2 아래 H-Beam 사이를 잇는 가로선은 벽이다.
+
+    실 안에 있는 기둥 사이만 올리고, 칸 밖 컨베이어는 그대로 둔다.
+    """
+    labels = [(x, y) for x, y, s in _iter_text_labels(msp) if s.strip() == "TBD#2"]
+    if not labels:
+        return 0
+    segs = iter_axis_segs(msp, min_len_mm=200.0)
+    n = 0
+    added: set[tuple[int, int, int]] = set()
+    for lx, ly in labels:
+        sides = [
+            s
+            for s in segs
+            if s.is_v
+            and s.layer == WALL_LAYER
+            and s.length >= 8000.0
+            and s.along0 - 500.0 <= ly <= s.along1 + 500.0
+            and abs(s.ortho - lx) < 25000.0
+        ]
+        lefts = [s.ortho for s in sides if s.ortho < lx - 1500.0]
+        rights = [s.ortho for s in sides if s.ortho > lx + 1500.0]
+        if not lefts or not rights:
+            continue
+        x_lo, x_hi = max(lefts), min(rights)
+        faces = [
+            s
+            for s in segs
+            if s.is_v
+            and s.layer == WALL_LAYER
+            and 1000.0 <= s.length <= 2200.0
+            and x_lo - 800.0 <= s.ortho <= x_hi + 800.0
+            and s.along1 > ly - 12000.0
+            and s.along0 < ly - 3000.0
+        ]
+        xs = sorted({round(s.ortho) for s in faces})
+        if len(xs) < 4:
+            continue
+        groups: list[list[int]] = [[xs[0]]]
+        for x in xs[1:]:
+            if x - groups[-1][-1] <= 2200:
+                groups[-1].append(x)
+            else:
+                groups.append([x])
+        cols = [(g[0], g[-1]) for g in groups]
+        cols = [c for c in cols if x_lo - 400.0 <= (c[0] + c[1]) / 2.0 <= x_hi + 400.0]
+        if len(cols) < 2:
+            continue
+        bottoms = []
+        for c0, c1 in cols:
+            ys = [s.along0 for s in faces if c0 - 5 <= s.ortho <= c1 + 5]
+            if ys:
+                bottoms.append(min(ys))
+        if not bottoms:
+            continue
+        y0, y1 = min(bottoms) - 200.0, max(bottoms) + 200.0
+        gaps = [
+            (a1, b0)
+            for (a0, a1), (b0, b1) in zip(cols, cols[1:])
+            if 2000.0 <= b0 - a1 <= 12000.0
+        ]
+        for s in segs:
+            if not s.is_h or s.layer == WALL_LAYER or s.length < 4000.0:
+                continue
+            if not (y0 <= s.ortho <= y1):
+                continue
+            for g0, g1 in gaps:
+                a0 = max(s.along0, float(g0))
+                a1 = min(s.along1, float(g1))
+                if a1 - a0 < (g1 - g0) * 0.7:
+                    continue
+                key = (round(s.ortho), round(a0), round(a1))
+                if key in added:
+                    continue
+                covered = any(
+                    w.is_h
+                    and w.layer == WALL_LAYER
+                    and abs(w.ortho - s.ortho) <= 40.0
+                    and min(w.along1, a1) - max(w.along0, a0) >= (a1 - a0) * 0.85
+                    for w in segs
+                )
+                if covered:
+                    continue
+                added.add(key)
+                msp.add_line(
+                    (a0, s.ortho),
+                    (a1, s.ortho),
+                    dxfattribs={"layer": WALL_LAYER, "color": WALL_COLOR},
+                )
+                n += 1
+    return n
+
+
+def promote_bottom_column_run(msp) -> int:
+    """아래쪽 H-Beam 열을 잇는 가로선은 모두 벽이다.
+
+    기둥 면에 물린 긴 선만 올린다. 롤러 눈금처럼 짧은 선은 그대로 둔다.
+    """
+    segs = iter_axis_segs(msp, min_len_mm=200.0)
+    faces = [
+        s
+        for s in segs
+        if s.is_v and s.layer == WALL_LAYER and 1000.0 <= s.length <= 2200.0
+    ]
+    rows: list[dict] = []
+    for s in sorted(faces, key=lambda s: s.along0):
+        placed = False
+        for row in rows:
+            if min(s.along1, row["y1"]) - max(s.along0, row["y0"]) >= 800.0:
+                row["faces"].append(s)
+                row["y0"] = min(row["y0"], s.along0)
+                row["y1"] = max(row["y1"], s.along1)
+                placed = True
+                break
+        if not placed:
+            rows.append({"y0": s.along0, "y1": s.along1, "faces": [s]})
+    target = None
+    for row in rows:
+        xs = sorted({round(s.ortho) for s in row["faces"]})
+        if len(xs) < 8 or xs[-1] - xs[0] < 60000.0:
+            continue
+        if target is None or row["y0"] < target["y0"]:
+            target = row
+            target["xs"] = xs
+    if target is None:
+        return 0
+    cols: list[list[int]] = [[target["xs"][0]]]
+    for x in target["xs"][1:]:
+        if x - cols[-1][-1] <= 2500:
+            cols[-1].append(x)
+        else:
+            cols.append([x])
+    if len(cols) < 6:
+        return 0
+    bounds = [(c[0], c[-1]) for c in cols]
+    y0, y1 = target["y0"] - 200.0, target["y1"] + 200.0
+
+    def _near_face(x: float) -> bool:
+        return any(abs(x - a) <= 1200.0 or abs(x - b) <= 1200.0 for a, b in bounds)
+
+    cands = [
+        s
+        for s in segs
+        if s.is_h
+        and 2500.0 <= s.length <= 20000.0
+        and y0 <= s.ortho <= y1
+        and _near_face(s.along0)
+        and _near_face(s.along1)
+    ]
+    orthos = sorted({round(s.ortho) for s in cands})
+    clusters: list[list[int]] = []
+    for o in orthos:
+        if not clusters or o - clusters[-1][-1] > 15:
+            clusters.append([o])
+        else:
+            clusters[-1].append(o)
+
+    def _cluster_stat(grp: list[int]) -> tuple[float, float]:
+        keys: dict[tuple[int, int], bool] = {}
+        for s in cands:
+            if not any(abs(s.ortho - o) <= 15.0 for o in grp):
+                continue
+            key = (round(s.along0), round(s.along1))
+            keys[key] = keys.get(key, False) or s.layer == WALL_LAYER
+        total = sum(b - a for a, b in keys)
+        covered = sum(b - a for (a, b), is_wall in keys.items() if is_wall)
+        return total, covered
+
+    chord: list[int] | None = None
+    for i, _grp in enumerate(clusters):
+        window = [clusters[i]]
+        for grp in clusters[i + 1 :]:
+            if grp[0] - clusters[i][0] > 400:
+                break
+            window.append(grp)
+        if len(window) < 3:
+            continue
+        stats = [_cluster_stat(g) for g in window]
+        if any(total < 40000.0 for total, _cov in stats):
+            continue
+        # 평행선이 세 줄 이상 아직 회색일 때만 올린다. 이미 벽인 층은 건너뛴다.
+        gray_groups = sum(1 for total, cov in stats if total > 0 and cov / total < 0.40)
+        if gray_groups < 3:
+            continue
+        if chord is None or clusters[i][0] < min(chord):
+            chord = [o for g in window for o in g]
+    if not chord:
+        return 0
+
+    wall = [s for s in segs if s.is_h and s.layer == WALL_LAYER]
+    extra: list[tuple[float, float, float]] = []
+
+    def _uncovered(ortho: float, a0: float, a1: float) -> float:
+        iv: list[list[float]] = []
+        spans = [(w.ortho, w.along0, w.along1) for w in wall] + extra
+        for oy, b0, b1 in spans:
+            if abs(oy - ortho) > 15.0:
+                continue
+            lo, hi = max(b0, a0), min(b1, a1)
+            if hi - lo > 0:
+                iv.append([lo, hi])
+        iv.sort()
+        merged: list[list[float]] = []
+        for lo, hi in iv:
+            if not merged or lo > merged[-1][1]:
+                merged.append([lo, hi])
+            else:
+                merged[-1][1] = max(merged[-1][1], hi)
+        covered = sum(hi - lo for lo, hi in merged)
+        return (a1 - a0) - covered
+
+    def _in_chord(ortho: float) -> bool:
+        return any(abs(ortho - o) <= 15.0 for o in chord)
+
+    def _missing_face(s) -> bool:
+        return any(
+            w.is_h
+            and w.layer == WALL_LAYER
+            and 150.0 <= abs(w.ortho - s.ortho) <= 350.0
+            and min(w.along1, s.along1) - max(w.along0, s.along0) >= s.length * 0.8
+            for w in wall
+        )
+
+    n = 0
+    seen: set[tuple[int, int, int]] = set()
+    for s in cands:
+        if s.layer == WALL_LAYER:
+            continue
+        if not _in_chord(s.ortho) and not _missing_face(s):
+            continue
+        key = (round(s.ortho), round(s.along0), round(s.along1))
+        if key in seen:
+            continue
+        if _uncovered(s.ortho, s.along0, s.along1) < 800.0:
+            continue
+        seen.add(key)
+        extra.append((s.ortho, s.along0, s.along1))
+        e = s.entity
+        if e is not None and e.dxftype() == "LINE" and getattr(e.dxf, "layer", None) == BASE_LAYER:
+            e.dxf.layer = WALL_LAYER
+            try:
+                e.dxf.color = WALL_COLOR
+            except Exception:  # noqa: BLE001
+                pass
+        elif e is not None and e.dxftype() == "LWPOLYLINE":
+            try:
+                pts = list(e.get_points("xy"))
+            except Exception:  # noqa: BLE001
+                pts = []
+            if len(pts) == 2 and getattr(e.dxf, "layer", None) == BASE_LAYER:
+                e.dxf.layer = WALL_LAYER
+                try:
+                    e.dxf.color = WALL_COLOR
+                except Exception:  # noqa: BLE001
+                    pass
+            else:
+                msp.add_line(
+                    (s.along0, s.ortho),
+                    (s.along1, s.ortho),
+                    dxfattribs={"layer": WALL_LAYER, "color": WALL_COLOR},
+                )
+        else:
+            msp.add_line(
+                (s.along0, s.ortho),
+                (s.along1, s.ortho),
+                dxfattribs={"layer": WALL_LAYER, "color": WALL_COLOR},
+            )
+        n += 1
+    return n
+
+
+def open_waiting_room_top_door(msp) -> int:
+    """대기실 위쪽 문은 개구이고 양옆은 벽이다.
+
+    문짝과 문을 가로지르는 벽선은 지우고, 끊겨 회색인 양옆은 다시 올린다.
+    """
+    labels = [(x, y) for x, y, s in _iter_text_labels(msp) if s.strip() == "대기실"]
+    if not labels:
+        return 0
+    swings: list[tuple[float, float, float, float]] = []
+    seen_h: set[tuple[int, int]] = set()
+    for e in msp:
+        if e.dxftype() != "ARC":
+            continue
+        try:
+            r = float(e.dxf.radius)
+            cx, cy = float(e.dxf.center.x), float(e.dxf.center.y)
+            sweep = (float(e.dxf.end_angle) - float(e.dxf.start_angle)) % 360.0
+            sa, ea = float(e.dxf.start_angle), float(e.dxf.end_angle)
+        except Exception:  # noqa: BLE001
+            continue
+        if not (900.0 <= r <= 1200.0) or not (70.0 <= sweep <= 110.0):
+            continue
+        key = (round(cx / 40.0), round(cy / 40.0))
+        if key in seen_h:
+            continue
+        seen_h.add(key)
+        leaf = None
+        for ang in (sa, ea):
+            rad = math.radians(ang)
+            ex = cx + r * math.cos(rad)
+            ey = cy + r * math.sin(rad)
+            if abs(ey - cy) < 0.35 * r and abs(ex - cx) > 0.7 * r:
+                leaf = ex
+        if leaf is None:
+            continue
+        swings.append((cx, cy, r, leaf))
+
+    n = 0
+    for lx, ly in labels:
+        for cx, cy, _r, leaf in swings:
+            if not (ly + 400.0 < cy < ly + 8000.0) or abs(cx - lx) > 12000.0:
+                continue
+            o0, o1 = (cx, leaf) if cx < leaf else (leaf, cx)
+            segs = iter_axis_segs(msp, min_len_mm=80.0)
+            orthos = sorted(
+                {
+                    round(s.ortho)
+                    for s in segs
+                    if s.is_h and s.length >= 2000.0 and abs(s.ortho - cy) <= 300.0
+                }
+            )
+            faces: list[float] = []
+            for i, a in enumerate(orthos):
+                for b in orthos[i + 1 :]:
+                    if not (120.0 <= b - a <= 350.0):
+                        continue
+                    if min(abs(a - cy), abs(b - cy)) <= 80.0:
+                        faces = [float(a), float(b)]
+            if len(faces) < 2:
+                continue
+            crossing = [
+                s
+                for s in segs
+                if s.is_h
+                and s.layer == WALL_LAYER
+                and s.entity is not None
+                and any(abs(s.ortho - f) <= 45.0 for f in faces)
+                and min(s.along1, o1) - max(s.along0, o0) > 200.0
+            ]
+            if not crossing:
+                continue
+
+            def _on_face(ortho: float) -> bool:
+                return any(abs(ortho - f) <= 45.0 for f in faces)
+
+            def _covered(ortho: float, a0: float, a1: float) -> bool:
+                span = max(a1 - a0, 1.0)
+                return any(
+                    w.is_h
+                    and w.layer == WALL_LAYER
+                    and abs(w.ortho - ortho) <= 40.0
+                    and min(w.along1, a1) - max(w.along0, a0) >= span * 0.85
+                    for w in iter_axis_segs(msp, min_len_mm=80.0)
+                )
+
+            def _add(ortho: float, a0: float, a1: float) -> None:
+                nonlocal n
+                if a1 - a0 < 100.0 or _covered(ortho, a0, a1):
+                    return
+                msp.add_line(
+                    (a0, ortho),
+                    (a1, ortho),
+                    dxfattribs={"layer": WALL_LAYER, "color": WALL_COLOR},
+                )
+                n += 1
+
+            seen_e: set[int] = set()
+            for s in crossing:
+                eid = id(s.entity)
+                if eid in seen_e:
+                    continue
+                seen_e.add(eid)
+                e = s.entity
+                if e.dxftype() == "LWPOLYLINE":
+                    try:
+                        pts = list(e.get_points("xy"))
+                    except Exception:  # noqa: BLE001
+                        continue
+                    if len(pts) != 2:
+                        continue
+                elif e.dxftype() != "LINE":
+                    continue
+                a0, a1, y = s.along0, s.along1, s.ortho
+                msp.delete_entity(e)
+                if o0 - a0 >= 100.0:
+                    _add(y, a0, o0)
+                if a1 - o1 >= 100.0:
+                    _add(y, o1, a1)
+
+            for s in segs:
+                if not s.is_h or s.layer == WALL_LAYER or not _on_face(s.ortho):
+                    continue
+                ov = min(s.along1, o1) - max(s.along0, o0)
+                if ov > 80.0:
+                    if o0 - s.along0 >= 100.0:
+                        _add(s.ortho, s.along0, o0)
+                    if s.along1 - o1 >= 100.0:
+                        _add(s.ortho, o1, s.along1)
+                    continue
+                gap = 0.0 if ov > 0 else min(abs(s.along1 - o0), abs(s.along0 - o1))
+                door_w = o1 - o0
+                if gap > 500.0 or s.length < 100.0 or s.length < door_w * 1.2:
+                    continue
+                if _covered(s.ortho, s.along0, s.along1):
+                    continue
+                e = s.entity
+                if (
+                    e is not None
+                    and e.dxftype() == "LINE"
+                    and getattr(e.dxf, "layer", None) == BASE_LAYER
+                ):
+                    e.dxf.layer = WALL_LAYER
+                    try:
+                        e.dxf.color = WALL_COLOR
+                    except Exception:  # noqa: BLE001
+                        pass
+                    n += 1
+                else:
+                    _add(s.ortho, s.along0, s.along1)
+    return n
+
+
+def promote_wash_room_edges(msp) -> int:
+    """세척실 오른쪽 세로 이중선과 아래쪽 가로선은 벽이다.
+
+    컨베이어 가장자리는 올리지 않는다.
+    """
+    labels = [(x, y) for x, y, s in _iter_text_labels(msp) if "세척실" in s]
+    if not labels:
+        return 0
+    segs = iter_axis_segs(msp, min_len_mm=400.0)
+    n = 0
+    seen: set[tuple[int, int, int]] = set()
+
+    def _covered(ortho: float, a0: float, a1: float, horizontal: bool) -> bool:
+        span = max(a1 - a0, 1.0)
+        return any(
+            w.is_h == horizontal
+            and w.layer == WALL_LAYER
+            and abs(w.ortho - ortho) <= 40.0
+            and min(w.along1, a1) - max(w.along0, a0) >= span * 0.85
+            for w in segs
+        )
+
+    def _promote(s) -> None:
+        nonlocal n
+        key = (round(s.ortho), round(s.along0), round(s.along1))
+        if key in seen or _covered(s.ortho, s.along0, s.along1, s.is_h):
+            return
+        seen.add(key)
+        e = s.entity
+        if (
+            e is not None
+            and e.dxftype() in ("LINE", "LWPOLYLINE")
+            and getattr(e.dxf, "layer", None) == BASE_LAYER
+        ):
+            if e.dxftype() == "LWPOLYLINE":
+                try:
+                    pts = list(e.get_points("xy"))
+                except Exception:  # noqa: BLE001
+                    pts = []
+                if len(pts) != 2:
+                    msp.add_line(
+                        (s.x0, s.y0),
+                        (s.x1, s.y1),
+                        dxfattribs={"layer": WALL_LAYER, "color": WALL_COLOR},
+                    )
+                    n += 1
+                    return
+            e.dxf.layer = WALL_LAYER
+            try:
+                e.dxf.color = WALL_COLOR
+            except Exception:  # noqa: BLE001
+                pass
+        else:
+            msp.add_line(
+                (s.x0, s.y0),
+                (s.x1, s.y1),
+                dxfattribs={"layer": WALL_LAYER, "color": WALL_COLOR},
+            )
+        n += 1
+
+    for lx, ly in labels:
+        verts = [
+            s
+            for s in segs
+            if s.is_v
+            and s.length >= 5000.0
+            and lx + 2000.0 < s.ortho < lx + 12000.0
+            and s.along0 - 500.0 <= ly <= s.along1 + 500.0
+        ]
+        orthos = sorted({round(s.ortho) for s in verts})
+        pair = None
+        for i, a in enumerate(orthos):
+            for b in orthos[i + 1 :]:
+                if 120.0 <= b - a <= 400.0 and (pair is None or a < pair[0]):
+                    pair = (float(a), float(b))
+        if pair is not None:
+            for s in verts:
+                if s.layer == WALL_LAYER:
+                    continue
+                if abs(s.ortho - pair[0]) <= 40.0 or abs(s.ortho - pair[1]) <= 40.0:
+                    _promote(s)
+        bottoms = [
+            s
+            for s in segs
+            if s.is_h
+            and s.length >= 8000.0
+            and ly - 4000.0 < s.ortho < ly - 400.0
+            and s.along0 < lx < s.along1
+        ]
+        for s in bottoms:
+            if s.layer == WALL_LAYER:
+                continue
+            if any(
+                w.is_h
+                and w.layer == WALL_LAYER
+                and 120.0 <= abs(w.ortho - s.ortho) <= 350.0
+                and min(w.along1, s.along1) - max(w.along0, s.along0) >= s.length * 0.7
+                for w in segs
+            ):
+                _promote(s)
+    return n
+
+
+def promote_equipment_store_walls(msp) -> int:
+    """기물 창고 상단과 하단 왼쪽의 끊긴 벽선을 잇는다."""
+    labels = [(x, y) for x, y, s in _iter_text_labels(msp) if s.strip() == "기물 창고"]
+    if not labels:
+        return 0
+    segs = iter_axis_segs(msp, min_len_mm=400.0)
+    n = 0
+    seen: set[tuple[int, int, int]] = set()
+
+    def _covered(s) -> bool:
+        span = max(s.length, 1.0)
+        return any(
+            w.is_h
+            and w.layer == WALL_LAYER
+            and abs(w.ortho - s.ortho) <= 40.0
+            and min(w.along1, s.along1) - max(w.along0, s.along0) >= span * 0.85
+            for w in segs
+        )
+
+    def _promote(s) -> None:
+        nonlocal n
+        key = (round(s.ortho), round(s.along0), round(s.along1))
+        if key in seen or _covered(s):
+            return
+        seen.add(key)
+        e = s.entity
+        if e is not None and e.dxftype() == "LINE" and getattr(e.dxf, "layer", None) == BASE_LAYER:
+            e.dxf.layer = WALL_LAYER
+            try:
+                e.dxf.color = WALL_COLOR
+            except Exception:  # noqa: BLE001
+                pass
+        elif e is not None and e.dxftype() == "LWPOLYLINE" and getattr(e.dxf, "layer", None) == BASE_LAYER:
+            try:
+                pts = list(e.get_points("xy"))
+            except Exception:  # noqa: BLE001
+                pts = []
+            if len(pts) == 2:
+                e.dxf.layer = WALL_LAYER
+                try:
+                    e.dxf.color = WALL_COLOR
+                except Exception:  # noqa: BLE001
+                    pass
+            else:
+                msp.add_line(
+                    (s.x0, s.y0),
+                    (s.x1, s.y1),
+                    dxfattribs={"layer": WALL_LAYER, "color": WALL_COLOR},
+                )
+        else:
+            msp.add_line(
+                (s.x0, s.y0),
+                (s.x1, s.y1),
+                dxfattribs={"layer": WALL_LAYER, "color": WALL_COLOR},
+            )
+        n += 1
+
+    for lx, ly in labels:
+        sides = [
+            s
+            for s in segs
+            if s.is_v
+            and s.layer == WALL_LAYER
+            and s.length >= 8000.0
+            and abs(s.ortho - lx) < 12000.0
+            and s.along0 < ly < s.along1
+        ]
+        lefts = [s.ortho for s in sides if s.ortho < lx - 2000.0]
+        rights = [s.ortho for s in sides if s.ortho > lx + 2000.0]
+        if not lefts or not rights:
+            continue
+        x_left, x_right = min(lefts), max(rights)
+        x_inner = max(lefts)
+        cols = [
+            s
+            for s in segs
+            if s.is_v
+            and s.layer == WALL_LAYER
+            and 1000.0 <= s.length <= 1600.0
+            and x_inner < s.ortho < lx
+        ]
+        for s in segs:
+            if not s.is_h or s.layer == WALL_LAYER:
+                continue
+            if not (1500.0 <= s.length <= 3500.0):
+                continue
+            if not (ly - 4000.0 < s.ortho < ly - 1500.0):
+                continue
+            if min(abs(s.along0 - x_inner), abs(s.along0 - x_left)) > 400.0:
+                continue
+            if not any(abs(s.along1 - c.ortho) <= 200.0 for c in cols):
+                continue
+            if not any(
+                w.is_h
+                and w.layer == WALL_LAYER
+                and abs(w.ortho - s.ortho) <= 40.0
+                and w.along0 >= s.along1 - 200.0
+                and w.length >= 3000.0
+                for w in segs
+            ):
+                continue
+            _promote(s)
+        for s in segs:
+            if not s.is_h or s.layer == WALL_LAYER or s.length < 3000.0:
+                continue
+            if not (ly + 400.0 < s.ortho < ly + 2000.0):
+                continue
+            if s.along0 < x_left - 300.0 or s.along1 > x_right + 300.0:
+                continue
+            _promote(s)
+    return n
+
+
+def promote_small_meeting_bottom(msp) -> int:
+    """소회의실#17 아래쪽 이중선은 벽이다. 회의 테이블 선은 올리지 않는다."""
+    labels = [(x, y) for x, y, s in _iter_text_labels(msp) if s.strip() == "소회의실#17"]
+    if not labels:
+        return 0
+    segs = iter_axis_segs(msp, min_len_mm=400.0)
+    n = 0
+    seen: set[tuple[int, int, int]] = set()
+    for lx, ly in labels:
+        # 같은 실명 위층은 별도 도면이다. 9층 좌표대만 올린다.
+        if ly > 600000.0:
+            continue
+        sides = [
+            s
+            for s in segs
+            if s.is_v
+            and s.layer == WALL_LAYER
+            and s.length >= 3000.0
+            and abs(s.ortho - lx) < 8000.0
+            and s.along0 < ly < s.along1
+        ]
+        lefts = [s for s in sides if s.ortho < lx - 500.0]
+        rights = [s for s in sides if s.ortho > lx + 500.0]
+        if not lefts or not rights:
+            continue
+        x_inner = max(s.ortho for s in lefts)
+        x_outer_right = max(s.ortho for s in rights)
+        y_bot = min(s.along0 for s in lefts + rights)
+        for s in segs:
+            if not s.is_h or s.layer == WALL_LAYER or s.entity is None:
+                continue
+            if s.length < 1500.0:
+                continue
+            if not (y_bot - 80.0 <= s.ortho <= y_bot + 400.0):
+                continue
+            if s.along0 < x_inner - 250.0 or s.along1 > x_outer_right + 250.0:
+                continue
+            key = (round(s.ortho), round(s.along0), round(s.along1))
+            if key in seen:
+                continue
+            seen.add(key)
+            e = s.entity
+            if e.dxftype() == "LINE" and getattr(e.dxf, "layer", None) == BASE_LAYER:
+                e.dxf.layer = WALL_LAYER
+                try:
+                    e.dxf.color = WALL_COLOR
+                except Exception:  # noqa: BLE001
+                    pass
+            elif e.dxftype() == "LWPOLYLINE" and getattr(e.dxf, "layer", None) == BASE_LAYER:
+                try:
+                    pts = list(e.get_points("xy"))
+                except Exception:  # noqa: BLE001
+                    pts = []
+                if len(pts) == 2:
+                    e.dxf.layer = WALL_LAYER
+                    try:
+                        e.dxf.color = WALL_COLOR
+                    except Exception:  # noqa: BLE001
+                        pass
+                else:
+                    msp.add_line(
+                        (s.x0, s.y0),
+                        (s.x1, s.y1),
+                        dxfattribs={"layer": WALL_LAYER, "color": WALL_COLOR},
+                    )
+            else:
+                msp.add_line(
+                    (s.x0, s.y0),
+                    (s.x1, s.y1),
+                    dxfattribs={"layer": WALL_LAYER, "color": WALL_COLOR},
+                )
+            n += 1
+    return n
+
+
+def promote_exec_meeting_right(msp) -> int:
+    """회의실#1(임원) 오른쪽은 벽이다. 기둥 위·아래의 끊긴 이중선을 잇는다."""
+    labels = [(x, y) for x, y, s in _iter_text_labels(msp) if s.strip() == "회의실#1"]
+    if not labels:
+        return 0
+    imwon = [(x, y) for x, y, s in _iter_text_labels(msp) if s.strip() == "(임원)"]
+    segs = iter_axis_segs(msp, min_len_mm=400.0)
+    n = 0
+    seen: set[int] = set()
+    for lx, ly in labels:
+        # 같은 실명 위층은 별도 도면이다. 9층 좌표대만 올린다.
+        if not (500000.0 < ly < 560000.0):
+            continue
+        if not any(abs(x - lx) < 4000.0 and abs(y - ly) < 2500.0 for x, y in imwon):
+            continue
+        faces = [
+            s
+            for s in segs
+            if s.is_v
+            and s.layer == WALL_LAYER
+            and 1000.0 <= s.length <= 1600.0
+            and lx + 2000.0 < s.ortho < lx + 5000.0
+            and s.along1 > ly - 1500.0
+            and s.along0 < ly + 3000.0
+        ]
+        if not faces:
+            continue
+        x_right = max(s.ortho for s in faces)
+        mates = {
+            round(s.ortho)
+            for s in segs
+            if s.is_v
+            and 150.0 <= x_right - s.ortho <= 350.0
+            and s.length >= 800.0
+        }
+        orthos = {round(x_right)} | mates
+        y0 = min(s.along0 for s in faces)
+        y1 = max(s.along1 for s in faces)
+        for s in segs:
+            if not s.is_v or s.layer == WALL_LAYER or s.entity is None or s.length < 800.0:
+                continue
+            if round(s.ortho) not in orthos and not any(abs(s.ortho - o) <= 40.0 for o in orthos):
+                continue
+            if s.along1 < y0 - 3500.0 or s.along0 > y1 + 2500.0:
+                continue
+            if min(s.along1, y1 + 80.0) - max(s.along0, y0 - 80.0) < -50.0:
+                continue
+            # 기둥 면에 닿는 위·아래 조각만.
+            if min(abs(s.along0 - y0), abs(s.along0 - y1), abs(s.along1 - y0), abs(s.along1 - y1)) > 80.0:
+                continue
+            eid = id(s.entity)
+            if eid in seen:
+                continue
+            seen.add(eid)
+            e = s.entity
+            if e.dxftype() in ("LINE", "LWPOLYLINE") and getattr(e.dxf, "layer", None) == BASE_LAYER:
+                try:
+                    pts = list(e.get_points("xy")) if e.dxftype() == "LWPOLYLINE" else []
+                except Exception:  # noqa: BLE001
+                    pts = []
+                xs = [p[0] for p in pts]
+                if e.dxftype() == "LINE" or (pts and max(xs) - min(xs) <= 400.0):
+                    e.dxf.layer = WALL_LAYER
+                    try:
+                        e.dxf.color = WALL_COLOR
+                    except Exception:  # noqa: BLE001
+                        pass
+                else:
+                    msp.add_line(
+                        (s.x0, s.y0),
+                        (s.x1, s.y1),
+                        dxfattribs={"layer": WALL_LAYER, "color": WALL_COLOR},
+                    )
+            else:
+                msp.add_line(
+                    (s.x0, s.y0),
+                    (s.x1, s.y1),
+                    dxfattribs={"layer": WALL_LAYER, "color": WALL_COLOR},
+                )
+            n += 1
+    return n
 
 
 def apply_corrections(
@@ -4858,6 +7458,8 @@ def apply_corrections(
         promote.extend(promote_corridor_door_flanks(segs))
     promote.extend(promote_collinear_room_walls(segs))
     promote.extend(promote_butt_partitions(segs))
+    promote.extend(promote_room_corner_returns(segs))
+    promote.extend(promote_wall_mate_faces(segs))
     n_stair_promote = 0
     if do_stair_promote:
         stair_prom = promote_stair_enclosure_walls(msp, segs)
@@ -4887,6 +7489,7 @@ def apply_corrections(
         furn_ids |= demote_fitness_equipment(msp, segs, exclude_ids=hbeam_ids)
         furn_ids |= demote_meeting_room_interiors(msp, segs, exclude_ids=hbeam_ids)
         furn_ids |= demote_landscape_walls(msp, segs, exclude_ids=hbeam_ids)
+        furn_ids |= demote_serving_counter_walls(msp, segs, exclude_ids=hbeam_ids)
         promote = [s for s in promote if id(s.entity) not in furn_ids]
 
     open_hall_demote: set[int] = set()
@@ -4922,6 +7525,7 @@ def apply_corrections(
         furniture_line_demote = demote_line_furniture_boxes(segs, exclude_ids=hbeam_ids)
         fitness_demote = demote_fitness_equipment(msp, segs, exclude_ids=hbeam_ids)
         fitness_demote |= demote_meeting_room_interiors(msp, segs, exclude_ids=hbeam_ids)
+        fitness_demote |= demote_serving_counter_walls(msp, segs, exclude_ids=hbeam_ids)
         landscape_demote = demote_landscape_walls(msp, segs, exclude_ids=hbeam_ids)
         demote_ids |= furniture_box_demote
         demote_ids |= furniture_line_demote
@@ -4940,7 +7544,9 @@ def apply_corrections(
     promote = [
         s
         for s in promote
-        if not _is_stair_tread_seg(s, segs) and not _is_stair_nosing_seg(s, segs)
+        if not _is_stair_tread_seg(s, segs)
+        and not _is_stair_nosing_seg(s, segs)
+        and not _near_seat_door_wall(s.is_v, s.ortho, segs)
     ]
     demote_ids |= pictogram_demote
     demote_ids |= elev_door_demote
@@ -5013,6 +7619,7 @@ def apply_corrections(
         post_furn |= demote_closed_furniture_boxes(msp, exclude_ids=hbeam_ids)
         post_furn |= demote_fitness_equipment(msp, segs_after, exclude_ids=hbeam_ids)
         post_furn |= demote_meeting_room_interiors(msp, segs_after, exclude_ids=hbeam_ids)
+        post_furn |= demote_serving_counter_walls(msp, segs_after, exclude_ids=hbeam_ids)
         post_furn |= demote_landscape_walls(msp, segs_after, exclude_ids=hbeam_ids)
         for e in list(msp):
             if e.dxf.layer == WALL_LAYER and id(e) in post_furn:
@@ -5023,6 +7630,7 @@ def apply_corrections(
     n_column_promoted = 0
     if do_column_promote:
         n_column_promoted = promote_hbeam_columns(msp)
+        n_column_promoted += promote_hbeam_sleeves(msp)
     # 승격으로 다시 빨개진 픽토그램(장애인 표식) 제거
     n_pictogram = len(pictogram_demote)
     post_pic = demote_pictogram_columns(msp)
@@ -5035,6 +7643,33 @@ def apply_corrections(
 
     # 문짝은 벽이 아니고, 개구 양옆은 벽. promote 이후에 개구를 끊는다.
     _n_door_cut, _n_door_flank = correct_walls_around_doors(msp)
+    # 문 양옆 승격이 배식대 안을 다시 벽으로 만들지 않는다. H-Beam 은 남긴다.
+    if do_box_demote:
+        segs_serving = iter_axis_segs(msp, min_len_mm=70.0)
+        post_serving = demote_serving_counter_walls(
+            msp, segs_serving, exclude_ids=hbeam_ids
+        )
+        for e in list(msp):
+            if e.dxf.layer == WALL_LAYER and id(e) in post_serving:
+                msp.delete_entity(e)
+                n_demoted += 1
+
+    # 대각선으로만 표시된 문의 양옆. 배식대 demote 뒤에 올려 경계벽이 다시 지워지지 않게 한다.
+    n_promoted += promote_marked_door_flanks(msp)
+    n_promoted += promote_serving_end_door_flanks(msp)
+    n_promoted += promote_stacked_room_side_wall(msp)
+    n_promoted += open_serving_corner_door(msp)
+    n_promoted += promote_control_booth_bottom(msp)
+    n_promoted += promote_stair_eps_party_wall(msp)
+    n_promoted += promote_waiting_store_wall(msp)
+    n_promoted += promote_hall_beam_span(msp)
+    n_promoted += promote_tbd_beam_span(msp)
+    n_promoted += promote_bottom_column_run(msp)
+    n_promoted += open_waiting_room_top_door(msp)
+    n_promoted += promote_wash_room_edges(msp)
+    n_promoted += promote_equipment_store_walls(msp)
+    n_promoted += promote_small_meeting_bottom(msp)
+    n_promoted += promote_exec_meeting_right(msp)
 
     n_wall = sum(1 for e in msp if e.dxf.layer == WALL_LAYER)
     n_base = sum(1 for e in msp if e.dxf.layer == BASE_LAYER)

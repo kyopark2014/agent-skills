@@ -16,6 +16,7 @@ import {
   ChevronIcon,
   DashboardIcon,
   DocumentsIcon,
+  DrawingIcon,
   GuardrailIcon,
   KnowledgeGraphIcon,
   LlmGatewayIcon,
@@ -63,6 +64,8 @@ interface Props {
   knowledgeGraphEnabled?: boolean;
   onPatchKnowledgeGraphEnabled?: (enabled: boolean) => void | Promise<void>;
   onOpenDashboard?: () => void;
+  drawingActive?: boolean;
+  onOpenDrawing?: () => void;
   onRefreshConfig?: () => Promise<AppConfig | void> | AppConfig | void;
   sidebarResizing?: boolean;
   onSidebarResizeStart?: (e: ReactPointerEvent<HTMLDivElement>) => void;
@@ -87,6 +90,8 @@ export function Sidebar({
   knowledgeGraphEnabled = true,
   onPatchKnowledgeGraphEnabled,
   onOpenDashboard,
+  drawingActive = false,
+  onOpenDrawing,
   onRefreshConfig,
   sidebarResizing = false,
   onSidebarResizeStart,
@@ -404,6 +409,20 @@ export function Sidebar({
         >
           <ModelIcon className="sidebar-icon" />
           <span>{modelName || "Model"}</span>
+        </button>
+
+        <button
+          type="button"
+          className={`sidebar-menu-btn${drawingActive ? " is-active" : ""}`}
+          aria-current={drawingActive ? "page" : undefined}
+          onClick={() => {
+            collapseSettings();
+            onCloseDrawer();
+            onOpenDrawing?.();
+          }}
+        >
+          <DrawingIcon className="sidebar-icon" />
+          <span>Drawing</span>
         </button>
 
         <div

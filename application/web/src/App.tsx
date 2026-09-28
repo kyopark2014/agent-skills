@@ -25,6 +25,7 @@ import { ChatThread } from "./components/ChatThread";
 import { ChatInput } from "./components/ChatInput";
 import { GoogleLoginModal } from "./components/GoogleLoginModal";
 import { Dashboard } from "./components/Dashboard";
+import { DrawingView } from "./components/DrawingView";
 import {
   SIDEBAR_W_DEFAULT,
   clampSidebarWidth,
@@ -68,7 +69,7 @@ export default function App() {
   const [sidebarResizing, setSidebarResizing] = useState(false);
   const sidebarWidthRef = useRef(sidebarWidth);
   sidebarWidthRef.current = sidebarWidth;
-  const [view, setView] = useState<"chat" | "dashboard">("chat");
+  const [view, setView] = useState<"chat" | "dashboard" | "drawing">("chat");
   const [queuedByTaskId, setQueuedByTaskId] = useState<
     Record<string, QueuedMessage[]>
   >({});
@@ -725,6 +726,7 @@ export default function App() {
   }
 
   async function handleNewTaskAndCloseSidebar() {
+    setView("chat");
     await handleNewTask();
     setSidebarOpen(false);
   }
@@ -797,6 +799,11 @@ export default function App() {
               }
             : undefined
         }
+        drawingActive={view === "drawing"}
+        onOpenDrawing={() => {
+          setView("drawing");
+          setSidebarOpen(false);
+        }}
         onRefreshConfig={refreshConfig}
         sidebarResizing={sidebarResizing}
         onSidebarResizeStart={onSidebarResizeStart}
@@ -805,6 +812,11 @@ export default function App() {
       <div className="main-panel">
         {view === "dashboard" ? (
           <Dashboard onBack={() => setView("chat")} />
+        ) : view === "drawing" ? (
+          <DrawingView
+            onMenuClick={() => setSidebarOpen(true)}
+            onBack={() => setView("chat")}
+          />
         ) : (
           <ChatThread
             messages={messages}

@@ -43,6 +43,26 @@ export function McpIcon({ className }: IconProps) {
   );
 }
 
+export function DrawingIcon({ className }: IconProps) {
+  return (
+    <svg
+      className={className}
+      viewBox="0 0 16 16"
+      aria-hidden="true"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.15"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <rect x="2.25" y="2.25" width="11.5" height="11.5" rx="1" />
+      <path d="M2.25 6.5h11.5" />
+      <path d="M6.5 6.5V13.75" />
+      <path d="M6.5 10h7.25" />
+    </svg>
+  );
+}
+
 export function ModelIcon({ className }: IconProps) {
   return (
     <svg className={className} viewBox="0 0 16 16" aria-hidden="true">

@@ -2721,3 +2721,228 @@ button.config-popover-choice.is-selected {
   font-size: 0.92rem;
 }
 
+.drawing-view {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.drawing-back-btn {
+  margin-left: auto;
+  flex-shrink: 0;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-secondary);
+  border-radius: 8px;
+  padding: 6px 10px;
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.drawing-back-btn:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.drawing-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+}
+
+.drawing-floors {
+  width: 88px;
+  flex-shrink: 0;
+  border-right: 1px solid var(--border);
+  background: var(--bg-secondary);
+  overflow-y: auto;
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.drawing-floor-btn {
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-primary);
+  cursor: pointer;
+  padding: 8px 10px;
+  text-align: left;
+  font-size: 13px;
+}
+
+.drawing-floor-btn:hover {
+  background: var(--bg-hover);
+}
+
+.drawing-floor-btn.is-active {
+  background: linear-gradient(
+    90deg,
+    var(--menu-active-start) 0%,
+    var(--menu-active-mid) 72%,
+    var(--menu-active-end) 100%
+  );
+}
+
+.drawing-main {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.drawing-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-secondary);
+  flex-shrink: 0;
+}
+
+.drawing-tabs {
+  display: flex;
+  gap: 4px;
+  min-width: 0;
+}
+
+.drawing-tab {
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  padding: 6px 12px;
+  font-size: 13px;
+}
+
+.drawing-tab:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.drawing-tab.is-active {
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  box-shadow: inset 0 0 0 1px var(--border);
+}
+
+.drawing-zoom {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.drawing-zoom-btn,
+.drawing-zoom-label {
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-primary);
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+.drawing-zoom-btn {
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.drawing-zoom-btn svg {
+  width: 16px;
+  height: 16px;
+}
+
+.drawing-zoom-label {
+  min-width: 58px;
+  height: 32px;
+  padding: 0 8px;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.drawing-zoom-btn:hover:not(:disabled),
+.drawing-zoom-label:hover:not(:disabled) {
+  background: var(--bg-hover);
+}
+
+.drawing-zoom-btn:disabled,
+.drawing-zoom-label:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.drawing-error {
+  margin: 0;
+  padding: 8px 12px;
+  color: #f87171;
+  font-size: 13px;
+}
+
+.drawing-stage {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  position: relative;
+  overflow: hidden;
+  background: #fff;
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
+}
+
+.drawing-stage.is-panning {
+  cursor: grabbing;
+}
+
+.drawing-stage img {
+  position: absolute;
+  top: 0;
+  left: 0;
+  max-width: none;
+  transform-origin: 0 0;
+  pointer-events: none;
+}
+
+.drawing-card-status {
+  margin: 0;
+  padding: 20px 14px;
+  color: #57606a;
+  font-size: 13px;
+}
+
+@media (max-width: 768px) {
+  .drawing-body {
+    flex-direction: column;
+  }
+
+  .drawing-floors {
+    width: auto;
+    flex-direction: row;
+    overflow-x: auto;
+    border-right: none;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .drawing-floor-btn {
+    flex-shrink: 0;
+  }
+
+  .drawing-toolbar {
+    flex-wrap: wrap;
+  }
+}
+
