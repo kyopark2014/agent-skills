@@ -134,7 +134,8 @@ def _square_metrics(e: DXFEntity) -> tuple[float, float, float, float] | None:
     if not m:
         return None
     cx, cy, w, h, *_ = m
-    if abs(w - h) > max(w, h) * 0.35:
+    # 1300×900 같은 가로로 긴 표식 사각은 기둥이 아니다.
+    if abs(w - h) > max(w, h) * 0.22:
         return None
     return (cx, cy, w, h)
 
@@ -146,6 +147,14 @@ def find_hbeam_column_idxs(entities: list[DXFEntity]) -> set[int]:
     """
     squares: list[tuple[int, float, float, float, float]] = []
     dashes: list[tuple[float, float, float, int]] = []
+    arc_pts: list[tuple[float, float]] = []
+    for e in entities:
+        if e.dxftype() not in ("ARC", "CIRCLE"):
+            continue
+        try:
+            arc_pts.append((float(e.dxf.center.x), float(e.dxf.center.y)))
+        except Exception:  # noqa: BLE001
+            continue
     for ei, e in enumerate(entities):
         m = _square_metrics(e)
         if m:
@@ -175,6 +184,12 @@ def find_hbeam_column_idxs(entities: list[DXFEntity]) -> set[int]:
             if abs(mx - cx) <= side * 0.35 and abs(my - cy) <= side * 0.35:
                 dash_idxs.add(di)
         if not dash_idxs:
+            continue
+        # 휠체어 등 픽토그램: 사각 안에 호가 여러 개이거나 짧은 선이 많다.
+        x0, y0 = cx - w * 0.5, cy - h * 0.5
+        x1, y1 = cx + w * 0.5, cy + h * 0.5
+        n_arc = sum(1 for ax, ay in arc_pts if x0 <= ax <= x1 and y0 <= ay <= y1)
+        if n_arc >= 2 or len(dash_idxs) >= 6:
             continue
         cands.append((cx, cy, side, {ei} | dash_idxs))
 

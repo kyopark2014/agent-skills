@@ -352,8 +352,8 @@ floor_wall_original
        ※ 강당·오픈홀 내부 장축은 promote 후보에서 제외
   → demote (short·pack·dense·box·review demote_bboxes
             · open_hall center)
-       ※ 복도·긴 이중선·계단실·엘리베이터·H-Beam 기둥은 protect 로 demote 제외
-       ※ 오픈홀 중앙 오검출은 protect보다 우선 demote
+       ※ 복도·긴 이중선·계단실·엘리베이터·H-Beam 기둥은 protect 로 자동 demote 제외
+       ※ review demote_bboxes · 오픈홀 중앙 오검출은 protect보다 우선 demote
        ※ 과대 demote_bbox 는 load 시 skip
   → promote LINE 추가
   → H-Beam 기둥 BASE→WALL

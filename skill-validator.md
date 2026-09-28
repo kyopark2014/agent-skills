@@ -195,8 +195,9 @@ correct_walls_floor.py
 4) demote 집합 구성
      - (옵션) short-demote, pack, dense cluster, 가구/피트니스/조경
      - review demote_bboxes
-5) protect(복도·계단·엘리베이터·H-Beam)로 demote에서 제외
-     단 오픈홀 중앙·엘리베이터 문후면·가구는 protect보다 우선 demote
+5) protect(복도·계단·엘리베이터·H-Beam)로 자동 demote에서 제외
+     단 review demote_bboxes · 오픈홀 중앙 · 엘리베이터 문후면 · 가구는
+     protect보다 우선 demote
 6) WALL 엔티티 삭제 (demote)
 7) BASE→WALL 또는 add_line (promote)
 8) post-pass: 승격으로 다시 올라온 홀중앙/문후면/가구 제거
@@ -334,6 +335,7 @@ def protect_corridor_wall_entities(...):
 
 ```3247:3255:agent-skills/application/skills/drawing-llmvalidator/scripts/lib_llm_correct.py
     demote_ids -= protect_ids
+    demote_ids |= review_demote   # Vision bbox 는 protect보다 우선
     # 오픈홀 중앙·엘리베이터 문/후면·가구·… 는 protect보다 우선 demote
     demote_ids |= open_hall_demote
     demote_ids |= elev_door_demote
@@ -341,7 +343,7 @@ def protect_corridor_wall_entities(...):
     ...
 ```
 
-→ 복도는 보호하되, 강당 중앙 오검출·엘리베이터 문면·가구는 **보호를 뚫고** 제거합니다.
+→ 자동 demote만 복도 보호에 걸린다. Vision `demote_bboxes`·강당 중앙 오검출·엘리베이터 문면·가구는 **보호를 뚫고** 제거한다.
 
 삭제:
 

@@ -1394,7 +1394,19 @@ def build_human_message_with_files(prompt: str, files: list | None = None) -> Hu
                 }
             )
             image_names.append(loaded_name)
-            logger.info(f"attached image for multimodal message: {loaded_name}")
+            if _is_local_filesystem_ref(file_ref) and os.path.isfile(file_ref):
+                content_blocks.append(
+                    {
+                        "type": "text",
+                        "text": (
+                            f"첨부 이미지: {loaded_name}\n"
+                            f"절대 경로: {file_ref}\n"
+                            "스크립트나 도구에 이미지를 넘길 때는 이 절대 경로를 사용하세요. "
+                            "경로를 다시 묻지 마세요."
+                        ),
+                    }
+                )
+            logger.info(f"attached image for multimodal message: {loaded_name} path={file_ref}")
         except Exception as e:
             logger.error(f"Failed to load image {file_ref}: {e}")
             if _is_local_filesystem_ref(file_ref):
