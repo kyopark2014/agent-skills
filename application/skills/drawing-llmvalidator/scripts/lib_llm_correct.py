@@ -2181,6 +2181,9 @@ def _is_open_hall_center_double_v(
                 break
         if not continues_long:
             continue
+        # 준비실 오른쪽처럼 위·아래가 가로벽에 물린 이중선은 실의 면이다.
+        if _closed_room_side_v(s, all_segs or []):
+            return False
         return True
     return False
 
@@ -2248,6 +2251,38 @@ def _is_open_hall_interior_v_seg(
         if gap <= 20000.0:
             return True
     return False
+
+
+def _closed_room_side_v(s: AxisSeg, segs: list[AxisSeg]) -> bool:
+    """양쪽 끝이 가로벽 끝에 물린 이중선이면 실의 한 면이다."""
+    if not s.is_v or not segs or s.length < 1500.0:
+        return False
+    same = [p for p in segs if p.is_v and p.length >= 800.0]
+    if not _has_parallel_pair(s, same, thick_min=80.0, thick_max=320.0):
+        return False
+    # 계단·문짝처럼 비슷한 세로선이 여럿이면 실의 한 면이 아니다.
+    orthos = {round(s.ortho / 50.0)}
+    for p in same:
+        if abs(p.length - s.length) > 800.0 or abs(p.ortho - s.ortho) > 2500.0:
+            continue
+        ov = min(s.along1, p.along1) - max(s.along0, p.along0)
+        if ov < min(s.length, p.length) * 0.5:
+            continue
+        orthos.add(round(p.ortho / 50.0))
+    if len(orthos) > 2:
+        return False
+    crosses = [p for p in segs if p.is_h and p.length >= 800.0]
+
+    def _hits(along: float) -> bool:
+        return any(
+            abs(c.ortho - along) <= 250.0
+            and (
+                abs(c.along0 - s.ortho) <= 250.0 or abs(c.along1 - s.ortho) <= 250.0
+            )
+            for c in crosses
+        )
+
+    return _hits(s.along0) and _hits(s.along1)
 
 
 def _closed_room_side(s: AxisSeg, segs: list[AxisSeg]) -> bool:
@@ -2456,7 +2491,7 @@ def demote_open_hall_center_walls(
             ):
                 on_outer = True
                 break
-        if on_outer or _on_stair_shell(s, stair_boxes):
+        if on_outer or _on_stair_shell(s, stair_boxes) or _closed_room_side_v(s, segs):
             continue
         for d in demoted_segs:
             if d.is_h != s.is_h or abs(d.ortho - s.ortho) > 80.0:
@@ -2497,9 +2532,60 @@ def demote_open_hall_center_walls(
             ):
                 on_outer = True
                 break
-        if on_outer or _on_stair_shell(s, stair_boxes):
+        if on_outer or _on_stair_shell(s, stair_boxes) or _closed_room_side_v(s, segs):
             continue
         if _has_parallel_pair(s, demoted_segs, thick_min=50.0, thick_max=420.0):
+            demote.add(id(s.entity))
+
+    # 홀 장축 바로 위의 실벽 옆에 붙은 얇은 문짝은 다시 뺀다.
+    anchors = []
+    for s in segs:
+        if (
+            s.layer != WALL_LAYER
+            or id(s.entity) in demote
+            or s.length > 4500.0
+            or not _closed_room_side_v(s, segs)
+        ):
+            continue
+        for p in segs:
+            if not p.is_v or p.length < 8000.0 or abs(p.ortho - s.ortho) > 80.0:
+                continue
+            if s.along0 >= p.along1:
+                sep = s.along0 - p.along1
+            elif p.along0 >= s.along1:
+                sep = p.along0 - s.along1
+            else:
+                continue
+            if 200.0 <= sep <= 2000.0:
+                anchors.append(s)
+                break
+    anchor_orthos = [s.ortho for s in anchors]
+    for s in segs:
+        if (
+            s.layer != WALL_LAYER
+            or id(s.entity) in demote
+            or s.length > 1200.0
+            or not anchor_orthos
+        ):
+            continue
+        if not _has_parallel_pair(s, segs, thick_min=15.0, thick_max=50.0):
+            continue
+        if any(
+            abs(s.ortho - a.ortho) <= 350.0
+            and min(s.along1, a.along1) - max(s.along0, a.along0) >= 400.0
+            for a in segs
+            if a.layer == WALL_LAYER
+            and a.length >= 2500.0
+            and any(
+                abs(a.ortho - ax.ortho) <= 80.0
+                and (
+                    0.0 <= a.along0 - ax.along1 <= 2000.0
+                    or 0.0 <= ax.along0 - a.along1 <= 2000.0
+                    or a is ax
+                )
+                for ax in anchors
+            )
+        ):
             demote.add(id(s.entity))
     return demote
 
@@ -2681,6 +2767,9 @@ def promote_corridor_door_flanks(
                 ):
                     if s.length > 3500.0:
                         continue
+                # 계단 디딤판은 문 옆 벽이 아니다.
+                if _is_stair_tread_seg(s, segs) or _is_stair_nosing_seg(s, segs):
+                    continue
                 key = (
                     round(s.x0, 1),
                     round(s.y0, 1),
@@ -2825,6 +2914,110 @@ def _stair_bboxes(msp, segs: list[AxisSeg]) -> list[dict[str, float]]:
             boxes.append(bb)
     _stair_bbox_cache[key] = boxes
     return boxes
+
+
+def _is_closed_box_side(s: AxisSeg, segs: list[AxisSeg]) -> bool:
+    """양 끝이 마주보는 변으로 닫힌 사각이면 기둥이다."""
+    if not (450.0 <= s.length <= 1600.0):
+        return False
+    crosses = [c for c in segs if c.is_h != s.is_h and c.length <= 1700.0]
+    for p in segs:
+        if p.is_h != s.is_h or abs(p.length - s.length) > 400.0:
+            continue
+        gap = abs(p.ortho - s.ortho)
+        if not (450.0 <= gap <= 1500.0):
+            continue
+        ov = min(s.along1, p.along1) - max(s.along0, p.along0)
+        if ov < min(s.length, p.length) * 0.7:
+            continue
+        lo, hi = min(s.ortho, p.ortho), max(s.ortho, p.ortho)
+
+        def _spans(end: float) -> bool:
+            return any(
+                abs(c.ortho - end) <= 120.0
+                and c.along0 - 120.0 <= lo
+                and c.along1 + 120.0 >= hi
+                for c in crosses
+            )
+
+        if _spans(s.along0) and _spans(s.along1):
+            return True
+    return False
+
+
+def _is_stair_tread_seg(s: AxisSeg, segs: list[AxisSeg]) -> bool:
+    """UP/DN 근처에서 길게 늘어선 짧은 평행선은 계단 디딤판이다.
+
+    기둥 사각처럼 폭이 좁거나 닫힌 사각은 디딤이 아니다.
+    """
+    if s.entity is None or not (400.0 <= s.length <= 1800.0):
+        return False
+    if _is_closed_box_side(s, segs):
+        return False
+    try:
+        msp = s.entity.doc.modelspace()
+    except Exception:  # noqa: BLE001
+        return False
+    labels = getattr(_is_stair_tread_seg, "_labels", None)
+    key = id(msp)
+    if labels is None or getattr(_is_stair_tread_seg, "_key", None) != key:
+        labels = []
+        for x, y, text in _iter_text_labels(msp):
+            u = text.strip().upper()
+            if u in ("UP", "DN", "DOWN") or (
+                len(u) <= 6 and (u.startswith("UP") or u.startswith("DN"))
+            ):
+                labels.append((x, y))
+        _is_stair_tread_seg._labels = labels  # type: ignore[attr-defined]
+        _is_stair_tread_seg._key = key  # type: ignore[attr-defined]
+    mx = (s.x0 + s.x1) * 0.5
+    my = (s.y0 + s.y1) * 0.5
+    if not any(math.hypot(mx - x, my - y) <= 11000.0 for x, y in labels):
+        return False
+    orthos: set[int] = set()
+    for p in segs:
+        if p.is_h != s.is_h or not (400.0 <= p.length <= 1800.0):
+            continue
+        if abs(p.length - s.length) > 400.0 or abs(p.ortho - s.ortho) > 2800.0:
+            continue
+        ov = min(s.along1, p.along1) - max(s.along0, p.along0)
+        if ov < min(s.length, p.length) * 0.6:
+            continue
+        orthos.add(round(p.ortho / 40.0))
+    if len(orthos) < 5:
+        return False
+    # 기둥 사각은 폭이 3.5 m 에 못 미친다. 계단 비행만 넘긴다.
+    return (max(orthos) - min(orthos)) * 40.0 >= 3500.0
+
+
+def _is_stair_nosing_seg(s: AxisSeg, segs: list[AxisSeg]) -> bool:
+    """디딤 끝을 잇는 600 mm 안쪽 선만 계단 표시로 본다."""
+    if not (550.0 <= s.length <= 650.0):
+        return False
+    hits = 0
+    for p in segs:
+        if p.is_h == s.is_h:
+            continue
+        if min(abs(p.along0 - s.ortho), abs(p.along1 - s.ortho)) > 40.0:
+            continue
+        if not (s.along0 - 80.0 <= p.ortho <= s.along1 + 80.0):
+            continue
+        if _is_stair_tread_seg(p, segs):
+            hits += 1
+            if hits >= 2:
+                return True
+    return False
+
+
+def demote_stair_treads(segs: list[AxisSeg]) -> set[int]:
+    """계단 디딤판 WALL 은 벽이 아니다."""
+    out: set[int] = set()
+    for s in segs:
+        if s.layer != WALL_LAYER or s.entity is None:
+            continue
+        if _is_stair_tread_seg(s, segs) or _is_stair_nosing_seg(s, segs):
+            out.add(id(s.entity))
+    return out
 
 
 def _on_stair_shell(
@@ -4743,6 +4936,12 @@ def apply_corrections(
     demote_ids |= review_demote
     # 오픈홀 중앙·엘리베이터 문/후면·가구·운동기구·정원은 protect보다 우선 demote
     demote_ids |= open_hall_demote
+    demote_ids |= demote_stair_treads(segs)
+    promote = [
+        s
+        for s in promote
+        if not _is_stair_tread_seg(s, segs) and not _is_stair_nosing_seg(s, segs)
+    ]
     demote_ids |= pictogram_demote
     demote_ids |= elev_door_demote
     demote_ids |= furniture_box_demote
