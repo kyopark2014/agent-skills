@@ -3821,6 +3821,14 @@ def promote_elevator_enclosure_walls(
                 and any(_is_elevator_door_opening_seg(s, sh, bank) for sh in shafts)
             ):
                 continue
+            # 외곽으로만 걸린 문짝(두께 약 40mm, 길이 1.1m)은 벽이 아니다.
+            if (
+                is_peri
+                and not (is_jamb or is_return or is_turn or is_inter)
+                and s.length <= 1600.0
+                and not _has_parallel_pair(s, base, thick_min=80.0, thick_max=500.0)
+            ):
+                continue
             if not _has_parallel_pair(s, base, thick_min=15.0, thick_max=500.0):
                 if not is_jamb and not is_return and not is_turn and s.length > 2500.0:
                     continue
@@ -4071,6 +4079,73 @@ def promote_collinear_room_walls(
     return out
 
 
+def promote_butt_partitions(
+    segs: list[AxisSeg],
+    *,
+    min_len_mm: float = 2400.0,
+    max_len_mm: float = 2790.0,
+    end_tol_mm: float = 80.0,
+    wall_min_mm: float = 2500.0,
+) -> list[AxisSeg]:
+    """양끝이 긴 벽에 맞닿은 짧은 이중선은 칸막이다.
+
+    면이 2.8m 에 못 미치면 검출기가 벽으로 두지 않는다.
+    사무실·상담실 사이처럼 위·아래 벽에 물린 이중선만 벽으로 둔다.
+    """
+    wall = [s for s in segs if s.layer == WALL_LAYER and s.length >= wall_min_mm]
+    base = [s for s in segs if s.layer == BASE_LAYER]
+    h_wall = [s for s in wall if s.is_h]
+    v_wall = [s for s in wall if s.is_v]
+    out: list[AxisSeg] = []
+    seen: set[tuple[float, float, float, float]] = set()
+
+    def _hits(targets: list[AxisSeg], along_end: float, ortho: float) -> bool:
+        return any(
+            abs(w.ortho - along_end) <= end_tol_mm
+            and w.along0 - 200.0 <= ortho <= w.along1 + 200.0
+            for w in targets
+        )
+
+    def _full_mate(s: AxisSeg) -> bool:
+        for o in base:
+            if o.is_h != s.is_h:
+                continue
+            if id(o.entity) == id(s.entity) and abs(o.ortho - s.ortho) < 1.0:
+                continue
+            d = abs(o.ortho - s.ortho)
+            if not (120.0 <= d <= 280.0):
+                continue
+            ov = min(s.along1, o.along1) - max(s.along0, o.along0)
+            if ov >= s.length * 0.85 and abs(o.length - s.length) <= 200.0:
+                return True
+        return False
+
+    for s in base:
+        if not (min_len_mm <= s.length <= max_len_mm):
+            continue
+        if not _full_mate(s):
+            continue
+        # 같은 자리의 면이 이미 벽이면 다시 올리지 않는다.
+        same = [
+            (w.along0, w.along1, w.length)
+            for w in wall
+            if w.is_h == s.is_h and abs(w.ortho - s.ortho) <= 40.0
+        ]
+        if _covered(same, s.along0, s.along1):
+            continue
+        targets = h_wall if s.is_v else v_wall
+        if not (
+            _hits(targets, s.along0, s.ortho) and _hits(targets, s.along1, s.ortho)
+        ):
+            continue
+        key = (round(s.x0, 1), round(s.y0, 1), round(s.x1, 1), round(s.y1, 1))
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(s)
+    return out
+
+
 def find_double_door_openings(
     msp,
 ) -> list[tuple[bool, float, float, float]]:
@@ -4153,36 +4228,75 @@ def find_single_door_openings(
             continue
         swings.append((cx, cy, r, sa, ea))
 
-    # 힌지 근처를 지나는 장축 — 문짝이 벽과 나란한 방향
+    # 힌지 근처를 지나는 장축 — 문짝이 벽과 나란한 방향.
+    # 사무실·상담실처럼 벽이 LWPOLYLINE 인 경우도 포함한다.
     long_h: list[tuple[float, float, float]] = []
     long_v: list[tuple[float, float, float]] = []
     for e in msp:
-        if e.dxftype() != "LINE":
-            continue
+        t = e.dxftype()
+        pairs: list[tuple[float, float, float, float]] = []
         try:
-            x0, y0 = float(e.dxf.start.x), float(e.dxf.start.y)
-            x1, y1 = float(e.dxf.end.x), float(e.dxf.end.y)
+            if t == "LINE":
+                pairs.append(
+                    (
+                        float(e.dxf.start.x),
+                        float(e.dxf.start.y),
+                        float(e.dxf.end.x),
+                        float(e.dxf.end.y),
+                    )
+                )
+            elif t == "LWPOLYLINE":
+                pts = [(float(p[0]), float(p[1])) for p in e.get_points("xy")]
+                pairs.extend(
+                    (a[0], a[1], b[0], b[1]) for a, b in zip(pts, pts[1:])
+                )
+                if e.closed and len(pts) >= 2 and pts[0] != pts[-1]:
+                    pairs.append((pts[-1][0], pts[-1][1], pts[0][0], pts[0][1]))
         except Exception:  # noqa: BLE001
             continue
-        dx, dy = abs(x1 - x0), abs(y1 - y0)
-        length = math.hypot(dx, dy)
-        if length < 3000.0 or (dx > 80.0 and dy > 80.0):
-            continue
-        if dy >= dx:
-            long_v.append(((x0 + x1) * 0.5, min(y0, y1), max(y0, y1)))
-        else:
-            long_h.append(((y0 + y1) * 0.5, min(x0, x1), max(x0, x1)))
+        for x0, y0, x1, y1 in pairs:
+            dx, dy = abs(x1 - x0), abs(y1 - y0)
+            length = math.hypot(dx, dy)
+            # 1400: 문 양옆 짧은 벽(창고#2 위·아래)도 호스트. 긴 벽은 중간 힌지도 허용.
+            if length < 1400.0 or (dx > 80.0 and dy > 80.0):
+                continue
+            if dy >= dx:
+                long_v.append(((x0 + x1) * 0.5, min(y0, y1), max(y0, y1), length))
+            else:
+                long_h.append(((y0 + y1) * 0.5, min(x0, x1), max(x0, x1), length))
 
-    def _along_wall(cx: float, cy: float, horizontal: bool) -> bool:
-        if horizontal:
-            return any(
-                abs(cy - oo) <= 280.0 and a0 - 200.0 <= cx <= a1 + 200.0
-                for oo, a0, a1 in long_h
-            )
-        return any(
-            abs(cx - oo) <= 280.0 and a0 - 200.0 <= cy <= a1 + 200.0
-            for oo, a0, a1 in long_v
-        )
+    def _nearest_wall(
+        cx: float,
+        cy: float,
+        horizontal: bool,
+        *,
+        min_len: float,
+        max_len: float | None = None,
+        end_only: bool = False,
+    ) -> tuple[float, float, float, float, float] | None:
+        """(거리, 벽 ortho, along0, along1, 길이)."""
+        best: tuple[float, float, float, float, float] | None = None
+        pool = long_h if horizontal else long_v
+        for oo, a0, a1, length in pool:
+            if length < min_len or (max_len is not None and length >= max_len):
+                continue
+            if horizontal:
+                if not (a0 - 200.0 <= cx <= a1 + 200.0):
+                    continue
+                dist = abs(cy - oo)
+                end_dist = min(abs(cx - a0), abs(cx - a1))
+            else:
+                if not (a0 - 200.0 <= cy <= a1 + 200.0):
+                    continue
+                dist = abs(cx - oo)
+                end_dist = min(abs(cy - a0), abs(cy - a1))
+            if dist > 280.0:
+                continue
+            if end_only and end_dist > 280.0:
+                continue
+            if best is None or dist < best[0]:
+                best = (dist, oo, a0, a1, length)
+        return best
 
     openings: list[tuple[bool, float, float, float]] = []
     leaves: list[tuple[bool, float, float, float]] = []
@@ -4202,18 +4316,71 @@ def find_single_door_openings(
                 perp = (ex, ey)
         if along is None or perp is None:
             continue
-        horizontal = abs(along[1] - cy) <= abs(along[0] - cx)
-        if not _along_wall(cx, cy, horizontal):
+        # 가로·세로 끝이 모두 축에 맞으면, 힌지에서 더 가까운 벽이 개구다.
+        # 방풍실#5 처럼 왼쪽 벽의 문을 위쪽 벽 개구로 자르지 않는다.
+        long_h_hit = _nearest_wall(cx, cy, True, min_len=2500.0)
+        long_v_hit = _nearest_wall(cx, cy, False, min_len=2500.0)
+        short_h_hit = _nearest_wall(
+            cx, cy, True, min_len=1400.0, max_len=2500.0, end_only=True
+        )
+        short_v_hit = _nearest_wall(
+            cx, cy, False, min_len=1400.0, max_len=2500.0, end_only=True
+        )
+
+        def _pick(h_hit, v_hit):
+            if h_hit is None and v_hit is None:
+                return None
+            horizontal_hit = v_hit is None or (h_hit is not None and h_hit[0] <= v_hit[0])
+            return horizontal_hit, (h_hit if horizontal_hit else v_hit)
+
+        # 짧은 벽이 더 가까우면 문 틈의 한쪽으로 본다. 아니면 긴 벽을 쓴다.
+        chosen = None
+        short = _pick(short_h_hit, short_v_hit)
+        long = _pick(long_h_hit, long_v_hit)
+        if short is not None and (long is None or short[1][0] <= long[1][0]):
+            horizontal, hit = short
+            _saved_along, _saved_perp = along, perp
+            if not horizontal:
+                along, perp = perp, along
+            if horizontal:
+                open0, open1 = min(cx, along[0]), max(cx, along[0])
+            else:
+                open0, open1 = min(cy, along[1]), max(cy, along[1])
+            _dist, host, host_a0, host_a1, _host_len = hit
+            gap_ok = min(open1, host_a1) - max(open0, host_a0) <= 80.0
+            far = open0 if abs(open0 - (host_a0 + host_a1) * 0.5) >= abs(open1 - (host_a0 + host_a1) * 0.5) else open1
+            other = False
+            if gap_ok:
+                for oo, a0, a1, length in (long_h if horizontal else long_v):
+                    if abs(oo - host) > 280.0 or length < 1800.0:
+                        continue
+                    if min(abs(a0 - far), abs(a1 - far)) > 150.0:
+                        continue
+                    if min(open1, a1) - max(open0, a0) > 80.0:
+                        continue
+                    other = True
+                    break
+            if gap_ok and other:
+                chosen = (horizontal, host)
+            else:
+                along, perp = _saved_along, _saved_perp
+        if chosen is None and long is not None:
+            horizontal, hit = long
+            if not horizontal:
+                along, perp = perp, along
+            chosen = (horizontal, hit[1])
+        if chosen is None:
             continue
+        horizontal, host = chosen
         key = (round(cx / 50.0), round(cy / 50.0), round(r / 50.0))
         if key in seen:
             continue
         seen.add(key)
         if horizontal:
-            openings.append((False, cy, min(cx, along[0]), max(cx, along[0])))
+            openings.append((False, host, min(cx, along[0]), max(cx, along[0])))
             leaves.append((True, cx, min(cy, perp[1]), max(cy, perp[1])))
         else:
-            openings.append((True, cx, min(cy, along[1]), max(cy, along[1])))
+            openings.append((True, host, min(cy, along[1]), max(cy, along[1])))
             leaves.append((False, cy, min(cx, perp[0]), max(cx, perp[0])))
     return openings, leaves
 
@@ -4317,9 +4484,11 @@ def correct_walls_around_doors(msp) -> tuple[int, int]:
             along0, along1 = (min(y0, y1), max(y0, y1)) if is_v else (min(x0, x1), max(x0, x1))
             raw.append((is_v, ortho, along0, along1, layer))
 
-    def _has_pair(is_v: bool, ortho: float, a0: float, a1: float) -> bool:
+    def _has_pair(
+        is_v: bool, ortho: float, a0: float, a1: float, *, min_thick: float = 40.0
+    ) -> bool:
         for iv, oo, b0, b1, _layer in raw:
-            if iv != is_v or not (40.0 <= abs(oo - ortho) <= 420.0):
+            if iv != is_v or not (min_thick <= abs(oo - ortho) <= 420.0):
                 continue
             if min(a1, b1) - max(a0, b0) >= 800.0:
                 return True
@@ -4369,7 +4538,14 @@ def correct_walls_around_doors(msp) -> tuple[int, int]:
                 rebuilt.append((a, b))
                 continue
             is_v, ortho, a0, a1 = axis
-            cuts = _cuts_for(is_v, ortho, a0, a1, include_leaves=True)
+            # 문짝과 겹치는 긴 벽은 문짝이 아니다. 문짝 길이의 선만 제거한다.
+            cuts = _cuts_for(
+                is_v,
+                ortho,
+                a0,
+                a1,
+                include_leaves=(a1 - a0) <= 1600.0,
+            )
             if not cuts:
                 rebuilt.append((a, b))
                 continue
@@ -4395,18 +4571,21 @@ def correct_walls_around_doors(msp) -> tuple[int, int]:
             continue
         cuts = _cuts_for(is_v, ortho, a0, a1)
         pieces: list[tuple[float, float]] = []
+        # 개구를 가로지르는 면은 벽 두께가 아니어도 바깥 조각을 남긴다.
+        # 맞닿기만 한 면은 80mm 이상(문짝 40mm 는 제외, 100mm 벽면은 포함).
+        min_thick = 40.0
         if cuts:
             pieces.extend(_outside(a0, a1, cuts))
         else:
-            # 개구에 맞닿은 양옆 조각 (겹치지는 않음)
+            min_thick = 80.0
             for _ov, oo, c0, c1 in openings:
-                if _ov != is_v or abs(oo - ortho) > 280.0:
+                if _ov != is_v or abs(oo - ortho) > 220.0:
                     continue
                 if abs(a1 - c0) <= 80.0 or abs(a0 - c1) <= 80.0:
                     if a1 - a0 >= 400.0:
                         pieces.append((a0, a1))
                     break
-        if not pieces or not _has_pair(is_v, ortho, a0, a1):
+        if not pieces or not _has_pair(is_v, ortho, a0, a1, min_thick=min_thick):
             continue
         for p0, p1 in pieces:
             if _already(is_v, ortho, p0, p1):
@@ -4458,6 +4637,7 @@ def apply_corrections(
         promote.extend(promote_corridor_walls(segs))
         promote.extend(promote_corridor_door_flanks(segs))
     promote.extend(promote_collinear_room_walls(segs))
+    promote.extend(promote_butt_partitions(segs))
     n_stair_promote = 0
     if do_stair_promote:
         stair_prom = promote_stair_enclosure_walls(msp, segs)
