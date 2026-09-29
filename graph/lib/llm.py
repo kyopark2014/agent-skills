@@ -23,6 +23,7 @@ from lib.config import (
 # Unknown ids are passed through unchanged so any LiteLLM model works.
 _MODEL_ALIASES: dict[str, str] = {
     "Claude 5.5 Opus": "claude-opus-5-5",
+    "Claude 5.5 Sonnet": "claude-sonnet-5-5",
     "Claude 5.0 Sonnet": "claude-sonnet-5",
     "Claude 5.0 Opus": "claude-opus-5",
     "Claude 4.6 Sonnet": "claude-sonnet-4-6",
@@ -55,6 +56,7 @@ _BEDROCK_MODEL_IDS: dict[str, str] = {
     "claude-opus-4-6": "us.anthropic.claude-opus-4-6-v1",
     "claude-sonnet-4-6": "us.anthropic.claude-sonnet-4-6",
     "claude-sonnet-5": "us.anthropic.claude-sonnet-5",
+    "claude-sonnet-5-5": "global.anthropic.claude-sonnet-5-5",
     "claude-opus-5": "us.anthropic.claude-opus-5",
     "claude-opus-5-5": "us.anthropic.claude-opus-5-5",
     "claude-fable-5": "us.anthropic.claude-fable-5",
