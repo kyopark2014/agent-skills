@@ -781,7 +781,7 @@ def execute_code(code: str) -> str:
 
     Use this tool to run Python code for tasks such as processing data,
     processing data, or performing computations. The execution environment
-    has access to common libraries: pandas, numpy, matplotlib, seaborn, etc.
+    has access to common libraries: pandas, numpy, matplotlib, seaborn, cv2, etc.
     json, csv, os, requests, etc.
 
     Variables and imports from previous calls persist across invocations.

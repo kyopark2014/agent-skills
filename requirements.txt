@@ -75,3 +75,4 @@ pypdf
 pdfplumber
 browser-use[cli]
 ezdxf
+opencv-python-headless
