@@ -39,6 +39,24 @@ python3 "$SCRIPTS/extract_2d.py" \
 # 보고 후 7F는 별도 bash로 동일 패턴
 ```
 
+## 1b) XA-S 블록이 없는 도면 (도곽·층 제목)
+
+```bash
+python3 "$SCRIPTS/extract_2d.py" \
+  --dxf "$ARTIFACTS_DIR/input.dxf" \
+  --drawing-id <drawing_id> \
+  --list-floors
+
+# 목록의 첫 층만. 예: 1F
+python3 "$SCRIPTS/extract_2d.py" \
+  --dxf "$ARTIFACTS_DIR/input.dxf" \
+  --floor 1F \
+  --out "$ARTIFACTS_DIR" \
+  --drawing-id <drawing_id>
+```
+
+여기서 멈추고 `floors/1F/floor_original.png`를 확인받는다. 나머지 층은 승인 후 한 층씩.
+
 ## 2) 구조 분석
 
 ```bash

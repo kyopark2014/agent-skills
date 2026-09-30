@@ -46,9 +46,14 @@ function resolveArtifactViewerHref(href: string | undefined): string | undefined
   if (!href) return href;
   try {
     const url = new URL(href, window.location.origin);
-    const match = url.pathname.match(
-      /\/artifacts\/[^/]+\/(.+\.(?:md|markdown|json|csv|py))$/i,
+    let match = url.pathname.match(
+      /\/[^/]+\/artifacts\/(.+\.(?:md|markdown|json|csv|py))$/i,
     );
+    if (!match) {
+      match = url.pathname.match(
+        /\/artifacts\/[^/]+\/(.+\.(?:md|markdown|json|csv|py))$/i,
+      );
+    }
     if (!match) return href;
     const rest = decodeURIComponent(match[1]);
     if (!rest || rest.includes("..")) return href;

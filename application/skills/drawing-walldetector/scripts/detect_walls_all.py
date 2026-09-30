@@ -46,7 +46,7 @@ def main() -> int:
     )
     p.add_argument("--skip", default=None, help="건너뛸 층 (예: 12F)")
     p.add_argument("--min-len-mm", type=float, default=500.0)
-    p.add_argument("--thick-min-mm", type=float, default=50.0)
+    p.add_argument("--thick-min-mm", type=float, default=30.0)
     p.add_argument("--thick-max-mm", type=float, default=420.0)
     p.add_argument("--no-png", action="store_true")
     p.add_argument(

@@ -5,6 +5,7 @@
 원본은 XREF/블록 중심(277MB)이라 modelspace 순회만으로는 도면이 거의 없다.
 해당 층 INSERT만 골라 explode한 뒤 `floors/<F>/floor_original.dxf`를 만든다
 (조경·가구 포함, plan/original 좌표계에 맞춤).
+XA-S-{N}F 평면 블록이 없으면 도곽(축정렬 테두리)과 층 제목으로 영역을 자른다.
 기본으로 같은 경로에 `floor_original.png` / `_meta.json`도 렌더한다 (`--no-png`로 생략).
 
 레거시 `--variant clean`(가구 제외)은 비권장 — 기본 워크플로에서 제거됨.
@@ -35,8 +36,9 @@ SCRIPTS_DIR = Path(__file__).resolve().parent
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
-from lib_split import find_primary_floor_bbox, find_primary_line_bbox  # noqa: E402
 from lib_render import render_floor_original_preview  # noqa: E402
+from lib_sheet import discover_layout, normalize_floor_token  # noqa: E402
+from lib_split import find_primary_floor_bbox, find_primary_line_bbox  # noqa: E402
 
 
 def resolve_artifacts_dir() -> Path:
@@ -87,24 +89,16 @@ def is_furniture(name: str) -> bool:
 
 
 def floor_token(floor: str) -> str:
-    """'5', '5F', '5f' → '5F'."""
+    """'5', '5F', 'b1', 'RF' → '5F' / 'B1F' / 'RF'."""
     s = floor.strip().upper().replace(" ", "")
     if s == "ALL":
         return "ALL"
-    m = re.fullmatch(r"(\d+)F?", s)
-    if not m:
-        raise ValueError(f"층 형식 오류: {floor!r} (예: 5F)")
-    return f"{m.group(1)}F"
+    return normalize_floor_token(floor)
 
 
 def discover_floors(doc: Drawing) -> list[str]:
     """modelspace의 XA-S-{{N}}F 평면 블록에서 층 목록 추출."""
-    found: set[str] = set()
-    for e in doc.modelspace().query("INSERT"):
-        m = re.search(r"XA-S-(\d+)F\s*평면$", e.dxf.name)
-        if m:
-            found.add(f"{m.group(1)}F")
-    return sorted(found, key=lambda x: int(x[:-1]))
+    return discover_layout(doc, mode="block").floors
 
 
 def find_floor_inserts(
@@ -688,6 +682,166 @@ def extract_floor(
     return result
 
 
+def extract_sheet_floor(
+    doc: Drawing,
+    floor: str,
+    out_dir: Path,
+    sheet,
+    *,
+    variant: str = "original",
+    drawing_id: str | None = None,
+    skip_furniture: bool = False,
+    do_dxf: bool = True,
+    do_json: bool = False,
+    do_png: bool = True,
+    include_text: bool = True,
+    origin_shift_mode: str = "none",
+) -> dict:
+    """도곽 bbox 안의 modelspace 기하와, 그 안에 놓인 INSERT를 층으로 저장."""
+    if variant not in {"clean", "original"}:
+        raise ValueError(f"variant 오류: {variant!r}")
+
+    x0, y0, x1, y1 = sheet.bbox
+    pad = 50.0
+    clip = (x0 - pad, y0 - pad, x1 + pad, y1 + pad)
+    print(f"\n== {floor} (sheet:{sheet.title}) ==")
+    print(f"  frame bbox: ({x0:.0f},{y0:.0f})-({x1:.0f},{y1:.0f})")
+
+    entities: list[DXFEntity] = []
+    used_inserts: set[int] = set()
+
+    def absorb_insert(ins: Insert) -> None:
+        if id(ins) in used_inserts:
+            return
+        name = ins.dxf.name
+        if skip_furniture and is_furniture(name):
+            return
+        used_inserts.add(id(ins))
+        ents = explode_insert(ins, skip_furniture=skip_furniture)
+        kept = filter_by_bbox(ents, clip)
+        print(f"  exploded {name}: {len(ents)} → {len(kept)} inside frame")
+        entities.extend(kept)
+
+    for entity in doc.modelspace():
+        if entity.dxftype() == "INSERT":
+            try:
+                ix, iy = float(entity.dxf.insert.x), float(entity.dxf.insert.y)
+            except Exception:  # noqa: BLE001
+                continue
+            if clip[0] <= ix <= clip[2] and clip[1] <= iy <= clip[3]:
+                absorb_insert(entity)
+            continue
+        center = _centroid(entity)
+        if center and clip[0] <= center[0] <= clip[2] and clip[1] <= center[1] <= clip[3]:
+            entities.append(entity)
+
+    line_count = sum(1 for e in entities if e.dxftype() == "LINE")
+    if line_count < 30:
+        try:
+            from ezdxf import bbox as ezbbox
+        except Exception:  # noqa: BLE001
+            ezbbox = None
+        if ezbbox is not None:
+            cache = ezbbox.Cache()
+            for entity in doc.modelspace().query("INSERT"):
+                if id(entity) in used_inserts:
+                    continue
+                try:
+                    ext = ezbbox.extents([entity], cache=cache)
+                except Exception:  # noqa: BLE001
+                    continue
+                if not ext.has_data:
+                    continue
+                cx = (float(ext.extmin.x) + float(ext.extmax.x)) / 2
+                cy = (float(ext.extmin.y) + float(ext.extmax.y)) / 2
+                if clip[0] <= cx <= clip[2] and clip[1] <= cy <= clip[3]:
+                    absorb_insert(entity)
+
+    if not any(e.dxftype() in GEOM_TYPES for e in entities):
+        raise RuntimeError(f"{floor}: 도곽 안에 기하가 없습니다 ({sheet.title})")
+
+    bbox = clip
+    plan_bb = _load_plan_core_bbox(out_dir, drawing_id, floor)
+    if plan_bb is not None:
+        origin = (bbox[0] - plan_bb[0], bbox[1] - plan_bb[1])
+        align_note = "aligned to plan/original"
+    elif origin_shift_mode == "bbox":
+        origin = (bbox[0], bbox[1])
+        align_note = "origin=bbox min"
+    else:
+        origin = (0.0, 0.0)
+        align_note = "absolute"
+
+    block_names = [f"sheet:{sheet.title}"]
+    type_counts = Counter(e.dxftype() for e in entities)
+    print(f"  total: {len(entities)}  {dict(type_counts.most_common(8))}")
+    print(f"  origin_shift={origin} ({align_note})")
+
+    result: dict = {
+        "floor": floor,
+        "variant": variant,
+        "layout": "sheet",
+        "title": sheet.title,
+        "blocks": block_names,
+        "entity_counts": dict(type_counts),
+        "bbox_fresh": {
+            "min_x": bbox[0],
+            "min_y": bbox[1],
+            "max_x": bbox[2],
+            "max_y": bbox[3],
+        },
+        "origin_shift": {"ox": origin[0], "oy": origin[1], "note": align_note},
+        "files": {},
+    }
+
+    if do_dxf:
+        if variant == "original":
+            dxf_path = resolve_original_path(out_dir, floor, drawing_id=drawing_id)
+        else:
+            dxf_path = out_dir / f"floor_{floor}_clean.dxf"
+        copied = write_clean_dxf(
+            entities,
+            dxf_path,
+            include_text=include_text,
+            origin_shift=origin,
+        )
+        print(f"  DXF → {dxf_path}  copied={dict(copied)}")
+        result["files"]["dxf"] = str(dxf_path)
+        if do_png and variant == "original":
+            try:
+                plan_bb_dict = None
+                if plan_bb is not None:
+                    plan_bb_dict = {
+                        "xmin": plan_bb[0],
+                        "ymin": plan_bb[1],
+                        "xmax": plan_bb[2],
+                        "ymax": plan_bb[3],
+                    }
+                meta = render_floor_original_preview(
+                    dxf_path,
+                    floor=floor,
+                    plan_bbox=plan_bb_dict,
+                )
+                result["files"]["png"] = meta["files"]["png"]
+                result["files"]["png_meta"] = str(dxf_path.with_name("floor_original_meta.json"))
+                result["preview"] = {
+                    "size_m": meta["size_m"],
+                    "n_labels": meta["n_labels"],
+                }
+            except Exception as exc:  # noqa: BLE001
+                print(f"  [warn] floor_original.png 실패: {exc}", file=sys.stderr)
+                result["preview_error"] = str(exc)
+
+    if do_json:
+        stem = out_dir / f"floor_{floor}_{variant}"
+        json_path = Path(f"{stem}_geom.json")
+        geom_only = [e for e in entities if e.dxftype() in GEOM_TYPES]
+        write_json(geom_only, json_path, floor=floor, source_blocks=block_names)
+        result["files"]["json"] = str(json_path)
+
+    return result
+
+
 def default_dxf_path() -> Path:
     """ARTIFACTS_DIR 또는 cwd에서 *.dxf 탐색. 없으면 --dxf 필수."""
     for base in (resolve_artifacts_dir(), Path.cwd()):
@@ -709,7 +863,18 @@ def main() -> int:
         description="원본 DXF → floors/<F>/floor_original.dxf (+ .png)"
     )
     parser.add_argument("--dxf", type=Path, default=None, help="입력 DXF (기본: ARTIFACTS_DIR/*.dxf)")
-    parser.add_argument("--floor", default="5F", help="층 (예: 5F) 또는 all")
+    parser.add_argument("--floor", default="5F", help="층 (예: 5F, B1F) 또는 all")
+    parser.add_argument(
+        "--layout",
+        choices=("auto", "block", "sheet"),
+        default="auto",
+        help="auto: XA-S 블록이 없으면 도곽·층 제목. block: XA-S만. sheet: 도곽만.",
+    )
+    parser.add_argument(
+        "--list-floors",
+        action="store_true",
+        help="층을 추출하지 않고 구분 결과(JSON)만 출력",
+    )
     parser.add_argument(
         "--out",
         type=Path,
@@ -755,18 +920,43 @@ def main() -> int:
 
     dxf_path = args.dxf or default_dxf_path()
     out_dir = args.out or resolve_artifacts_dir()
-    out_dir.mkdir(parents=True, exist_ok=True)
 
     floor_arg = floor_token(args.floor)
     print(f"loading {dxf_path} ...", flush=True)
     doc = ezdxf.readfile(str(dxf_path))
     print(f"loaded version={doc.dxfversion}", flush=True)
 
-    floors = discover_floors(doc)
+    layout = discover_layout(doc, mode=args.layout)
+    floors = layout.floors
+    sheets = {s.floor: s for s in layout.sheets}
+    print(f"layout: {layout.method}")
     print(f"discovered floors: {floors}")
+    for note in layout.warnings:
+        print(f"[layout] {note}", file=sys.stderr)
+    for sheet in layout.sheets:
+        box = sheet.bbox
+        print(
+            f"  sheet {sheet.floor}: {sheet.title!r}  "
+            f"({box[0]:.0f},{box[1]:.0f})-({box[2]:.0f},{box[3]:.0f})"
+        )
 
+    if args.list_floors:
+        print(json.dumps(layout.as_dict(), ensure_ascii=False, indent=2))
+        return 0 if floors else 2
+
+    if not floors:
+        print("[error] 층 블록과 도곽·층 제목을 모두 찾지 못했습니다.", file=sys.stderr)
+        return 2
+    if layout.method == "sheet" and floor_arg != "ALL" and floor_arg not in sheets:
+        print(
+            f"[error] {floor_arg} 도곽이 없습니다. 발견된 층: {floors}",
+            file=sys.stderr,
+        )
+        return 2
+
+    out_dir.mkdir(parents=True, exist_ok=True)
     targets = floors if floor_arg == "ALL" else [floor_arg]
-    if floor_arg != "ALL" and floor_arg not in floors:
+    if layout.method == "block" and floor_arg != "ALL" and floor_arg not in floors:
         print(f"[warn] {floor_arg}가 평면 블록 목록에 없음. INSERT 패턴으로 재시도.", file=sys.stderr)
 
     if args.variant == "clean":
@@ -784,21 +974,39 @@ def main() -> int:
         for var in variants:
             try:
                 kw = dict(clean_kwargs) if var == "clean" else {}
-                summary.append(
-                    extract_floor(
-                        doc,
-                        fl,
-                        out_dir,
-                        variant=var,
-                        drawing_id=args.drawing_id,
-                        do_dxf=not args.no_dxf,
-                        do_json=args.geom_json,
-                        do_png=not args.no_png,
-                        include_text=not args.no_text,
-                        origin_shift_mode=args.origin_shift,
-                        **kw,
+                if layout.method == "sheet":
+                    summary.append(
+                        extract_sheet_floor(
+                            doc,
+                            fl,
+                            out_dir,
+                            sheets[fl],
+                            variant=var,
+                            drawing_id=args.drawing_id,
+                            skip_furniture=bool(kw.get("skip_furniture", var == "clean")),
+                            do_dxf=not args.no_dxf,
+                            do_json=args.geom_json,
+                            do_png=not args.no_png,
+                            include_text=not args.no_text,
+                            origin_shift_mode=args.origin_shift,
+                        )
                     )
-                )
+                else:
+                    summary.append(
+                        extract_floor(
+                            doc,
+                            fl,
+                            out_dir,
+                            variant=var,
+                            drawing_id=args.drawing_id,
+                            do_dxf=not args.no_dxf,
+                            do_json=args.geom_json,
+                            do_png=not args.no_png,
+                            include_text=not args.no_text,
+                            origin_shift_mode=args.origin_shift,
+                            **kw,
+                        )
+                    )
             except Exception as exc:  # noqa: BLE001
                 print(f"[error] {fl}/{var}: {exc}", file=sys.stderr)
                 summary.append({"floor": fl, "variant": var, "error": str(exc)})
@@ -806,7 +1014,7 @@ def main() -> int:
     meta_path = out_dir / "extract_summary.json"
     meta_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"\nsummary → {meta_path}")
-    return 0
+    return 1 if any("error" in item for item in summary) else 0
 
 
 if __name__ == "__main__":

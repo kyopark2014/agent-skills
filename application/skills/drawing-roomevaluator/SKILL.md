@@ -28,6 +28,7 @@ description: >-
    기둥이 끊은 벽선은 다시 이어 안쪽 면을 잡고, 그 면 안의 기둥만 뺀다.
    벽 두께 안에만 있는 부분은 실 밖이므로 빼지 않는다. 돌출이 없으면 뺄 면적은 0이다.
 4. **원본 보존** — validated DXF/PNG 는 읽기 전용. 결과는 `room_eval/` 에만 쓴다.
+   같은 실명이 여러 곳이면 스크립트가 좌표를 알리고 멈춘다. DXF를 복사하거나 글자를 고치지 말고, 고른 좌표를 `--x` `--y`로 다시 호출한다.
 5. **스크립트 절대경로** — 이 SKILL.md 옆 `scripts/evaluate_room.py`.
 6. 응답은 **한국어**. 경로·JSON 키는 영문.
 
@@ -50,6 +51,7 @@ python3.13 "$SCRIPTS/evaluate_room.py" \
 | `--meta` | `floor_wall_validated_meta.json` (PNG 좌표 변환) |
 | `--png` | `floor_wall_validated.png` (오버레이 배경) |
 | `--room` | 실명. 공백은 무시하고 TEXT 와 정확히 맞춘다 |
+| `--x`, `--y` | 선택. 같은 실명이 여러 곳일 때 고를 라벨 좌표 (mm) |
 | `--out` | 선택. 기본은 DXF 옆 `room_eval/` |
 
 ## Workflow
@@ -61,9 +63,9 @@ floor_wall_validated.dxf / .png / _meta.json
   ↓
 ② WALL 선분. H-Beam 정사각은 벽선 연결용으로만 쓰고 실 경계로 두지 않는다
   ↓
-③ 같은 벽선의 2.4 m 이하 틈(문·기둥)을 벽선으로 연결
+③ 같은 벽선의 2.4 m 이하 틈(문·기둥)을 잇고, 벽 끝의 300 mm 이하 틈은 벽 두께로 막는다
   ↓
-④ 라벨에서 flood fill → 벽 안쪽 면
+④ 벽선을 polygonize 해서 라벨이 들어 있는 닫힌 면
   ↓
 ⑤ 실 안으로 들어온 기둥 돌출부를 항상 제외
   ↓
@@ -80,5 +82,8 @@ room_eval/<실명>.json
 - `width_m`, `height_m` — 벽 안쪽 면의 가로·세로 (돌출을 빼기 전 외곽)
 - `drawing_area_m2` — 실 안 도면 문구 `면적 : N㎡` (있으면)
 - `overlay_png` — 계측 범위를 반투명으로 덮은 확대 이미지
+- `enclosed_labels` — 그 면 안에 있는 실명 라벨
+
+같은 면의 `enclosed_labels`에 두 실명이 함께 있으면 `area_m2`는 그 면 전체이므로 한 번만 말한다. 서로 다른 면이면 각 `area_m2`를 더한다.
 
 도면의 `면적` 문구는 참고값이다. 계산값과 다르면 계산값을 기준으로 설명한다.

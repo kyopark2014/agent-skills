@@ -93,6 +93,7 @@ ART="$ARTIFACTS_DIR/sk_yongin_jiwon"
 | `$SCRIPTS/analyze_drawing.py` | 구조 실측 → `structure.md` / `structure.json` |
 | `$SCRIPTS/lib_render.py` | 치수·고해상도 렌더 라이브러리 |
 | `$SCRIPTS/lib_split.py` | 공통 유틸 (primary 클러스터·bbox 등) |
+| `$SCRIPTS/lib_sheet.py` | 도곽·층 제목 층 구분 (XA-S 블록이 없을 때) |
 | `$SCRIPTS/plan_split.py` | **(레거시·선택)** 타일 격자 계획 — 기본 워크플로 제외 |
 | `$SCRIPTS/split_floor.py` | **(레거시·선택)** parts 자르기 — 기본 워크플로 제외 |
 
@@ -170,6 +171,29 @@ python3 "$SCRIPTS/extract_2d.py" \
 성공 시 `floors/12F/floor_original.dxf` / `.png` / `_meta.json`이 생긴다.  
 **여기서 멈추고** 사용자에게 PNG·경로·파일 크기를 보여 준 뒤 나머지 층 진행 허락을 받는다.
 
+### 층 구분 (블록 이름 → 도곽)
+
+1. **기본:** modelspace INSERT 이름 `XA-S-{N}F 평면` (코어·기둥 포함).
+2. **그 형식이 없으면** 추출을 중단하거나 스킬 수정을 묻지 않는다. `lib_sheet.py`가 **도곽(축정렬 테두리)** 과 **층 제목**으로 층을 나눈다. `--layout auto`가 이 순서를 따른다. 제목은 `1층 평면도`뿐 아니라 `1층 냉난방 평면도`처럼 층과 평면도 사이에 용도가 있는 문자열도 인정한다. 같은 제목이 떨어진 도곽에 반복되면 왼쪽부터 `1F`, `1F_2` 로 구분한다.
+3. 도곽 방식이면 먼저 목록만 확인한다.
+
+```bash
+python3 "$SCRIPTS/extract_2d.py" \
+  --dxf "$ARTIFACTS_DIR/<input>.dxf" \
+  --drawing-id <drawing_id> \
+  --list-floors
+```
+
+4. 목록에 층이 있으면 **파일럿 1개 층만** 추출하고 PNG를 보여 준 뒤 나머지 층 허락을 받는다. 원본 DXF는 수정하지 않는다.
+
+```bash
+python3 "$SCRIPTS/extract_2d.py" \
+  --dxf "$ARTIFACTS_DIR/<input>.dxf" \
+  --floor 1F \
+  --out "$ARTIFACTS_DIR" \
+  --drawing-id <drawing_id>
+```
+
 허락 후 나머지 층도 **한 층 = bash 1회**로만 진행한다.
 
 **금지 예** (대용량 DXF에서 `TimeoutExpired` 유발):
@@ -193,7 +217,7 @@ python3 "$SCRIPTS/extract_2d.py" --dxf … --floor all …
 | 파일 메타 | 경로, 크기, CAD 버전, 단위(mm) |
 | modelspace / 블록 | 엔티티 수, INSERT·층 블록 목록 |
 | 레이어 | 상위 레이어, 벽/가구 분리 가능 여부 |
-| 층 목록 | `XA-S-{N}F 평면` 등 |
+| 층 목록 | `XA-S-{N}F 평면` 또는 도곽·층 제목 (`layout_method`) |
 | 층별 대략 span | m 단위 폭×깊이 (가능하면) |
 | 이중 클러스터 | 좌우 어긋난 복사본 여부 (12F 사례) |
 | 권장 전처리 | `extract_2d.py --floor …` 등 |
@@ -318,6 +342,7 @@ $ARTIFACTS_DIR/<drawing_id>/
 - [ ] 산출이 `floors/<F>/floor_original.*` 층 단위인가 (`parts/` 기본 생성 안 함)
 - [ ] 산출 경로가 `$ARTIFACTS_DIR/<id>/` 인가
 - [ ] 첫 층만 돌렸고 사용자 허락을 기다리는가 (다층인 경우)
+- [ ] `XA-S-{N}F` 블록이 없으면 도곽·층 제목(`--list-floors`)으로 넘어갔는가 (중단하고 스킬 수정을 묻지 않음)
 - [ ] extract를 **층당 bash 1회**로만 돌리는가 (`for` 일괄·`--floor all` 없음)
 - [ ] 미리보기로 `floor_*_2d.png` / `floor_overview.*`를 쓰지 않는가 (`floor_original.png`만)
 
@@ -328,6 +353,8 @@ $ARTIFACTS_DIR/<drawing_id>/
 | 증상 | 대응 |
 |------|------|
 | 동일 `drawing_id` 폴더 이미 존재 | 사용자에게 계속/중단 확인 — 허락 전 덮어쓰기 금지 |
+| `XA-S-{N}F 평면` 블록 없음 | 중단·스킬 보완 질문 금지. `--list-floors`로 도곽·층 제목을 확인한 뒤 **파일럿 1층만** 추출하고 확인받는다 |
+| 도곽·층 제목도 없음 | 추출하지 않는다. 원본은 그대로 두고, 찾은 테두리·경고를 보고한다 |
 | `TimeoutExpired` (extract) | 여러 층 일괄 루프·`--floor all` 금지 → **층당 bash 1회**로 재시도 |
 | PNG에 도면이 좌·우 둘 | primary 클러스터(LINE 많은 쪽)만 bbox — `extract_2d` 공통 |
 | 치수 없음 | `--with-dims`, PNG 오버레이 + DXF `DIMS` 레이어 |

@@ -161,7 +161,7 @@ def main() -> int:
     )
     p.add_argument("--original-only", action="store_true", help="층 전체만 (= 기본)")
     p.add_argument("--min-len-mm", type=float, default=500.0)
-    p.add_argument("--thick-min-mm", type=float, default=50.0)
+    p.add_argument("--thick-min-mm", type=float, default=30.0)
     p.add_argument("--thick-max-mm", type=float, default=420.0)
     p.add_argument("--no-png", action="store_true")
     p.add_argument("--dpi", type=int, default=200)

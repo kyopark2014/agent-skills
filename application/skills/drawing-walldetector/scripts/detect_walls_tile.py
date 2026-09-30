@@ -34,7 +34,7 @@ def main() -> int:
     p.add_argument("--tile-id", default=None, help="예: R0C0 (미지정 시 dxf stem)")
     p.add_argument("--floor", default="")
     p.add_argument("--min-len-mm", type=float, default=500.0)
-    p.add_argument("--thick-min-mm", type=float, default=50.0)
+    p.add_argument("--thick-min-mm", type=float, default=30.0)
     p.add_argument("--thick-max-mm", type=float, default=420.0)
     p.add_argument("--no-png", action="store_true")
     p.add_argument("--dpi", type=int, default=200)

@@ -143,14 +143,20 @@ def _strip_to_allowed_prefix(normalized: str) -> str:
 
 
 def _s3_key_with_user(prefix: str, rest: str) -> str:
-    """Build ``{prefix}/{user_id}/{rest}`` (or without user when unknown)."""
+    """Build an S3 key. Artifacts stay at ``{user}/artifacts/{rest}``."""
     rest = (rest or "").lstrip("/")
     user = _current_user_segment()
+    if prefix == "artifacts":
+        if user and (rest == user or rest.startswith(f"{user}/")):
+            rest = "" if rest == user else rest[len(user) + 1 :]
+        owner = user or "default"
+        return f"{owner}/artifacts/{rest}" if rest else f"{owner}/artifacts/"
     if user:
         if rest == user or rest.startswith(f"{user}/"):
             return f"{prefix}/{rest}" if rest else f"{prefix}/{user}/"
         return f"{prefix}/{user}/{rest}" if rest else f"{prefix}/{user}/"
     return f"{prefix}/{rest}" if rest else f"{prefix}/"
+
 
 
 def _public_url_for_key(key: str) -> str:
@@ -193,14 +199,41 @@ def _s3_key_for_upload(filepath: str, full_path: str) -> str:
                 rest = "/".join(parts[2:])
                 if user_seg:
                     return (
-                        f"artifacts/{user_seg}/{rest}"
+                        f"{user_seg}/artifacts/{rest}"
                         if rest
-                        else f"artifacts/{user_seg}/"
+                        else f"{user_seg}/artifacts/"
                     )
     except (OSError, ValueError):
         pass
 
     return normalized.lstrip("/")
+
+
+
+def _is_publishable_s3_key(key: str) -> bool:
+    """CloudFront-served key, including ``{user}/artifacts/…``."""
+    if key.startswith(_ALLOWED_S3_PREFIXES):
+        return True
+    parts = [p for p in (key or "").split("/") if p]
+    return len(parts) >= 3 and parts[1] == "artifacts"
+
+
+def _workspace_mount_object_key(full_path: str) -> str | None:
+    """Object key when the file is already on the bucket-root workspace mount."""
+    mount = "/mnt/workspace"
+    if not full_path or not os.path.isdir(mount):
+        return None
+    real = os.path.realpath(full_path)
+    root_path = os.path.realpath(mount)
+    try:
+        if os.path.commonpath([real, root_path]) != root_path:
+            return None
+    except ValueError:
+        return None
+    rel = os.path.relpath(real, root_path).replace(os.sep, "/")
+    if rel in ("", ".") or rel.startswith("../"):
+        return None
+    return rel
 
 
 def _upload_file_to_project_s3(filepath: str, full_path: str | None = None) -> str:
@@ -216,10 +249,14 @@ def _upload_file_to_project_s3(filepath: str, full_path: str | None = None) -> s
         raise FileNotFoundError(f"File not found: {filepath} (resolved: {resolved})")
 
     key = _s3_key_for_upload(filepath, resolved)
-    if not key.startswith(_ALLOWED_S3_PREFIXES):
+    mount_key = _workspace_mount_object_key(resolved)
+    if mount_key and "/artifacts/" in mount_key and _is_publishable_s3_key(mount_key):
+        logger.info("artifact already on workspace mount: %s", mount_key)
+        return mount_key
+    if not _is_publishable_s3_key(key):
         raise ValueError(
-            "Upload rejected: S3 key must start with "
-            f"{', '.join(_ALLOWED_S3_PREFIXES)} (got {key!r})"
+            "Upload rejected: S3 key must be images/, docs/, artifacts/, "
+            f"or {{user}}/artifacts/ (got {key!r})"
         )
 
     content_type = utils.get_contents_type(key)

@@ -15,6 +15,7 @@ _SCRIPTS = Path(__file__).resolve().parent
 if str(_SCRIPTS) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS))
 
+from lib_sheet import discover_layout, floor_sort_key, is_floor_name  # noqa: E402
 from lib_split import (  # noqa: E402
     count_types,
     find_primary_line_bbox,
@@ -24,12 +25,7 @@ from lib_split import (  # noqa: E402
 
 
 def discover_floors(doc) -> list[str]:
-    found: set[str] = set()
-    for e in doc.modelspace().query("INSERT"):
-        m = re.search(r"XA-S-(\d+)F\s*평면$", e.dxf.name)
-        if m:
-            found.add(f"{m.group(1)}F")
-    return sorted(found, key=lambda x: int(x[:-1]))
+    return discover_layout(doc, mode="auto").floors
 
 
 def analyze_clean_floor(path: Path) -> dict:
@@ -65,7 +61,8 @@ def analyze_clean_floor(path: Path) -> dict:
 def analyze_raw(path: Path) -> dict:
     doc = ezdxf.readfile(str(path))
     msp = doc.modelspace()
-    floors = discover_floors(doc)
+    layout = discover_layout(doc, mode="auto")
+    floors = layout.floors
     layers = [layer.dxf.name for layer in doc.layers]
     types = count_types(msp)
     inserts = Counter(e.dxf.name for e in msp.query("INSERT"))
@@ -73,8 +70,11 @@ def analyze_raw(path: Path) -> dict:
         fl: [
             n
             for n in inserts
-            if re.search(rf"XA-S-{fl[:-1]}F\s*(평면|코어)$", n)
-            or re.search(rf"XS-S-{fl[:-1]}F\s*기둥$", n)
+            if re.fullmatch(r"\d+F", fl)
+            and (
+                re.search(rf"XA-S-{fl[:-1]}F\s*(평면|코어)$", n)
+                or re.search(rf"XS-S-{fl[:-1]}F\s*기둥$", n)
+            )
         ]
         for fl in floors
     }
@@ -86,7 +86,10 @@ def analyze_raw(path: Path) -> dict:
         "layers": layers,
         "modelspace_types": types,
         "n_modelspace": sum(types.values()),
+        "layout_method": layout.method,
         "floors": floors,
+        "sheets": [s.as_dict() for s in layout.sheets],
+        "layout_warnings": layout.warnings,
         "top_inserts": inserts.most_common(20),
         "floor_inserts": floor_inserts,
         "units_hint": "mm (check $INSUNITS)",
@@ -121,9 +124,28 @@ def render_structure_md(drawing_id: str, raw: dict | None, cleans: dict[str, dic
         lines += [
             f"| modelspace 엔티티 | {raw.get('n_modelspace')} |",
             f"| 블록 정의 | {raw.get('n_blocks')} |",
+            f"| 층 구분 | {raw.get('layout_method')} |",
             f"| 층 목록 | {', '.join(raw.get('floors') or [])} |",
             f"| modelspace 타입 | {raw.get('modelspace_types')} |",
         ]
+        sheets = raw.get("sheets") or []
+        if sheets:
+            lines += [
+                "",
+                "## 도곽·층 제목",
+                "",
+                "| 층 | 제목 | 폭(m) | 깊이(m) |",
+                "|----|------|-------|---------|",
+            ]
+            for sheet in sheets:
+                lines.append(
+                    f"| {sheet.get('floor')} | {sheet.get('title')} | "
+                    f"{sheet.get('width_m'):.1f} | {sheet.get('height_m'):.1f} |"
+                )
+        notes = raw.get("layout_warnings") or []
+        if notes:
+            lines += ["", "### 층 구분 참고", ""]
+            lines.extend(f"- {note}" for note in notes)
     lines += [
         "",
         "## 층별 span (클린 DXF 기준)",
@@ -131,7 +153,7 @@ def render_structure_md(drawing_id: str, raw: dict | None, cleans: dict[str, dic
         "| 층 | 폭(m) | 깊이(m) | 엔티티 | 경로 |",
         "|----|-------|---------|--------|------|",
     ]
-    for fl, info in sorted(cleans.items(), key=lambda x: int(x[0][:-1]) if x[0][:-1].isdigit() else 0):
+    for fl, info in sorted(cleans.items(), key=lambda x: floor_sort_key(x[0])):
         sp = info.get("span") or {}
         lines.append(
             f"| {fl} | {sp.get('width_m', '-')} | {sp.get('height_m', '-')} | "
@@ -141,7 +163,8 @@ def render_structure_md(drawing_id: str, raw: dict | None, cleans: dict[str, dic
         "",
         "## 리스크 / 전처리",
         "",
-        "- modelspace만 보면 도면이 거의 없을 수 있음 → 층 INSERT / `extract_2d.py` 필요",
+        "- `XA-S-{N}F 평면` 블록이 있으면 그 INSERT를 explode 한다",
+        "- 그 형식이 없으면 도곽과 층 제목으로 자른다 (`extract_2d.py --layout auto`). 이때는 추출을 중단하지 않고 파일럿 1층만 진행한다",
         "- 기하가 한 레이어(`0arch`)에 몰리면 벽·가구 레이어 분리 불가 → 블록명 필터",
         "- 좌·우 이중 클러스터 가능 → primary(LINE 다수) bbox만 사용",
         "",
@@ -199,7 +222,7 @@ def main() -> int:
             fl = m.group(1)
         elif cf.name == "floor_original.dxf":
             fl = cf.parent.name  # floors/5F/floor_original.dxf
-            if not re.fullmatch(r"\d+F", fl):
+            if not is_floor_name(fl):
                 continue
         else:
             continue

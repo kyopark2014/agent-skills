@@ -236,20 +236,32 @@ def is_hatch_or_landscape_polyline(e: DXFEntity) -> bool:
     return avg < 1500.0
 
 
+def _median(vals: list[float]) -> float:
+    ordered = sorted(vals)
+    mid = len(ordered) // 2
+    if len(ordered) % 2:
+        return ordered[mid]
+    return (ordered[mid - 1] + ordered[mid]) / 2.0
+
+
 def detect_wall_keys(
     segs: list[Seg],
     *,
     min_len_mm: float = 500.0,
-    thick_min_mm: float = 50.0,
+    thick_min_mm: float = 30.0,
     thick_max_mm: float = 420.0,
     min_overlap_mm: float = 400.0,
     stair_count: int = 4,
     short_pair_max_mm: float = 2800.0,
+    wall_pack_gap_mm: float = 160.0,
 ) -> set[tuple[int, int]]:
     """평행 이중선(벽 두께 대역) 기반 벽 세그먼트 키 집합.
 
-    stair_count: 동일 두께 대역 내 평행 이웃이 (stair_count-1)개 이상이면
-    계단/해칭으로 보고 제외 (기본 4 → 이웃 ≥3).
+    stair_count: 두께 대역 안 평행 이웃이 (stair_count-1)개 이상이고
+    간격이 성기면 계단/해칭으로 제외 (기본 4 → 이웃 ≥3).
+
+    같은 대역 안에 간격이 촘촘한 긴 선(외벽 여러 겹)은 벽으로 남긴다.
+    wall_pack_gap_mm: 그 겹의 인접 간격 중앙값 상한.
 
     short_pair_max_mm: 양쪽 모두 이보다 짧은 이중선 쌍은 가구·설비 변으로 제외.
     """
@@ -286,16 +298,39 @@ def detect_wall_keys(
                     neighbors.append((d, b))
             if not neighbors:
                 continue
-            # too many parallel lines → stair/hatch cluster
+            # 평행선이 여러 겹. 간격이 촘촘하고 긴 선이면 외벽 포체, 성기면 계단/해칭.
+            partners = neighbors
             if len(neighbors) >= stair_count - 1:
-                continue
+                long_enough = a.length >= short_pair_max_mm or any(
+                    b.length >= short_pair_max_mm for _, b in neighbors
+                )
+                distances = sorted(d for d, _ in neighbors)
+                gaps = [distances[0]] + [
+                    distances[i] - distances[i - 1] for i in range(1, len(distances))
+                ]
+                real_gaps = [g for g in gaps if g >= 15.0] or gaps
+                packed = _median(real_gaps) <= wall_pack_gap_mm
+                if long_enough and packed:
+                    wall.add(a.key)
+                    for _, b in neighbors:
+                        if b.length >= 1200.0:
+                            wall.add(b.key)
+                    continue
+                if not packed:
+                    continue
+                # 개구로 잘려 2m 안팎인 외벽. 짧은 멀라이언은 빼고 긴 겹만 짝으로 본다.
+                partners = [(d, b) for d, b in neighbors if b.length >= 1200.0]
+                if not partners:
+                    continue
             # take nearest as wall pair face
-            d0, b0 = min(neighbors, key=lambda t: t[0])
+            d0, b0 = min(partners, key=lambda t: t[0])
             if not (thick_min_mm <= d0 <= thick_max_mm):
                 continue
-            # 짧은-짧은 이중선 ≈ 책상·캐비닛 변 (긴 벽 런이 아님)
+            # 짧은-짧은 이중선 ≈ 책상·캐비닛 변 (긴 벽 런이 아님).
+            # 다만 둘 다 1.7m 이상이고 두께가 250mm 이하면, 개구로 잘린 외벽 조각으로 남긴다.
             if a.length < short_pair_max_mm and b0.length < short_pair_max_mm:
-                continue
+                if min(a.length, b0.length) < 1700.0 or d0 > 250.0:
+                    continue
             wall.add(a.key)
             wall.add(b0.key)
 
@@ -329,7 +364,7 @@ def classify_entities(
     entities: list[DXFEntity],
     *,
     min_len_mm: float = 500.0,
-    thick_min_mm: float = 50.0,
+    thick_min_mm: float = 30.0,
     thick_max_mm: float = 420.0,
     entity_wall_ratio: float = 0.75,
     furniture_box_max_mm: float = 3500.0,

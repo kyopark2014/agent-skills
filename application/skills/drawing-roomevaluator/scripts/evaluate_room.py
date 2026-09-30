@@ -7,14 +7,15 @@ import argparse
 import json
 import math
 import re
-import sys
 from collections import defaultdict
 from pathlib import Path
 
-import cv2
 import ezdxf
-import numpy as np
+import shapely
 from PIL import Image, ImageDraw, ImageFont
+from shapely.geometry import GeometryCollection, LineString, Point, Polygon, box
+from shapely.ops import polygonize
+from shapely.strtree import STRtree
 
 Image.MAX_IMAGE_PIXELS = None
 
@@ -23,7 +24,7 @@ AXIS_TOL_MM = 20.0
 CLUSTER_TOL_MM = 15.0
 JOIN_MM = 80.0
 DOOR_GAP_MM = 2400.0
-RASTER_MM = 2.0
+WALL_CAP_MM = 300.0
 SNAP_MM = 40.0
 COLUMN_MIN_MM = 450.0
 COLUMN_MAX_MM = 1500.0
@@ -64,16 +65,28 @@ def iter_labels(msp):
             yield x, y, s
 
 
-def find_room_label(msp, room: str) -> tuple[float, float, str]:
+def find_room_label(
+    msp, room: str, at: tuple[float, float] | None = None
+) -> tuple[float, float, str]:
     want = norm_name(room)
     hits = [(x, y, s) for x, y, s in iter_labels(msp) if norm_name(s) == want]
-    if not hits:
+    unique: list[tuple[float, float, str]] = []
+    for x, y, s in hits:
+        if any(abs(x - ux) <= 50 and abs(y - uy) <= 50 for ux, uy, _ in unique):
+            continue
+        unique.append((x, y, s))
+    if not unique:
         raise SystemExit(f"실명을 찾지 못했습니다: {room}")
-    if len(hits) > 1:
-        # 같은 이름이면 첫 좌표. 도면에 중복이면 모두 알린다.
-        coords = ", ".join(f"({x:.0f},{y:.0f})" for x, y, _ in hits)
-        print(f"warning: '{room}' 라벨 {len(hits)}개 — {coords}. 첫 라벨을 사용합니다.", file=sys.stderr)
-    return hits[0]
+    if at is not None:
+        ax, ay = at
+        unique.sort(key=lambda h: (h[0] - ax) ** 2 + (h[1] - ay) ** 2)
+        return unique[0]
+    if len(unique) > 1:
+        coords = ", ".join(f"({x:.0f},{y:.0f})" for x, y, _ in unique)
+        raise SystemExit(
+            f"'{room}' 라벨이 {len(unique)}곳입니다: {coords}. --x 와 --y 로 하나를 지정하세요."
+        )
+    return unique[0]
 
 
 def _rect_box(pts: list[tuple[float, float]]) -> tuple[float, float, float, float] | None:
@@ -275,112 +288,193 @@ def bridged_runs(segs, origin: tuple[float, float], pad: float):
     return h_final, v_final, dsegs, x_axes, y_axes
 
 
-def flood_room(h_final, v_final, dsegs, seed, pad):
-    ox, oy = seed
-    xmin, xmax = ox - pad, ox + pad
-    ymin, ymax = oy - pad, oy + pad
-    res = RASTER_MM
-    width = int(math.ceil((xmax - xmin) / res)) + 3
-    height = int(math.ceil((ymax - ymin) / res)) + 3
-    wall = np.zeros((height, width), np.uint8)
-
-    def col(x):
-        return int(round((x - xmin) / res))
-
-    def row(y):
-        return int(round((ymax - y) / res))
-
+def _lines_from_runs(h_final, v_final, dsegs) -> list[LineString]:
+    lines: list[LineString] = []
     for y, ivs in h_final.items():
-        r = row(y)
-        if not 0 <= r < height:
-            continue
         for a, b in ivs:
-            cv2.line(wall, (col(a), r), (col(b), r), 255, 1)
+            if abs(b - a) > 0.5:
+                lines.append(LineString([(a, y), (b, y)]))
     for x, ivs in v_final.items():
-        c = col(x)
-        if not 0 <= c < width:
-            continue
         for a, b in ivs:
-            cv2.line(wall, (c, row(a)), (c, row(b)), 255, 1)
+            if abs(b - a) > 0.5:
+                lines.append(LineString([(x, a), (x, b)]))
     for x0, y0, x1, y1 in dsegs:
-        cv2.line(wall, (col(x0), row(y0)), (col(x1), row(y1)), 255, 1)
-
-    sc, sr = col(ox), row(oy)
-    if wall[sr, sc]:
-        found = None
-        for rad in range(1, 30):
-            for dy in range(-rad, rad + 1):
-                for dx in range(-rad, rad + 1):
-                    rr, cc = sr + dy, sc + dx
-                    if 0 <= rr < height and 0 <= cc < width and wall[rr, cc] == 0:
-                        found = (cc, rr)
-                        break
-                if found:
-                    break
-            if found:
-                break
-        if not found:
-            raise SystemExit("라벨 위치가 벽 위에 있고 빈 칸을 찾지 못했습니다.")
-        sc, sr = found
-
-    free = np.where(wall == 0, 255, 0).astype(np.uint8)
-    mask = np.zeros((height + 2, width + 2), np.uint8)
-    cv2.floodFill(free, mask, (sc, sr), 128)
-    room = free == 128
-    touches = bool(room[0].any() or room[-1].any() or room[:, 0].any() or room[:, -1].any())
-    return room, touches, xmin, ymax, res
+        if math.hypot(x1 - x0, y1 - y0) > 0.5:
+            lines.append(LineString([(x0, y0), (x1, y1)]))
+    return lines
 
 
-def subtract_column_protrusions(room, xmin, ymax, res, boxes):
-    """실 마스크 안에서 H-Beam 박스와 겹치는 칸을 지운다.
+def _snap_endpoints(lines: list[LineString], tol: float) -> list[LineString]:
+    """모서리에서 어긋난 끝점을 tol 안에서 한 점으로 모은다. tol보다 큰 군집은 합치지 않는다."""
+    endpoints: list[tuple[float, float]] = []
+    for ln in lines:
+        coords = list(ln.coords)
+        endpoints.append((float(coords[0][0]), float(coords[0][1])))
+        endpoints.append((float(coords[-1][0]), float(coords[-1][1])))
+    n = len(endpoints)
+    if n == 0:
+        return []
+    parent = list(range(n))
+    members: list[list[int]] = [[i] for i in range(n)]
 
-    벽 두께 안에만 있는 기둥은 실 마스크 밖이라 빠지지 않는다.
-    """
-    net = room.copy()
-    height, width = net.shape
-    subtracted = []
+    def find(i: int) -> int:
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
 
-    def col(x: float) -> int:
-        return int(round((x - xmin) / res))
+    def union(i: int, j: int) -> None:
+        ri, rj = find(i), find(j)
+        if ri == rj:
+            return
+        group = members[ri] + members[rj]
+        xs = [endpoints[k][0] for k in group]
+        ys = [endpoints[k][1] for k in group]
+        if max(xs) - min(xs) > tol or max(ys) - min(ys) > tol:
+            return
+        parent[rj] = ri
+        members[ri] = group
 
-    def row(y: float) -> int:
-        return int(round((ymax - y) / res))
+    cell = tol if tol > 0 else 1.0
+    buckets: dict[tuple[int, int], list[int]] = defaultdict(list)
+    for i, (x, y) in enumerate(endpoints):
+        buckets[(math.floor(x / cell), math.floor(y / cell))].append(i)
+    for (ix, iy), ids in buckets.items():
+        neigh: list[int] = []
+        for dx in (-1, 0, 1):
+            for dy in (-1, 0, 1):
+                neigh.extend(buckets.get((ix + dx, iy + dy), []))
+        for i in ids:
+            x, y = endpoints[i]
+            for j in neigh:
+                if j <= i:
+                    continue
+                x2, y2 = endpoints[j]
+                if abs(x - x2) <= tol and abs(y - y2) <= tol:
+                    union(i, j)
 
-    for x0, y0, x1, y1 in boxes:
-        c0, c1 = sorted((col(x0), col(x1)))
-        r0, r1 = sorted((row(y0), row(y1)))
-        c0, c1 = max(0, c0), min(width - 1, c1)
-        r0, r1 = max(0, r0), min(height - 1, r1)
-        if c1 < c0 or r1 < r0:
+    canon = [(0.0, 0.0)] * n
+    seen: dict[int, tuple[float, float]] = {}
+    for i in range(n):
+        root = find(i)
+        if root not in seen:
+            xs = sorted(endpoints[k][0] for k in members[root])
+            ys = sorted(endpoints[k][1] for k in members[root])
+            mid = len(xs) // 2
+            seen[root] = (xs[mid], ys[mid])
+        canon[i] = seen[root]
+
+    out: list[LineString] = []
+    for idx, ln in enumerate(lines):
+        a, b = canon[idx * 2], canon[idx * 2 + 1]
+        if abs(a[0] - b[0]) <= 0.5 and abs(a[1] - b[1]) <= 0.5:
             continue
-        region = net[r0 : r1 + 1, c0 : c1 + 1]
-        hit = int(region.sum())
-        area_m2 = hit * (res / 1000.0) ** 2
+        out.append(LineString([a, b]))
+    return out
+
+
+def _cap_wall_ends(lines: list[LineString], tol: float) -> list[LineString]:
+    """끝점이 다른 벽선에서 tol 안에 있으면 그 선까지 잇는다. 이중선 벽의 끝막음이다."""
+    if not lines:
+        return lines
+    tree = STRtree(lines)
+    extra: list[LineString] = []
+    seen: set[tuple[tuple[float, float], tuple[float, float]]] = set()
+    for ln in lines:
+        for xy in (ln.coords[0], ln.coords[-1]):
+            pt = Point(xy)
+            for idx in tree.query(pt.buffer(tol)):
+                other = lines[int(idx)]
+                dist = float(other.distance(pt))
+                if dist <= 0.5 or dist > tol:
+                    continue
+                nearest = other.interpolate(other.project(pt))
+                a = (round(pt.x, 1), round(pt.y, 1))
+                b = (round(float(nearest.x), 1), round(float(nearest.y), 1))
+                if a == b:
+                    continue
+                key = tuple(sorted((a, b)))
+                if key in seen:
+                    continue
+                seen.add(key)
+                extra.append(LineString([(pt.x, pt.y), (float(nearest.x), float(nearest.y))]))
+    return lines + extra
+
+
+def _face_at(lines: list[LineString], x: float, y: float) -> Polygon | None:
+    lines = [ln for ln in lines if ln.length > 0.5]
+    if len(lines) < 3:
+        return None
+    noded = shapely.node(GeometryCollection(lines))
+    if noded.is_empty:
+        return None
+    faces = [g for g in polygonize(noded) if g.geom_type == "Polygon" and g.area > 1.0]
+    pt = Point(x, y)
+    interior = [g for g in faces if g.contains(pt)]
+    if interior:
+        return min(interior, key=lambda g: g.area)
+    touching = [g for g in faces if g.distance(pt) <= 1.0]
+    if not touching:
+        return None
+    return max(touching, key=lambda g: g.area)
+
+
+def _touches_window(poly: Polygon, origin: tuple[float, float], reach: float, tol: float = 50.0) -> bool:
+    ox, oy = origin
+    minx, miny, maxx, maxy = poly.bounds
+    return (
+        minx <= ox - reach + tol
+        or maxx >= ox + reach - tol
+        or miny <= oy - reach + tol
+        or maxy >= oy + reach - tol
+    )
+
+
+def _polygons_of(geom) -> list[Polygon]:
+    if geom.is_empty:
+        return []
+    if geom.geom_type == "Polygon":
+        return [geom]
+    if geom.geom_type in ("MultiPolygon", "GeometryCollection"):
+        out: list[Polygon] = []
+        for part in geom.geoms:
+            out.extend(_polygons_of(part))
+        return out
+    return []
+
+
+def _subtract_columns(face: Polygon, boxes, seed: tuple[float, float]):
+    """실 안으로 들어온 H-Beam 박스를 뺀다. 벽 두께 안에만 있는 기둥은 면과 안 겹친다."""
+    net = face
+    subtracted = []
+    pt = Point(seed)
+    for x0, y0, x1, y1 in boxes:
+        rect = box(x0, y0, x1, y1)
+        if not net.intersects(rect):
+            continue
+        area_m2 = net.intersection(rect).area / 1_000_000.0
         if area_m2 < 0.02:
             continue
-        region[:] = False
+        net = net.difference(rect)
         subtracted.append(
             {
                 "bbox_mm": [round(x0, 4), round(y0, 4), round(x1, 4), round(y1, 4)],
                 "area_m2": round(area_m2, 4),
             }
         )
-    return net, subtracted
+    parts = [p for p in _polygons_of(net) if p.covers(pt)]
+    if not parts:
+        raise SystemExit("라벨이 계산된 실 다각형 밖에 있습니다.")
+    return min(parts, key=lambda p: p.area), subtracted
 
 
-def polygon_from_mask(room, xmin, ymax, res, x_axes, y_axes):
-    mask_u8 = room.astype(np.uint8) * 255
-    contours, _ = cv2.findContours(mask_u8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
-    if not contours:
-        raise SystemExit("실 윤곽을 만들지 못했습니다.")
-    contour = max(contours, key=cv2.contourArea)
-    epsilon = max(8.0, 20.0 / res)  # 약 20 mm
-    approx = cv2.approxPolyDP(contour, epsilon, True)
-    pts = []
-    for p in approx.reshape(-1, 2):
-        c, r = float(p[0]), float(p[1])
-        x = xmin + c * res
-        y = ymax - r * res
+def _simplify_ring(coords, x_axes, y_axes) -> list[tuple[float, float]]:
+    pts: list[tuple[float, float]] = []
+    seq = list(coords)
+    if len(seq) >= 2 and seq[0] == seq[-1]:
+        seq = seq[:-1]
+    for x, y in seq:
+        x, y = float(x), float(y)
         if x_axes:
             nx = min(x_axes, key=lambda a: abs(a - x))
             if abs(nx - x) <= SNAP_MM:
@@ -393,7 +487,6 @@ def polygon_from_mask(room, xmin, ymax, res, x_axes, y_axes):
             pts.append((x, y))
     if len(pts) >= 2 and abs(pts[0][0] - pts[-1][0]) <= 1 and abs(pts[0][1] - pts[-1][1]) <= 1:
         pts = pts[:-1]
-    # 같은 직선 위의 중간 점은 뺀다.
     simplified = []
     n = len(pts)
     for i in range(n):
@@ -401,7 +494,7 @@ def polygon_from_mask(room, xmin, ymax, res, x_axes, y_axes):
         ab = (b[0] - a[0], b[1] - a[1])
         bc = (c[0] - b[0], c[1] - b[1])
         cross = ab[0] * bc[1] - ab[1] * bc[0]
-        if abs(cross) > 1.0:  # mm², 거의 일직선이면 제거
+        if abs(cross) > 1.0:
             simplified.append(b)
     if len(simplified) >= 3:
         pts = simplified
@@ -544,41 +637,72 @@ def safe_stem(room: str) -> str:
     return s or "room"
 
 
-def evaluate(dxf_path: Path, meta_path: Path, png_path: Path, room: str, out_dir: Path) -> dict:
+def _roomish(text: str) -> bool:
+    if any(token in text for token in ("면적", "천장", ":", "：")):
+        return False
+    name = norm_name(text)
+    if not name or len(name) > 24:
+        return False
+    return re.search(r"[가-힣]", name) is not None
+
+
+def evaluate(
+    dxf_path: Path,
+    meta_path: Path,
+    png_path: Path,
+    room: str,
+    out_dir: Path,
+    at: tuple[float, float] | None = None,
+) -> dict:
     doc = ezdxf.readfile(str(dxf_path))
     msp = doc.modelspace()
-    lx, ly, label = find_room_label(msp, room)
+    lx, ly, label = find_room_label(msp, room, at)
     boxes = column_boxes(msp)
     segs = wall_segments(msp, boxes)
     pad = 12000.0
-    room_mask = None
-    xmin = ymax = 0.0
+    face: Polygon | None = None
     x_axes: list[float] = []
     y_axes: list[float] = []
     while pad <= 50000:
         h_final, v_final, dsegs, x_axes, y_axes = bridged_runs(segs, (lx, ly), pad + 2000)
-        room_mask, touches, xmin, ymax, res = flood_room(h_final, v_final, dsegs, (lx, ly), pad)
-        if not touches and int(room_mask.sum()) > 0:
+        lines = _cap_wall_ends(
+            _snap_endpoints(_lines_from_runs(h_final, v_final, dsegs), JOIN_MM),
+            WALL_CAP_MM,
+        )
+        found = _face_at(lines, lx, ly)
+        if found is not None and not _touches_window(found, (lx, ly), pad + 2000):
+            face = found
             break
         pad += 8000
     else:
         raise SystemExit("벽이 실을 닫지 않아 면적이 창 밖으로 새었습니다.")
+    if face is None:
+        raise SystemExit("벽이 실을 닫지 않아 면적이 창 밖으로 새었습니다.")
 
-    gross_m2 = float(room_mask.sum()) * (res / 1000.0) ** 2
-    room_mask, protrusions = subtract_column_protrusions(room_mask, xmin, ymax, res, boxes)
-    pts = polygon_from_mask(room_mask, xmin, ymax, res, x_axes, y_axes)
+    gross_m2 = face.area / 1_000_000.0
+    net, protrusions = _subtract_columns(face, boxes, (lx, ly))
+    pts = _simplify_ring(net.exterior.coords, x_axes, y_axes)
+    holes = [_simplify_ring(ring.coords, x_axes, y_axes) for ring in net.interiors]
+    holes = [h for h in holes if len(h) >= 3]
     if len(pts) < 3 or not point_in_poly(lx, ly, pts):
         raise SystemExit("라벨이 계산된 실 다각형 밖에 있습니다.")
-    area = shoelace_m2(pts)
-    raster_m2 = float(room_mask.sum()) * (res / 1000.0) ** 2
-    if raster_m2 <= 0 or abs(area - raster_m2) / raster_m2 > 0.03:
-        raise SystemExit(f"다각형 면적({area:.3f})과 래스터 면적({raster_m2:.3f})이 어긋납니다.")
-    xs = [p[0] for p in pts]
-    ys = [p[1] for p in pts]
-    width_m = (max(xs) - min(xs)) / 1000.0
-    height_m = (max(ys) - min(ys)) / 1000.0
+    area = shoelace_m2(pts) - sum(shoelace_m2(h) for h in holes)
+    minx, miny, maxx, maxy = face.bounds
+    width_m = (maxx - minx) / 1000.0
+    height_m = (maxy - miny) / 1000.0
     drawn = drawing_area_m2(msp, pts)
     rectangular = abs(area - width_m * height_m) / area < 0.01 if area else False
+    seen: set[tuple[str, int, int]] = set()
+    enclosed = []
+    for x, y, text in iter_labels(msp):
+        if not _roomish(text) or not net.covers(Point(x, y)):
+            continue
+        key = (norm_name(text), round(x), round(y))
+        if key in seen:
+            continue
+        seen.add(key)
+        enclosed.append({"text": text, "x": round(x, 1), "y": round(y, 1)})
+    enclosed.sort(key=lambda item: (norm_name(item["text"]), item["x"], item["y"]))
     info = {
         "room": label,
         "floor_dxf": str(dxf_path),
@@ -587,16 +711,17 @@ def evaluate(dxf_path: Path, meta_path: Path, png_path: Path, room: str, out_dir
         "area_before_columns_m2": round(gross_m2, 4),
         "column_protrusion_m2": round(sum(p["area_m2"] for p in protrusions), 4),
         "column_protrusions": protrusions,
-        "area_raster_m2": round(raster_m2, 4),
         "width_m": round(width_m, 4),
         "height_m": round(height_m, 4),
         "rectangular": rectangular,
         "polygon_mm": [[round(x, 4), round(y, 4)] for x, y in pts],
+        "enclosed_labels": enclosed,
         "drawing_area_m2": drawn,
         "rules": {
             "boundary": "inner wall face",
             "door_gap_mm": DOOR_GAP_MM,
             "hbeam": "column protrusion inside the inner face is always subtracted",
+            "method": "polygonize",
         },
     }
     stem = safe_stem(label)
@@ -616,15 +741,25 @@ def main() -> None:
     parser.add_argument("--meta", type=Path, required=True)
     parser.add_argument("--png", type=Path, required=True)
     parser.add_argument("--room", required=True)
+    parser.add_argument("--x", type=float, default=None, help="중복 라벨일 때 선택할 x (mm)")
+    parser.add_argument("--y", type=float, default=None, help="중복 라벨일 때 선택할 y (mm)")
     parser.add_argument("--out", type=Path, default=None)
     args = parser.parse_args()
+    if (args.x is None) != (args.y is None):
+        raise SystemExit("--x 와 --y 는 함께 지정하세요.")
+    at = (args.x, args.y) if args.x is not None else None
     out = args.out or (args.dxf.parent / "room_eval")
-    info = evaluate(args.dxf, args.meta, args.png, args.room, out)
+    info = evaluate(args.dxf, args.meta, args.png, args.room, out, at)
     print(f"room: {info['room']}")
     print(f"area_m2: {info['area_m2']:.2f}")
     print(f"column_protrusion_m2: {info['column_protrusion_m2']:.2f}")
     print(f"width_m: {info['width_m']:.3f}")
     print(f"height_m: {info['height_m']:.3f}")
+    if info["enclosed_labels"]:
+        shown = ", ".join(
+            f"{item['text']} ({item['x']:.0f},{item['y']:.0f})" for item in info["enclosed_labels"]
+        )
+        print(f"enclosed_labels: {shown}")
     if info["drawing_area_m2"] is not None:
         print(f"drawing_area_m2: {info['drawing_area_m2']:.0f}")
     print(f"overlay: {info['overlay_png']}")
