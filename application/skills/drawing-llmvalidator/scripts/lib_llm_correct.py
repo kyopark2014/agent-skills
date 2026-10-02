@@ -6153,10 +6153,16 @@ def find_double_door_openings(
 def find_single_door_openings(
     msp,
     double_openings: list[tuple[bool, float, float, float]],
-) -> tuple[list[tuple[bool, float, float, float]], list[tuple[bool, float, float, float]]]:
+) -> tuple[
+    list[tuple[bool, float, float, float]],
+    list[tuple[bool, float, float, float]],
+    list[int],
+]:
     """외여닫이 문. 1/4 스윙의 벽 방향이 개구, 수직으로 선 문짝은 벽이 아니다.
 
-    반환: (개구 목록, 문짝 목록). 둘 다 (세로인가, ortho, along0, along1).
+    반환: (개구 목록, 문짝 목록, 스윙 방향).
+    개구·문짝은 (세로인가, ortho, along0, along1).
+    스윙 방향은 개구와 같은 순서다. +1 은 ortho 가 큰 쪽, 0 이면 방향을 쓰지 않는다.
     """
     swings: list[tuple[float, float, float, float, float]] = []
     for e in msp:
@@ -6258,7 +6264,19 @@ def find_single_door_openings(
 
     openings: list[tuple[bool, float, float, float]] = []
     leaves: list[tuple[bool, float, float, float]] = []
+    sides: list[int] = []
     seen: set[tuple[int, int, int]] = set()
+
+    def _swing_side(horizontal: bool, host: float, arc_ends: list[tuple[float, float]]) -> int:
+        """호가 벽 축에서 열리는 방향. +1 은 좌표가 큰 쪽이다."""
+        best = 0.0
+        for ex, ey in arc_ends:
+            delta = (ey - host) if horizontal else (ex - host)
+            if abs(delta) > abs(best):
+                best = delta
+        if abs(best) < 200.0:
+            return 0
+        return 1 if best > 0.0 else -1
     for cx, cy, r, sa, ea in swings:
         ends: list[tuple[float, float]] = []
         for ang in (sa, ea):
@@ -6425,6 +6443,7 @@ def find_single_door_openings(
                         seen.add(key)
                         for oo in faces:
                             openings.append((False, oo, o0, o1))
+                            sides.append(_swing_side(True, oo, ends))
                         leaves.append((True, cx, min(cy, perp[1]), max(cy, perp[1])))
             continue
         horizontal, host = chosen
@@ -6434,11 +6453,13 @@ def find_single_door_openings(
         seen.add(key)
         if horizontal:
             openings.append((False, host, min(cx, along[0]), max(cx, along[0])))
+            sides.append(_swing_side(True, host, ends))
             leaves.append((True, cx, min(cy, perp[1]), max(cy, perp[1])))
         else:
             openings.append((True, host, min(cy, along[1]), max(cy, along[1])))
+            sides.append(_swing_side(False, host, ends))
             leaves.append((False, cy, min(cx, perp[0]), max(cx, perp[0])))
-    return openings, leaves
+    return openings, leaves, sides
 
 
 def _door_hinge_used(
@@ -6545,9 +6566,15 @@ def correct_walls_around_doors(msp) -> tuple[int, int]:
     """문 개구를 가로지르는 WALL은 끊고, 개구 양옆 벽은 WALL로 둔다.
 
     문짝(개구 안 선)은 벽이 아니다. 양옆은 벽이다.
+    스윙이 열리는 반대편으로 40 mm 넘게 떨어진 면은 개구로 자르지 않고 벽으로 둔다.
     """
     openings = find_double_door_openings(msp)
-    single_openings, door_leaves = find_single_door_openings(msp, openings)
+    single_openings, door_leaves, swing_sides = find_single_door_openings(msp, openings)
+    swing_side = {
+        opening: side
+        for opening, side in zip(single_openings, swing_sides)
+        if side != 0
+    }
     openings = openings + single_openings
     openings = openings + find_narrow_leaf_openings(msp, openings)
     if not openings and not door_leaves:
@@ -6568,6 +6595,10 @@ def correct_walls_around_doors(msp) -> tuple[int, int]:
         for pool, tol in pools:
             for ov, oo, c0, c1 in pool:
                 if ov != is_v or abs(oo - ortho) > tol:
+                    continue
+                side = swing_side.get((ov, oo, c0, c1), 0)
+                # 스윙 반대편 벽면. 힌지 선과 문짝(40 mm 안)은 그대로 개구다.
+                if side != 0 and (ortho - oo) * side < -40.0:
                     continue
                 lo, hi = max(a0, c0), min(a1, c1)
                 if hi - lo >= 250.0:
@@ -6785,6 +6816,7 @@ def correct_walls_around_doors(msp) -> tuple[int, int]:
         # 개구를 가로지르는 면은 벽 두께가 아니어도 바깥 조각을 남긴다.
         # 맞닿기만 한 면은 80mm 이상(문짝 40mm 는 제외, 100mm 벽면은 포함).
         min_thick = 40.0
+        opposite_span = False
         if cuts:
             pieces.extend(_outside(a0, a1, cuts))
         else:
@@ -6796,10 +6828,23 @@ def correct_walls_around_doors(msp) -> tuple[int, int]:
                     if a1 - a0 >= 400.0:
                         pieces.append((a0, a1))
                     break
+            # 스윙 반대편을 한 줄로 지나는 면은 문 너비 안도 벽이다.
+            if not pieces:
+                for (ov, oo, c0, c1), side in swing_side.items():
+                    if ov != is_v or abs(oo - ortho) > 280.0:
+                        continue
+                    if (ortho - oo) * side >= -40.0:
+                        continue
+                    if min(a1, c1) - max(a0, c0) < 250.0:
+                        continue
+                    pieces.append((a0, a1))
+                    opposite_span = True
+                    min_thick = 40.0
+                    break
         if not pieces or not _has_pair(is_v, ortho, a0, a1, min_thick=min_thick):
             continue
         for p0, p1 in pieces:
-            if _already(is_v, ortho, p0, p1):
+            if not opposite_span and _already(is_v, ortho, p0, p1):
                 continue
             if is_v:
                 msp.add_line((ortho, p0), (ortho, p1), dxfattribs={"layer": WALL_LAYER, "color": WALL_COLOR})
@@ -17197,6 +17242,502 @@ def add_swing_leaf_walls(msp) -> int:
     return 0
 
 
+def promote_short_connected_doubles(msp) -> int:
+    """짧은 이중선이라도 벽 끝에서 같은 두께로 이어지면 벽으로 올린다.
+
+    면 간격 80–350 mm, 길이 180–1700 mm. 두 면이 각각 이미 빨간 벽의
+    끝에서 꺾이거나 이어지고, 그 벽 두 면의 간격과 같으면 올린다.
+    두 면을 닫는 짧은 막이선도 같이 올린다.
+    간격 40–80 mm는 같은 방향으로 이어진 짧은 면이 있을 때, 또는
+    두 면이 모두 같은 두께의 벽과 한 줄로 이어진 500–1000 mm 칸일 때, 또는
+    벽 끝에서 직각으로 꺾인 다리(300–500 mm)가 다른 벽 끝까지 이어질 때 올린다.
+    """
+    segs = iter_axis_segs(msp, min_len_mm=80.0)
+    walls = [s for s in segs if s.layer == WALL_LAYER and s.length >= 800.0]
+    bases = [
+        s
+        for s in segs
+        if s.layer == BASE_LAYER and 180.0 <= s.length <= 1700.0 and not _is_stair_tread_seg(s, segs)
+    ]
+    caps = [
+        s
+        for s in segs
+        if s.layer == BASE_LAYER and 60.0 <= s.length <= 430.0 and not _is_stair_tread_seg(s, segs)
+    ]
+    if not walls or not bases:
+        return 0
+
+    def _near_end(px: float, py: float, wall: AxisSeg, tol: float = 100.0) -> bool:
+        return min(
+            math.hypot(px - wall.x0, py - wall.y0),
+            math.hypot(px - wall.x1, py - wall.y1),
+        ) <= tol
+
+    def _joined_walls(seg: AxisSeg) -> list[AxisSeg]:
+        found: list[AxisSeg] = []
+        ends = ((seg.x0, seg.y0), (seg.x1, seg.y1))
+        for wall in walls:
+            if seg.is_h == wall.is_h and abs(seg.ortho - wall.ortho) > 50.0:
+                continue
+            if any(_near_end(px, py, wall) for px, py in ends):
+                found.append(wall)
+        return found
+
+    chosen: list[AxisSeg] = []
+    seen_seg: set[tuple[float, float, float, float]] = set()
+
+    def _key(seg: AxisSeg) -> tuple[float, float, float, float]:
+        return (round(seg.x0, 1), round(seg.y0, 1), round(seg.x1, 1), round(seg.y1, 1))
+
+    def _take(seg: AxisSeg) -> None:
+        key = _key(seg)
+        if key not in seen_seg:
+            seen_seg.add(key)
+            chosen.append(seg)
+
+    for i, left in enumerate(bases):
+        left_walls = _joined_walls(left)
+        if not left_walls:
+            continue
+        for right in bases[i + 1 :]:
+            if left.is_h != right.is_h:
+                continue
+            gap = abs(left.ortho - right.ortho)
+            if not (80.0 <= gap <= 350.0):
+                continue
+            overlap = min(left.along1, right.along1) - max(left.along0, right.along0)
+            shorter = min(left.length, right.length)
+            if overlap < 0.65 * shorter:
+                continue
+            if abs(left.length - right.length) > max(400.0, 0.6 * shorter):
+                continue
+            right_walls = _joined_walls(right)
+            if not right_walls:
+                continue
+            matched = False
+            for wall_a in left_walls:
+                for wall_b in right_walls:
+                    if wall_a.is_h != wall_b.is_h:
+                        continue
+                    if abs(abs(wall_a.ortho - wall_b.ortho) - gap) > 60.0:
+                        continue
+                    matched = True
+                    break
+                if matched:
+                    break
+            if not matched:
+                continue
+            _take(left)
+            _take(right)
+            far_ends: list[tuple[float, float]] = []
+            for seg in (left, right):
+                ends = ((seg.x0, seg.y0), (seg.x1, seg.y1))
+                anchored = [
+                    end
+                    for end in ends
+                    if any(_near_end(end[0], end[1], wall) for wall in (left_walls + right_walls))
+                ]
+                free = [end for end in ends if end not in anchored]
+                far_ends.append(free[0] if free else ends[0])
+            if len(far_ends) == 2:
+                fx0, fy0 = far_ends[0]
+                fx1, fy1 = far_ends[1]
+                for cap in caps:
+                    if cap.is_h == left.is_h:
+                        continue
+                    if not (gap - 40.0 <= cap.length <= gap + 80.0):
+                        continue
+                    (cx0, cy0), (cx1, cy1) = (cap.x0, cap.y0), (cap.x1, cap.y1)
+                    straight = (
+                        math.hypot(cx0 - fx0, cy0 - fy0) <= 80.0
+                        and math.hypot(cx1 - fx1, cy1 - fy1) <= 80.0
+                    )
+                    crossed = (
+                        math.hypot(cx0 - fx1, cy0 - fy1) <= 80.0
+                        and math.hypot(cx1 - fx0, cy1 - fy0) <= 80.0
+                    )
+                    if straight or crossed:
+                        _take(cap)
+
+    # 벽 끝에서 같은 선으로 조금 더 나간 뒤, 거기에 붙은 40–80 mm 이중선.
+    # 침실-3 오른쪽 위처럼 간격이 얇아도 벽 면에 이어져 있으면 벽이다.
+    all_walls = [s for s in segs if s.layer == WALL_LAYER and s.length >= 80.0]
+    short_bases = [
+        s
+        for s in segs
+        if s.layer == BASE_LAYER and 80.0 <= s.length <= 1200.0 and not _is_stair_tread_seg(s, segs)
+    ]
+
+    def _end_touch(seg: AxisSeg, others: list[AxisSeg], tol: float = 45.0) -> bool:
+        ends = ((seg.x0, seg.y0), (seg.x1, seg.y1))
+        for other in others:
+            other_ends = ((other.x0, other.y0), (other.x1, other.y1))
+            if any(math.hypot(a[0] - b[0], a[1] - b[1]) <= tol for a in ends for b in other_ends):
+                return True
+        return False
+
+    stubs: list[AxisSeg] = []
+    for seg in short_bases:
+        if seg.length > 500.0:
+            continue
+        for wall in all_walls + chosen:
+            if seg.is_h != wall.is_h or abs(seg.ortho - wall.ortho) > 25.0:
+                continue
+            overlap = min(seg.along1, wall.along1) - max(seg.along0, wall.along0)
+            if overlap >= 30.0 or not _end_touch(seg, [wall], 30.0):
+                continue
+            stubs.append(seg)
+            _take(seg)
+            break
+    anchor = list(chosen) + stubs
+    pool = [s for s in short_bases if _key(s) not in seen_seg]
+    for _step in range(3):
+        added: list[AxisSeg] = []
+        for i, left in enumerate(pool):
+            for right in pool[i + 1 :]:
+                if left.is_h != right.is_h:
+                    continue
+                gap = abs(left.ortho - right.ortho)
+                if not (40.0 <= gap <= 80.0):
+                    continue
+                overlap = min(left.along1, right.along1) - max(left.along0, right.along0)
+                shorter = min(left.length, right.length)
+                if overlap < 0.7 * shorter or abs(left.length - right.length) > 300.0:
+                    continue
+                if _end_touch(left, anchor) or _end_touch(right, anchor):
+                    added.extend((left, right))
+        if not added:
+            break
+        for seg in added:
+            _take(seg)
+        anchor = list(chosen)
+
+    # 두 면이 모두 기존 벽과 한 줄이고 두께도 같으면, 500–1000 mm 칸도 벽이다.
+    # 한 줄만 이어진 선은 500 mm를 넘기지 않는다. 스윙 안의 문짝은 올리지 않는다.
+    swings: list[tuple[float, float, float]] = []
+    for entity in msp:
+        if entity.dxftype() != "ARC":
+            continue
+        try:
+            radius = float(entity.dxf.radius)
+        except Exception:  # noqa: BLE001
+            continue
+        if not (400.0 <= radius <= 1400.0):
+            continue
+        swings.append((float(entity.dxf.center.x), float(entity.dxf.center.y), radius))
+
+    def _inside_swing(seg: AxisSeg) -> bool:
+        mx = (seg.x0 + seg.x1) * 0.5
+        my = (seg.y0 + seg.y1) * 0.5
+        return any(
+            math.hypot(mx - cx, my - cy) <= radius + 40.0 for cx, cy, radius in swings
+        )
+
+    def _collinear_hosts(seg: AxisSeg) -> list[AxisSeg]:
+        found: list[AxisSeg] = []
+        for wall in all_walls:
+            if seg.is_h != wall.is_h or abs(seg.ortho - wall.ortho) > 25.0:
+                continue
+            overlap = min(seg.along1, wall.along1) - max(seg.along0, wall.along0)
+            if overlap >= 30.0 or not _end_touch(seg, [wall], 30.0):
+                continue
+            found.append(wall)
+        return found
+
+    long_faces = [
+        s for s in short_bases if 500.0 < s.length <= 1000.0 and not _inside_swing(s)
+    ]
+    panel_ids: set[int] = set()
+    for i, left in enumerate(long_faces):
+        left_hosts = _collinear_hosts(left)
+        if not left_hosts:
+            continue
+        for right in long_faces[i + 1 :]:
+            if left.is_h != right.is_h:
+                continue
+            gap = abs(left.ortho - right.ortho)
+            if not (40.0 <= gap <= 80.0):
+                continue
+            overlap = min(left.along1, right.along1) - max(left.along0, right.along0)
+            shorter = min(left.length, right.length)
+            if overlap < 0.7 * shorter or abs(left.length - right.length) > 300.0:
+                continue
+            right_hosts = _collinear_hosts(right)
+            if not right_hosts:
+                continue
+            matched = False
+            for wall_a in left_hosts:
+                for wall_b in right_hosts:
+                    if wall_a.is_h != wall_b.is_h:
+                        continue
+                    if abs(abs(wall_a.ortho - wall_b.ortho) - gap) > 25.0:
+                        continue
+                    matched = True
+                    break
+                if matched:
+                    break
+            if not matched:
+                continue
+            _take(left)
+            _take(right)
+            if left.entity is not None:
+                panel_ids.add(id(left.entity))
+            if right.entity is not None:
+                panel_ids.add(id(right.entity))
+
+    # 그 칸 옆에서 같은 방향으로 조금 어긋나 이어진 면도 벽이다.
+    # 침실-3 왼쪽처럼 10 mm 어긋나고, 맞은편 벽과 20–80 mm일 때.
+    for seg in long_faces:
+        continued = False
+        for wall in all_walls + chosen:
+            if seg.is_h != wall.is_h or abs(seg.ortho - wall.ortho) > 25.0:
+                continue
+            overlap = min(seg.along1, wall.along1) - max(seg.along0, wall.along0)
+            if overlap >= 30.0 or not _end_touch(seg, [wall], 40.0):
+                continue
+            continued = True
+            break
+        if not continued:
+            continue
+        for wall in all_walls:
+            if wall.is_h != seg.is_h:
+                continue
+            gap = abs(wall.ortho - seg.ortho)
+            if not (20.0 <= gap <= 80.0):
+                continue
+            overlap = min(seg.along1, wall.along1) - max(seg.along0, wall.along0)
+            shorter = min(seg.length, wall.length)
+            if overlap < 0.65 * shorter or abs(seg.length - wall.length) > max(400.0, 0.6 * shorter):
+                continue
+            _take(seg)
+            break
+
+    # 벽 끝에서 직각으로 꺾인 40–80 mm 이중선.
+    # 간격 하한만 내리면 같은 선에 붙은 창호선까지 올라가므로,
+    # 다리 300–500 mm가 그 벽 두께와 같고 다른 벽 끝까지 이어질 때만 올린다.
+    bend_walls = [s for s in segs if s.layer == WALL_LAYER and s.length >= 600.0]
+    bend_faces = [s for s in bases if 300.0 <= s.length <= 500.0]
+    link_faces = [
+        s
+        for s in segs
+        if s.layer == BASE_LAYER
+        and 180.0 <= s.length <= 700.0
+        and not _is_stair_tread_seg(s, segs)
+    ]
+    link_caps = [
+        s
+        for s in segs
+        if s.layer == BASE_LAYER
+        and 40.0 <= s.length <= 250.0
+        and not _is_stair_tread_seg(s, segs)
+    ]
+
+    def _touch_wall_ends(seg: AxisSeg) -> list[tuple[tuple[float, float], AxisSeg]]:
+        found: list[tuple[tuple[float, float], AxisSeg]] = []
+        for wall in bend_walls:
+            if seg.is_h == wall.is_h:
+                continue
+            for px, py in ((seg.x0, seg.y0), (seg.x1, seg.y1)):
+                for qx, qy in ((wall.x0, wall.y0), (wall.x1, wall.y1)):
+                    if math.hypot(px - qx, py - qy) <= 40.0:
+                        found.append(((qx, qy), wall))
+        return found
+
+    def _pair_gap(left: AxisSeg, right: AxisSeg, gap_min: float, gap_max: float) -> float | None:
+        if left.is_h != right.is_h:
+            return None
+        gap = abs(left.ortho - right.ortho)
+        if not (gap_min <= gap <= gap_max):
+            return None
+        overlap = min(left.along1, right.along1) - max(left.along0, right.along0)
+        shorter = min(left.length, right.length)
+        if overlap < 0.65 * shorter:
+            return None
+        if abs(left.length - right.length) > max(400.0, 0.6 * shorter):
+            return None
+        return gap
+
+    def _touches(seg: AxisSeg, group: list[AxisSeg], tol: float) -> bool:
+        ends_a = ((seg.x0, seg.y0), (seg.x1, seg.y1))
+        for other in group:
+            ends_b = ((other.x0, other.y0), (other.x1, other.y1))
+            if any(
+                math.hypot(a[0] - b[0], a[1] - b[1]) <= tol for a in ends_a for b in ends_b
+            ):
+                return True
+        return False
+
+    bend_seeds: list[tuple[AxisSeg, AxisSeg, tuple[float, float], tuple[float, float]]] = []
+    for i, left in enumerate(bend_faces):
+        left_hits = _touch_wall_ends(left)
+        if not left_hits:
+            continue
+        for right in bend_faces[i + 1 :]:
+            gap = _pair_gap(left, right, 40.0, 80.0)
+            if gap is None:
+                continue
+            right_hits = _touch_wall_ends(right)
+            if not right_hits:
+                continue
+            anchor = None
+            for q1, wall_a in left_hits:
+                for q2, wall_b in right_hits:
+                    if wall_a.is_h != wall_b.is_h:
+                        continue
+                    host_gap = abs(wall_a.ortho - wall_b.ortho)
+                    if host_gap < 40.0 or abs(host_gap - gap) > 25.0:
+                        continue
+                    if math.hypot(q1[0] - q2[0], q1[1] - q2[1]) > gap + 100.0:
+                        continue
+                    anchor = (q1, q2)
+                    break
+                if anchor:
+                    break
+            if anchor:
+                bend_seeds.append((left, right, anchor[0], anchor[1]))
+
+    for left0, right0, q1, q2 in bend_seeds:
+        comp: list[AxisSeg] = [left0, right0]
+        seen_ids = {id(left0), id(right0)}
+        for _step in range(3):
+            group = list(comp)
+            connectors = [
+                cap for cap in link_caps if id(cap) not in seen_ids and _touches(cap, group, 40.0)
+            ]
+            added_bend: list[AxisSeg] = []
+            for i, left in enumerate(link_faces):
+                for right in link_faces[i + 1 :]:
+                    if _pair_gap(left, right, 40.0, 350.0) is None:
+                        continue
+                    direct = _touches(left, group, 45.0) or _touches(right, group, 45.0)
+                    via = None
+                    if not direct:
+                        for cap in connectors:
+                            if (
+                                _touches(cap, [left], 40.0) or _touches(cap, [right], 40.0)
+                            ) and _touches(cap, group, 40.0):
+                                via = cap
+                                break
+                    if not direct and via is None:
+                        continue
+                    for seg in (left, right):
+                        if id(seg) not in seen_ids:
+                            added_bend.append(seg)
+                    if via is not None and id(via) not in seen_ids:
+                        added_bend.append(via)
+            if not added_bend:
+                break
+            for seg in added_bend:
+                seen_ids.add(id(seg))
+                comp.append(seg)
+        reaches = False
+        for seg in comp:
+            for px, py in ((seg.x0, seg.y0), (seg.x1, seg.y1)):
+                if math.hypot(px - q1[0], py - q1[1]) <= 80.0 or math.hypot(px - q2[0], py - q2[1]) <= 80.0:
+                    continue
+                for wall in bend_walls:
+                    if math.hypot(px - wall.x0, py - wall.y0) <= 40.0 or math.hypot(px - wall.x1, py - wall.y1) <= 40.0:
+                        reaches = True
+                        break
+                if reaches:
+                    break
+            if reaches:
+                break
+        if not reaches:
+            continue
+        for seg in link_faces:
+            if id(seg) in seen_ids or not _touches(seg, comp, 40.0):
+                continue
+            for mate in list(comp) + bend_walls:
+                if mate.is_h != seg.is_h:
+                    continue
+                gap = abs(seg.ortho - mate.ortho)
+                if not (40.0 <= gap <= 350.0):
+                    continue
+                overlap = min(seg.along1, mate.along1) - max(seg.along0, mate.along0)
+                shorter = min(seg.length, mate.length)
+                if overlap < 0.65 * shorter:
+                    continue
+                if abs(seg.length - mate.length) > max(400.0, 0.6 * shorter):
+                    continue
+                seen_ids.add(id(seg))
+                comp.append(seg)
+                break
+        for i, left in enumerate(list(comp)):
+            for right in comp[i + 1 :]:
+                gap = _pair_gap(left, right, 40.0, 350.0)
+                if gap is None:
+                    continue
+                for cap in link_caps:
+                    if cap.is_h == left.is_h:
+                        continue
+                    if not (gap - 40.0 <= cap.length <= gap + 80.0):
+                        continue
+                    if id(cap) in seen_ids:
+                        continue
+                    ends_c = ((cap.x0, cap.y0), (cap.x1, cap.y1))
+                    ends_l = ((left.x0, left.y0), (left.x1, left.y1))
+                    ends_r = ((right.x0, right.y0), (right.x1, right.y1))
+                    hit_l = any(
+                        math.hypot(a[0] - b[0], a[1] - b[1]) <= 40.0
+                        for a in ends_c
+                        for b in ends_l
+                    )
+                    hit_r = any(
+                        math.hypot(a[0] - b[0], a[1] - b[1]) <= 40.0
+                        for a in ends_c
+                        for b in ends_r
+                    )
+                    if hit_l and hit_r:
+                        seen_ids.add(id(cap))
+                        comp.append(cap)
+        for seg in comp:
+            _take(seg)
+
+    changed = 0
+    painted: set[int] = set()
+
+    def _same_line(entity, seg: AxisSeg) -> bool:
+        if entity.dxftype() != "LINE":
+            return False
+        ax, ay = float(entity.dxf.start.x), float(entity.dxf.start.y)
+        bx, by = float(entity.dxf.end.x), float(entity.dxf.end.y)
+
+        def _near(px: float, py: float, qx: float, qy: float) -> bool:
+            return math.hypot(px - qx, py - qy) <= 5.0
+
+        straight = _near(ax, ay, seg.x0, seg.y0) and _near(bx, by, seg.x1, seg.y1)
+        flipped = _near(ax, ay, seg.x1, seg.y1) and _near(bx, by, seg.x0, seg.y0)
+        return straight or flipped
+
+    for seg in chosen:
+        entity = seg.entity
+        if entity is None:
+            continue
+        if entity.dxftype() == "LINE" or id(entity) in panel_ids:
+            if id(entity) not in painted and _paint_layer(entity, WALL_LAYER, WALL_COLOR):
+                painted.add(id(entity))
+                changed += 1
+            if entity.dxftype() == "LINE":
+                continue
+        else:
+            msp.add_line(
+                (seg.x0, seg.y0),
+                (seg.x1, seg.y1),
+                dxfattribs={"layer": WALL_LAYER, "color": WALL_COLOR},
+            )
+            changed += 1
+        for other in msp:
+            if other is entity or id(other) in painted:
+                continue
+            if getattr(other.dxf, "layer", None) != BASE_LAYER:
+                continue
+            if _same_line(other, seg) and _paint_layer(other, WALL_LAYER, WALL_COLOR):
+                painted.add(id(other))
+                changed += 1
+    return changed
+
+
 def demote_swing_hinge_door_leaves(msp) -> int:
     """1/4 스윙 힌지에 붙은 문짝을 WALL에서 뺀다.
 
@@ -17764,6 +18305,7 @@ def apply_corrections(
     n_promoted += add_closed_door_wall_lines(msp)
     n_promoted += promote_projection_junctions(msp)
     n_promoted += promote_shifted_corner_faces(msp)
+    n_promoted += promote_short_connected_doubles(msp)
     # 앞선 승격이 스윙 힌지 문짝을 다시 올려도, 면적 경계로 남지 않게 마지막에 내린다.
     n_demoted += demote_swing_hinge_door_leaves(msp)
 
