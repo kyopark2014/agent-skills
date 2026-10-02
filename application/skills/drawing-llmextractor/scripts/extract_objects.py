@@ -69,6 +69,15 @@ MAX_TILE_SIDE = 5000
 OVERLAP = 0.12
 RED = (255, 0, 0, 255)
 RED_FILL = (255, 0, 0, 72)
+# 연두. 빨간 벽 도면 위에서 문 표시가 구분되도록 쓴다.
+LIGHT_GREEN = (118, 186, 37, 255)
+LIGHT_GREEN_FILL = (166, 226, 70, 96)
+NAMED_COLORS = {
+    "red": (RED, RED_FILL),
+    "빨강": (RED, RED_FILL),
+    "연두": (LIGHT_GREEN, LIGHT_GREEN_FILL),
+    "lightgreen": (LIGHT_GREEN, LIGHT_GREEN_FILL),
+}
 
 
 def _app_root() -> Path:
@@ -371,8 +380,30 @@ def _font(size: int) -> ImageFont.ImageFont:
     return ImageFont.load_default()
 
 
-def mark_objects(image: Image.Image, objects: list[dict]) -> Image.Image:
-    """Draw red boxes on a copy of the original image."""
+def parse_mark_color(value: str | None) -> tuple[tuple[int, int, int, int], tuple[int, int, int, int]]:
+    """표시 색. 생략하면 빨강. `#RRGGBB` 또는 연두·빨강 이름을 받는다."""
+    text = (value or "").strip()
+    if not text:
+        return RED, RED_FILL
+    named = NAMED_COLORS.get(text.lower()) or NAMED_COLORS.get(text)
+    if named is not None:
+        return named
+    hex_text = text[1:] if text.startswith("#") else text
+    if re.fullmatch(r"[0-9A-Fa-f]{6}", hex_text):
+        red = int(hex_text[0:2], 16)
+        green = int(hex_text[2:4], 16)
+        blue = int(hex_text[4:6], 16)
+        return (red, green, blue, 255), (red, green, blue, 96)
+    raise SystemExit(f"알 수 없는 표시 색입니다: {value}")
+
+
+def mark_objects(
+    image: Image.Image,
+    objects: list[dict],
+    color: tuple[tuple[int, int, int, int], tuple[int, int, int, int]] | None = None,
+) -> Image.Image:
+    """Draw boxes on a copy of the original image. Default color is red."""
+    outline, fill = color or (RED, RED_FILL)
     base = image.convert("RGBA")
     overlay = Image.new("RGBA", base.size, (0, 0, 0, 0))
     draw = ImageDraw.Draw(overlay)
@@ -381,14 +412,14 @@ def mark_objects(image: Image.Image, objects: list[dict]) -> Image.Image:
     font = _font(max(16, min(42, min(width, height) // 180)))
     for obj in objects:
         x0, y0, x1, y1 = obj["bbox_px"]
-        draw.rectangle([x0, y0, x1, y1], fill=RED_FILL, outline=RED, width=stroke)
+        draw.rectangle([x0, y0, x1, y1], fill=fill, outline=outline, width=stroke)
         label = (obj.get("label") or "").strip()
         if not label:
             continue
         text_y = y0 - stroke - 4
         if text_y < 4:
             text_y = y0 + stroke + 2
-        draw.text((x0 + stroke, text_y), label, fill=RED, font=font)
+        draw.text((x0 + stroke, text_y), label, fill=outline, font=font)
     return Image.alpha_composite(base, overlay)
 
 
@@ -552,6 +583,7 @@ def run(
     model: str | None,
     max_tiles: int,
     workers: int = 4,
+    mark_color: str | None = None,
 ) -> dict:
     if not topic.strip():
         raise SystemExit("주제가 비어 있습니다.")
@@ -565,7 +597,8 @@ def run(
     image = Image.open(image_path)
     image.load()
     objects, tile_stats = extract_objects(image, topic, max_tiles=max_tiles, workers=workers)
-    marked = mark_objects(image, objects)
+    color = parse_mark_color(mark_color)
+    marked = mark_objects(image, objects, color)
     png_path, json_path = default_output_paths(image_path, topic)
     if output is not None:
         png_path = output
@@ -583,6 +616,7 @@ def run(
         "height": image.size[1],
         "tiles": tile_stats,
         "objects": objects,
+        "mark_color": mark_color or "red",
         "marked_image": str(png_path),
     }
     json_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -617,6 +651,11 @@ def main() -> int:
         default=4,
         help="동시에 분석할 조각 수 (기본 4). Vision 호출은 네트워크 대기라 병렬로 줄인다",
     )
+    parser.add_argument(
+        "--color",
+        default=None,
+        help="표시 색. 기본 빨강. 연두, lightgreen, #RRGGBB",
+    )
     args = parser.parse_args()
 
     payload = run(
@@ -626,6 +665,7 @@ def main() -> int:
         args.model,
         max(0, args.max_tiles),
         max(1, args.workers),
+        args.color,
     )
     print(f"model: {payload['model']}")
     print(f"model_id: {payload['model_id']}")

@@ -17738,6 +17738,209 @@ def promote_short_connected_doubles(msp) -> int:
     return changed
 
 
+def add_swing_closed_chords(msp) -> int:
+    """스윙이 닫혀 벽과 나란한 현을 WALL로 추가한다.
+
+    열리는 문짝은 그대로 둔다. 이미 벽인 선은 내리지 않는다.
+    """
+    segments: list[tuple[float, float, float, float, str, object | None]] = []
+    for entity in msp:
+        layer = getattr(entity.dxf, "layer", None)
+        if layer not in (WALL_LAYER, BASE_LAYER):
+            continue
+        kind = entity.dxftype()
+        try:
+            if kind == "LINE":
+                pairs = [(
+                    (float(entity.dxf.start.x), float(entity.dxf.start.y)),
+                    (float(entity.dxf.end.x), float(entity.dxf.end.y)),
+                    entity,
+                )]
+            elif kind == "LWPOLYLINE":
+                pts = [(float(p[0]), float(p[1])) for p in entity.get_points("xy")]
+                pairs = [(*pair, None) for pair in zip(pts, pts[1:])]
+                if entity.closed and len(pts) >= 2:
+                    pairs.append((pts[-1], pts[0], None))
+            else:
+                continue
+        except Exception:  # noqa: BLE001
+            continue
+        for (x0, y0), (x1, y1), owner in pairs:
+            if math.hypot(x1 - x0, y1 - y0) >= 80.0:
+                segments.append((x0, y0, x1, y1, layer, owner if kind == "LINE" else None))
+
+    def _covered(x0: float, y0: float, x1: float, y1: float) -> bool:
+        for ax, ay, bx, by, layer, _owner in segments:
+            if layer != WALL_LAYER:
+                continue
+            vx, vy = bx - ax, by - ay
+            length2 = vx * vx + vy * vy
+            if length2 < 1.0:
+                continue
+            def _on(px: float, py: float) -> bool:
+                t = ((px - ax) * vx + (py - ay) * vy) / length2
+                if t < -0.02 or t > 1.02:
+                    return False
+                return math.hypot(px - (ax + t * vx), py - (ay + t * vy)) <= 8.0
+            if _on(x0, y0) and _on(x1, y1):
+                return True
+        return False
+
+    def _occupied(ux: float, uy: float, hx: float, hy: float, radius: float) -> bool:
+        nx, ny = -uy, ux
+        for x0, y0, x1, y1, _layer, _owner in segments:
+            elen = math.hypot(x1 - x0, y1 - y0)
+            if elen < 80.0:
+                continue
+            if abs(((x1 - x0) / elen) * ux + ((y1 - y0) / elen) * uy) < 0.98:
+                continue
+            off0 = (x0 - hx) * nx + (y0 - hy) * ny
+            off1 = (x1 - hx) * nx + (y1 - hy) * ny
+            if abs(off1 - off0) > 15.0 or abs(off0) > 30.0:
+                continue
+            along0 = (x0 - hx) * ux + (y0 - hy) * uy
+            along1 = (x1 - hx) * ux + (y1 - hy) * uy
+            overlap = min(max(along0, along1), radius) - max(min(along0, along1), 0.0)
+            if overlap >= 0.45 * radius:
+                return True
+        return False
+
+    def _near_wall(px: float, py: float) -> bool:
+        for x0, y0, x1, y1, layer, _owner in segments:
+            if layer != WALL_LAYER:
+                continue
+            vx, vy = x1 - x0, y1 - y0
+            length2 = vx * vx + vy * vy
+            if length2 < 1.0:
+                continue
+            t = max(0.0, min(1.0, ((px - x0) * vx + (py - y0) * vy) / length2))
+            if math.hypot(px - (x0 + t * vx), py - (y0 + t * vy)) <= 80.0:
+                return True
+        return False
+
+    def _wall_end(ux: float, uy: float, px: float, py: float) -> tuple[float, float] | None:
+        nx, ny = -uy, ux
+        best: tuple[float, float, float] | None = None
+        for x0, y0, x1, y1, layer, _owner in segments:
+            if layer != WALL_LAYER:
+                continue
+            elen = math.hypot(x1 - x0, y1 - y0)
+            if elen < 200.0:
+                continue
+            if abs(((x1 - x0) / elen) * ux + ((y1 - y0) / elen) * uy) < 0.98:
+                continue
+            for qx, qy in ((x0, y0), (x1, y1)):
+                off = abs((qx - px) * nx + (qy - py) * ny)
+                dist = math.hypot(qx - px, qy - py)
+                if off > 40.0 or dist > 80.0:
+                    continue
+                if best is None or dist < best[0]:
+                    best = (dist, qx, qy)
+        if best is None:
+            return None
+        return best[1], best[2]
+
+    added = 0
+    for entity in msp:
+        if entity.dxftype() != "ARC":
+            continue
+        try:
+            radius = float(entity.dxf.radius)
+            hx = float(entity.dxf.center.x)
+            hy = float(entity.dxf.center.y)
+            start_angle = float(entity.dxf.start_angle)
+            end_angle = float(entity.dxf.end_angle)
+        except Exception:  # noqa: BLE001
+            continue
+        sweep = (end_angle - start_angle) % 360.0
+        if not (400.0 <= radius <= 1400.0) or not (70.0 <= sweep <= 110.0):
+            continue
+        ends: list[tuple[float, float, float, float]] = []
+        for angle in (start_angle, end_angle):
+            rad = math.radians(angle)
+            ux, uy = math.cos(rad), math.sin(rad)
+            if abs(ux) >= 0.98:
+                ux, uy = (1.0 if ux > 0.0 else -1.0), 0.0
+            elif abs(uy) >= 0.98:
+                ux, uy = 0.0, (1.0 if uy > 0.0 else -1.0)
+            else:
+                continue
+            ends.append((ux, uy, hx + radius * ux, hy + radius * uy))
+        if len(ends) != 2:
+            continue
+        scored: list[tuple[float, float, float]] = []
+        for ux, uy, _ex, _ey in ends:
+            nx, ny = -uy, ux
+            total = 0.0
+            for x0, y0, x1, y1, _layer, _owner in segments:
+                elen = math.hypot(x1 - x0, y1 - y0)
+                if elen < 200.0:
+                    continue
+                if abs(((x1 - x0) / elen) * ux + ((y1 - y0) / elen) * uy) < 0.98:
+                    continue
+                off = abs((x0 - hx) * nx + (y0 - hy) * ny)
+                if off > 400.0:
+                    continue
+                along0 = (x0 - hx) * ux + (y0 - hy) * uy
+                along1 = (x1 - hx) * ux + (y1 - hy) * uy
+                if min(along0, along1) > radius + 400.0 or max(along0, along1) < -400.0:
+                    continue
+                total += elen
+            scored.append((total, ux, uy))
+        scored.sort(reverse=True)
+        if len(scored) < 2 or scored[0][0] < scored[1][0] + 800.0:
+            continue
+        ux, uy = scored[0][1], scored[0][2]
+        nx, ny = -uy, ux
+        sx, sy = hx + radius * ux, hy + radius * uy
+        painted = False
+        for x0, y0, x1, y1, layer, owner in segments:
+            if layer != BASE_LAYER or owner is None:
+                continue
+            elen = math.hypot(x1 - x0, y1 - y0)
+            if not (0.55 * radius <= elen <= 1.45 * radius):
+                continue
+            if abs(((x1 - x0) / elen) * ux + ((y1 - y0) / elen) * uy) < 0.98:
+                continue
+            off0 = (x0 - hx) * nx + (y0 - hy) * ny
+            off1 = (x1 - hx) * nx + (y1 - hy) * ny
+            if abs(off1 - off0) > 15.0 or abs(off0) > 30.0:
+                continue
+            along0 = (x0 - hx) * ux + (y0 - hy) * uy
+            along1 = (x1 - hx) * ux + (y1 - hy) * uy
+            overlap = min(max(along0, along1), radius) - max(min(along0, along1), 0.0)
+            if overlap < 0.65 * radius:
+                continue
+            if _paint_layer(owner, WALL_LAYER, WALL_COLOR):
+                added += 1
+                segments.append((x0, y0, x1, y1, WALL_LAYER, owner))
+            painted = True
+            break
+        if not painted and not _covered(hx, hy, sx, sy):
+            line = msp.add_line(
+                (hx, hy),
+                (sx, sy),
+                dxfattribs={"layer": WALL_LAYER, "color": WALL_COLOR},
+            )
+            segments.append((hx, hy, sx, sy, WALL_LAYER, line))
+            added += 1
+        # 닫힌 방향에 선이 없어도, 양끝이 벽에 닿는 빈 구간은 현을 긋는다.
+        for gux, guy, _ex, _ey in ends:
+            if _occupied(gux, guy, hx, hy, radius):
+                continue
+            strike = _wall_end(gux, guy, hx + radius * gux, hy + radius * guy)
+            if strike is None or not _near_wall(hx, hy):
+                continue
+            line = msp.add_line(
+                (hx, hy),
+                strike,
+                dxfattribs={"layer": WALL_LAYER, "color": WALL_COLOR},
+            )
+            segments.append((hx, hy, strike[0], strike[1], WALL_LAYER, line))
+            added += 1
+    return added
+
+
 def demote_swing_hinge_door_leaves(msp) -> int:
     """1/4 스윙 힌지에 붙은 문짝을 WALL에서 뺀다.
 
@@ -18307,7 +18510,9 @@ def apply_corrections(
     n_promoted += promote_shifted_corner_faces(msp)
     n_promoted += promote_short_connected_doubles(msp)
     # 앞선 승격이 스윙 힌지 문짝을 다시 올려도, 면적 경계로 남지 않게 마지막에 내린다.
+    # 닫힌 현은 그 다음에 추가해서 문짝 내리기가 지우지 않게 한다.
     n_demoted += demote_swing_hinge_door_leaves(msp)
+    n_promoted += add_swing_closed_chords(msp)
 
     n_wall = sum(1 for e in msp if e.dxf.layer == WALL_LAYER)
     n_base = sum(1 for e in msp if e.dxf.layer == BASE_LAYER)
