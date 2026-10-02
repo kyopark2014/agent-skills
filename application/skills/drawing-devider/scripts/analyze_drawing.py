@@ -164,7 +164,7 @@ def render_structure_md(drawing_id: str, raw: dict | None, cleans: dict[str, dic
         "## 리스크 / 전처리",
         "",
         "- `XA-S-{N}F 평면` 블록이 있으면 그 INSERT를 explode 한다",
-        "- 그 형식이 없으면 도곽과 층 제목으로 자른다 (`extract_2d.py --layout auto`). 이때는 추출을 중단하지 않고 파일럿 1층만 진행한다",
+        "- 그 형식이 없으면 도곽과 층 제목으로 자른다 (`extract_2d.py --layout auto`). 확인 없이 전 층을 추출하고, 기존 floor_original 은 덮어쓴다",
         "- 기하가 한 레이어(`0arch`)에 몰리면 벽·가구 레이어 분리 불가 → 블록명 필터",
         "- 좌·우 이중 클러스터 가능 → primary(LINE 다수) bbox만 사용",
         "",

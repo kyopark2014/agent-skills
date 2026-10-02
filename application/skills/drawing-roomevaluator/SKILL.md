@@ -4,7 +4,9 @@ description: >-
   drawing-llmvalidator 산출(floor_wall_validated DXF/PNG)에서 실명으로
   방을 찾고, 빨간 WALL로 둘러싸인 안쪽 면적을 계산합니다. 문 개구는 벽선으로
   잇고, 실 안으로 나온 기둥 돌출부는 항상 뺍니다. 반투명 오버레이 PNG로
-  계측 범위를 확인합니다. 실 면적, room area, 접견실 면적 요청 시 사용합니다.
+  계측 범위를 확인합니다. 실 면적, room area, 접견실 면적,
+  "하이닉스의 1F에서 회의실#1의 면적"처럼 건물·층·실명으로 묻는 요청 시 사용합니다.
+  대상 파일은 artifacts/drawing_list.json으로 찾습니다.
 ---
 
 # drawing-roomevaluator (실명 기준 벽체 안쪽 면적)
@@ -15,11 +17,21 @@ description: >-
 ## When to Use
 
 - 검증된 평면도에서 `접견실#3` 처럼 **실명으로** 면적을 구할 때
+- "하이닉스의 1F에서 회의실#1의 면적"처럼 **건물·층·실명**만 있을 때
 - 빨간 벽으로 닫힌 실의 계측 범위를 반투명으로 확인하고 싶을 때
+
+## 대상 도면 찾기
+
+건물·층 이름이 있으면 폴더를 만들지 말고 `$ARTIFACTS_DIR/drawing_list.json`에서 고른다.
+
+1. `$ARTIFACTS_DIR/drawing_list.json`이 있으면 그 파일. 없으면 `/Users/ksdyb/Documents/src/agent-skills/application/.session_storage/lge/artifacts/drawing_list.json`.
+2. 사용자가 말한 건물·프로젝트 이름을 `drawings[].source_filename`에 맞춘다. 공백·대소문자는 무시하고, 그 말이 파일명에 들어 있으면 그 도면이다. 예: `하이닉스` → `SK용인하이닉스_지원동 평면도_241014.dxf` → `folder` `sk_yongin_jiwon`. `source_filename`에 없으면 `drawing_id`, `folder`를 같은 방식으로 본다. 없거나 둘 이상이면 `source_filename`을 보여주고 고르게 한다.
+3. 그 도면의 `floors[].floor`가 요청 층과 같으면 그 항목이다. `1층`은 `1F`, `지하1층`은 `B1F`, `옥상`은 `RF`로 본다. `floor`가 없고 `name_confirmed`가 false이면 `title`에 그 층 표기가 있는 항목이 후보다. 후보가 둘 이상이면 `floor`와 `title`을 보여주고 고르게 한다. 없으면 `discovered_floors`를 알리고 없는 층 폴더는 만들지 않는다.
+4. 이 스킬의 입력은 `$ARTIFACTS_DIR/<folder>/floors/<floor>/floor_wall_validated.dxf`, 같은 폴더의 `floor_wall_validated_meta.json`, `floor_wall_validated.png`이다. 실명(`회의실#1`)은 `--room`에 그대로 넣는다. validated 파일이 없으면 그 층은 벽 검증 전이라고 알린다. `drawing_list`의 `dxf`·`png`는 `floor_original`이라 면적 입력으로 쓰지 않는다.
 
 ## Critical Rules
 
-1. **입력** — `floor_wall_validated.dxf` + 같은 폴더의 `_meta.json` + `.png`.
+1. **입력** — 위 절차로 고른 `floor_wall_validated.dxf` + 같은 폴더의 `_meta.json` + `.png`.
    벽은 레이어 `WALL`(빨강). 실명은 `TEXT`/`MTEXT`.
 2. **면적** — 라벨이 있는 쪽의 **벽 안쪽 면**까지. 같은 벽선의 문 개구(2.4 m 이하)는
    그 벽선으로 이어 실에 포함한다. 벽 두께 한가운데나 바깥면이 아니다.
@@ -38,11 +50,13 @@ description: >-
 SCRIPTS=/Users/ksdyb/Documents/src/agent-skills/application/skills/drawing-roomevaluator/scripts
 # Runtime: SCRIPTS="$WORKING_DIR/skills/drawing-roomevaluator/scripts"
 
+# drawing_list.json으로 folder·floor를 고른 뒤
+ART="${ARTIFACTS_DIR:-/Users/ksdyb/Documents/src/agent-skills/application/.session_storage/lge/artifacts}"
 python3.13 "$SCRIPTS/evaluate_room.py" \
-  --dxf "$ART/floors/5F/floor_wall_validated.dxf" \
-  --meta "$ART/floors/5F/floor_wall_validated_meta.json" \
-  --png "$ART/floors/5F/floor_wall_validated.png" \
-  --room "접견실#3"
+  --dxf "$ART/sk_yongin_jiwon/floors/5F/floor_wall_validated.dxf" \
+  --meta "$ART/sk_yongin_jiwon/floors/5F/floor_wall_validated_meta.json" \
+  --png "$ART/sk_yongin_jiwon/floors/5F/floor_wall_validated.png" \
+  --room "회의실#1"
 ```
 
 | 인자 | 의미 |
@@ -57,6 +71,8 @@ python3.13 "$SCRIPTS/evaluate_room.py" \
 ## Workflow
 
 ```
+drawing_list.json 에서 건물(source_filename) · 층(floor) 결정
+  ↓
 floor_wall_validated.dxf / .png / _meta.json
   ↓
 ① 실명 TEXT 위치

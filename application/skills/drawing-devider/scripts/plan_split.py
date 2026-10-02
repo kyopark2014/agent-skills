@@ -92,10 +92,9 @@ def main() -> int:
     pilot = args.pilot_floor or (floor_list[0] if floor_list else None)
     lines += [
         "",
-        "## 실행 게이트",
+        "## 실행",
         "",
-        f"1. **파일럿 층 `{pilot}`** 만 `split_floor.py` 실행",
-        "2. 사용자 허락 후 나머지 층 진행",
+        f"1. 확인 없이 각 층을 `split_floor.py`로 실행하고, 기존 parts 는 덮어쓴다",
         "",
         "## 타일 ID",
         "",

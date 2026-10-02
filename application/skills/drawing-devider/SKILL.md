@@ -19,14 +19,14 @@ description: >-
 
 ## Critical Rules
 
-1. **기존 폴더 게이트** — `$ARTIFACTS_DIR/<drawing_id>/`가 **이미 있으면** 분석·추출을 **시작하지 않는다**. 경로·기존 산출물 요약을 보여 주고 **계속(덮어쓰기/이어하기) / 중단**을 사용자에게 물은 뒤, 허락이 있을 때만 진행한다.
-2. **먼저 구조 파악** — “파일 실측 요약” 형태로 분석한 뒤 MD로 저장한다. 분석 없이 다층 추출만 밀어붙이지 않는다.
+1. **기존 폴더** — `$ARTIFACTS_DIR/<drawing_id>/`가 **이미 있어도 묻지 않는다**. 추출·분석을 바로 진행하고 `floor_original.*`·`structure.*`·`work_log.md`는 **덮어쓴다**. 폴더를 통째로 지우지는 않는다.
+2. **구조 파악** — 전 층 추출이 끝나면 “파일 실측 요약”을 `structure.md` / `structure.json`으로 저장한다. 층 추출을 멈추는 조건이 아니다.
 3. **층 단위만** — 기본 산출은 `floors/<F>/floor_original.dxf` (+ `.png`). `parts/`·`floor_parts_index.json`·`split_plan.*`를 **만들지 않는다**.
 4. **치수** — 층 PNG/DXF 미리보기에 전체·그리드 치수를 포함한다 (`lib_render.py`).
-5. **층별 1개씩** — `extract_2d`는 **한 번의 bash/도구 호출에 층 1개만** 실행한다. `for FLOOR in 6F 7F …` 일괄 루프, `--floor all`, 여러 층을 한 커맨드에 묶어 돌리는 것을 **금지**한다 (대용량 DXF에서 TimeoutExpired 발생). 한 층이 끝나면 결과를 보고한 뒤 다음 층으로 넘어간다.
-6. **층 게이트** — 다층이면 **파일럿 1개 층만** 추출한 뒤 사용자 허락을 받고, 나머지 층도 **층당 1회씩** 진행한다.
-7. **산출물 경로** — **사용자 artifacts** (`$ARTIFACTS_DIR/<drawing_id>/`) 아래에만 저장한다. (아래 [Artifacts](#artifacts-layout))
-8. **미리보기** — 층 시각 확인은 `floors/<F>/floor_original.png`만 사용. `floor_overview.*` / `floor_*_2d.png` / `floor_*_geom.json`을 **만들지 않는다**.
+5. **층별 1개씩, 확인 없이** — `extract_2d`는 **한 번의 bash/도구 호출에 층 1개만** 실행한다. `for FLOOR in 6F 7F …` 일괄 루프, `--floor all`, 여러 층을 한 커맨드에 묶어 돌리는 것을 **금지**한다 (대용량 DXF에서 TimeoutExpired 발생). 한 층이 끝나면 **사용자에게 묻지 말고** 바로 다음 층을 같은 방식으로 실행한다.
+6. **전 층 연속** — 다층이어도 파일럿 확인을 받지 않는다. 발견된 층을 순서대로 끝까지 추출한 뒤 구조 분석으로 넘어간다.
+7. **산출물 경로** — 층 산출은 **사용자 artifacts** (`$ARTIFACTS_DIR/<drawing_id>/`) 아래에만 저장한다. 예외는 프로젝트 도면 목록 `$ARTIFACTS_DIR/drawing_list.json` 하나다. 추출할 때마다 이 파일을 갱신하고, 다른 `drawing_id` 항목은 지우지 않는다. (아래 [Artifacts](#artifacts-layout))
+8. **미리보기** — 층 시각 확인은 `floors/<F>/floor_original.png`만 사용. `floor_structure.*` / `floor_overview.*` / `floor_*_2d.png` / `floor_*_geom.json`을 **만들지 않는다**.
 9. **스크립트 사용** — 추출·분석은 스킬 `scripts/` 로만 수행한다. ad-hoc 일회성 코드로 대용량 DXF를 우회하지 않는다.
 10. **작업 로그** — 전체 작업 내용·파일 목록을 하나의 Markdown으로 남기고 사용자에게 전달한다.
 11. 응답은 **한국어**. 경로·JSON 키는 영문/숫자 유지.
@@ -89,7 +89,8 @@ ART="$ARTIFACTS_DIR/sk_yongin_jiwon"
 
 | 스크립트 | 용도 |
 | --- | --- |
-| `$SCRIPTS/extract_2d.py` | 원본 → `floors/<F>/floor_original.dxf` (+ `.png` 자동) |
+| `$SCRIPTS/extract_2d.py` | 원본 → `floors/<F>/floor_original.dxf` (+ `.png` 자동). 건축 레이어가 있으면 벽·실명·문만 |
+| `$SCRIPTS/lib_structure.py` | 그 필터. 출력 이름은 `floor_original.png` (`floor_structure.*` 금지) |
 | `$SCRIPTS/analyze_drawing.py` | 구조 실측 → `structure.md` / `structure.json` |
 | `$SCRIPTS/lib_render.py` | 치수·고해상도 렌더 라이브러리 |
 | `$SCRIPTS/lib_split.py` | 공통 유틸 (primary 클러스터·bbox 등) |
@@ -113,51 +114,25 @@ python3 "$SCRIPTS/analyze_drawing.py" \
 ```
 DXF 입력 (artifacts/ 또는 --dxf)
   ↓
-⓪ drawing_id 결정 → $ARTIFACTS_DIR/<drawing_id>/ 존재 여부 확인
-  ↓ (이미 있으면 사용자에게 계속/중단 확인 — 허락 전 작업 금지)
+⓪ drawing_id 결정
+  ↓ (폴더가 이미 있어도 묻지 않고 덮어쓰기)
   ↓
-① extract_2d.py --floor <FIRST>
+① extract_2d.py --floor <각 층>   ← 층당 bash 1회, 확인 없이 전 층
      → floors/<F>/floor_original.dxf (+ floor_original.png)
      ※ floor_*_clean.dxf / floor_*_2d.png / parts/ 생성 금지
      ※ PNG는 기본 생성 (`--no-png`로 생략)
+     ※ 기존 floor_original.* 가 있으면 덮어쓴다
   ↓
-② 사용자 허락 요청 (나머지 층 진행 여부)
+② analyze_drawing.py  → structure.md / structure.json
   ↓
-③ 허락 시 다음 층만 extract  ← 층당 1회, 일괄 루프 금지
-  ↓ (층마다 완료 보고 후 다음 층)
-④ analyze_drawing.py  → structure.md / structure.json
-  ↓
-⑤ work_log.md 작성·전달
+③ work_log.md 작성·전달
 ```
 
-### ⓪ 기존 산출 폴더 확인 (필수)
+### ⓪ 기존 산출 폴더
 
-`drawing_id`를 정한 직후, **어떤 스크립트도 실행하기 전에** 대상 폴더를 확인한다.
+`drawing_id` 폴더가 이미 있어도 **묻지 않고** ①부터 진행한다. `floor_original.dxf` / `.png` / `_meta.json`과 `structure.md` / `structure.json` / `work_log.md`는 덮어쓴다. 폴더 전체를 삭제하지 않는다.
 
-```bash
-ART="$ARTIFACTS_DIR/<drawing_id>"
-if [ -d "$ART" ]; then
-  echo "EXISTING: $ART"
-  ls -la "$ART" 2>/dev/null | head -40
-fi
-```
-
-이미 존재하면 **여기서 멈추고** 사용자에게 한국어로 묻는다.
-
-| 안내할 내용 | 예시 |
-|-------------|------|
-| 경로 | `$ARTIFACTS_DIR/sk_yongin_jiwon/` |
-| 기존 산출 | `structure.md`, `floors/5F/`, `work_log.md` 등 요약 |
-| 선택지 | **계속** (덮어쓰기·이어하기) / **중단** / (선택) **다른 drawing_id** |
-
-규칙:
-
-- 사용자가 **계속**하기 전까지 `extract_2d` / `analyze`를 **실행하지 않는다**.
-- **중단**이면 작업을 끝낸다. 폴더를 임의로 삭제하지 않는다.
-- **계속**이면 기존 파일을 덮어쓸 수 있음을 한 줄로 알리고 워크플로를 이어간다.
-- 폴더가 없으면 곧바로 ①부터 진행한다.
-
-### ① 층 추출 (파일럿 → 승인 → 나머지)
+### ① 층 추출 (확인 없이 전 층)
 
 ```bash
 # 위 Script Location bootstrap 후
@@ -168,13 +143,14 @@ python3 "$SCRIPTS/extract_2d.py" \
   --drawing-id <drawing_id>
 ```
 
-성공 시 `floors/12F/floor_original.dxf` / `.png` / `_meta.json`이 생긴다.  
-**여기서 멈추고** 사용자에게 PNG·경로·파일 크기를 보여 준 뒤 나머지 층 진행 허락을 받는다.
+성공 시 `floors/12F/floor_original.dxf` / `.png` / `_meta.json`이 생긴다. 같은 파일이 있으면 덮어쓴다.  
+도곽 안에 건축 레이어(`ARCH`, `*_BG`·`*_CEN` 제외)가 있으면 그 선·실명과 문 스윙만 남긴다. 가구·카세트 배관·등고선은 넣지 않는다. 이 결과도 파일명은 `floor_original.png` 이다.  
+다층이면 **멈추지 말고** 다음 층을 바로 추출한다. 사용자 허락을 받지 않는다.
 
 ### 층 구분 (블록 이름 → 도곽)
 
 1. **기본:** modelspace INSERT 이름 `XA-S-{N}F 평면` (코어·기둥 포함).
-2. **그 형식이 없으면** 추출을 중단하거나 스킬 수정을 묻지 않는다. `lib_sheet.py`가 **도곽(축정렬 테두리)** 과 **층 제목**으로 층을 나눈다. `--layout auto`가 이 순서를 따른다. 제목은 `1층 평면도`뿐 아니라 `1층 냉난방 평면도`처럼 층과 평면도 사이에 용도가 있는 문자열도 인정한다. 같은 제목이 떨어진 도곽에 반복되면 왼쪽부터 `1F`, `1F_2` 로 구분한다.
+2. **그 형식이 없으면** 추출을 중단하거나 스킬 수정을 묻지 않는다. `lib_sheet.py`가 **도곽(축정렬 테두리)** 과 **층 제목**으로 층을 나눈다. `--layout auto`가 이 순서를 따른다. 제목은 `1층 평면도`뿐 아니라 `1층 냉난방 평면도`처럼 층과 평면도 사이에 용도가 있는 문자열도 인정한다. 같은 제목이 떨어진 도곽에 반복되면 왼쪽부터 `1F`, `1F_2` 로 구분한다. 한 도곽 안에 층 표기가 여럿이고 영역으로 나누지 못하면 그 도곽을 빼지 않는다. 표기 중 하나를 층 이름으로 고르지 않고, 왼쪽·아래부터 `sheet_01`, `sheet_02` 로 둔 뒤 층 이름은 미확정이라고 경고한다. 이미 층이 확정된 도곽과 겹치거나 더 큰 도곽 안에 들어간 테두리는 넣지 않는다. `sheet_XX` 도 확인 없이 추출한다.
 3. 도곽 방식이면 먼저 목록만 확인한다.
 
 ```bash
@@ -184,7 +160,7 @@ python3 "$SCRIPTS/extract_2d.py" \
   --list-floors
 ```
 
-4. 목록에 층이 있으면 **파일럿 1개 층만** 추출하고 PNG를 보여 준 뒤 나머지 층 허락을 받는다. 원본 DXF는 수정하지 않는다.
+4. 목록에 층이 있으면 **확인 없이 전 층**을 추출한다. 원본 DXF는 수정하지 않는다. 기존 `floor_original.*` 는 덮어쓴다.
 
 ```bash
 python3 "$SCRIPTS/extract_2d.py" \
@@ -194,7 +170,7 @@ python3 "$SCRIPTS/extract_2d.py" \
   --drawing-id <drawing_id>
 ```
 
-허락 후 나머지 층도 **한 층 = bash 1회**로만 진행한다.
+나머지 층도 **한 층 = bash 1회**로, 묻지 않고 이어서 진행한다.
 
 **금지 예** (대용량 DXF에서 `TimeoutExpired` 유발):
 
@@ -254,23 +230,44 @@ python3 "$SCRIPTS/split_floor.py" --artifacts "$ART" --floor 12F --source origin
 bash cwd가 이미 `artifacts/`이므로 상대경로 `<drawing_id>/…` 도 동일하다.
 
 ```text
-$ARTIFACTS_DIR/<drawing_id>/
-├── structure.md / .json
-├── work_log.md
-└── floors/<FLOOR>/
-    ├── floor_original.dxf / .png / _meta.json   # 층 스냅샷 · 미리보기 · 후속 스킬 입력
-    ├── floor_wall_original.dxf / .png           # (walldetector) 층 전체 벽
-    └── floor_meta.json                          # (extract 시)
+$ARTIFACTS_DIR/
+├── drawing_list.json                    # 프로젝트 도면 목록. 분리할 때마다 해당 도면만 갱신
+└── <drawing_id>/
+    ├── extract_summary.json             # 이 도면의 추출 요약. artifacts 루트에 두지 않는다
+    ├── structure.md / .json
+    ├── work_log.md
+    └── floors/<FLOOR>/
+        ├── floor_original.dxf / .png / _meta.json   # 층 스냅샷 · 미리보기 · 후속 스킬 입력
+        ├── floor_wall_original.dxf / .png           # (walldetector) 층 전체 벽
+        └── floor_meta.json                          # (extract 시)
 ```
 
 | 산출 | 용도 |
 |------|------|
-| `floors/<F>/floor_original.dxf` (+ `.png`) | **원본에 가까운 층** (조경·가구·실명 라벨) → **공식 층 단위 입력** · **미리보기** |
+| `drawing_list.json` | 도면 메뉴용 프로젝트 목록. 각 도면에 **원본 DXF 파일명** `source_filename`(및 `source_path`)을 `floors`보다 **앞**에 반드시 기록한다. 그 외 `drawing_id`, 폴더명, 생성·수정 시각, 발견 층, 층별 상태(`pending`/`ready`/`error`)와 DXF·PNG 상대경로. 삭제·재추출의 기준 |
+| `floors/<F>/floor_original.dxf` (+ `.png`) | **구조용 층** (벽·실명·문 스윙) → **공식 층 단위 입력** · **미리보기**. 건축 레이어가 있으면 가구·카세트 배관·등고선·중심선은 넣지 않는다 |
 | `parts/` · `floor_parts_index.json` · `split_plan.*` | **기본 미생성** (레거시·선택) |
+| `floor_structure.*` | **생성 금지** — 같은 내용은 `floor_original.png` |
 | `floor_overview.*` | **제거됨** — 생성·사용 금지 |
 | `floor_*_clean.dxf` | **제거됨** — 생성·사용 금지 |
 
 `floor_*_2d.png` / `floor_*_geom.json`도 만들지 않는다.
+
+`drawing_list.json` 도면 항목은 `extract_2d.py`가 아래 순서로 쓴다. `floors`가 길어도 원본 DXF 파일명 `source_filename`은 항목 앞에 둔다. 수동으로 고칠 때도 이 필드를 빼지 않는다.
+
+```json
+{
+  "drawing_id": "<drawing_id>",
+  "folder": "<drawing_id>",
+  "source_filename": "<원본 DXF 파일명>.dxf",
+  "source_path": "<원본 DXF 절대경로>",
+  "source_size_bytes": 0,
+  "created_at": "",
+  "updated_at": "",
+  "status": "ready",
+  "floors": []
+}
+```
 
 ---
 
@@ -316,9 +313,8 @@ $ARTIFACTS_DIR/<drawing_id>/
 - [파일 목록](#파일-목록)
 
 ## 요약
-- 상태: 1층 완료 / 전체 완료
-- 파일럿 층: 12F
-- 단위: 층당 floor_original (parts 없음)
+- 상태: 전체 완료
+- 단위: 층당 floor_original (parts 없음, 기존 파일 덮어쓰기)
 
 ## 구조 분석
 - structure.md 링크
@@ -338,13 +334,14 @@ $ARTIFACTS_DIR/<drawing_id>/
 
 작업 시작·추출 전에 확인:
 
-- [ ] `$ARTIFACTS_DIR/<drawing_id>/`가 이미 있으면 **계속/중단**을 사용자에게 물었는가 (허락 전 스크립트 미실행)
+- [ ] `$ARTIFACTS_DIR/<drawing_id>/`가 이미 있어도 묻지 않고 덮어썼는가
 - [ ] 산출이 `floors/<F>/floor_original.*` 층 단위인가 (`parts/` 기본 생성 안 함)
 - [ ] 산출 경로가 `$ARTIFACTS_DIR/<id>/` 인가
-- [ ] 첫 층만 돌렸고 사용자 허락을 기다리는가 (다층인 경우)
+- [ ] 다층이면 확인 없이 전 층을 이어서 추출했는가
 - [ ] `XA-S-{N}F` 블록이 없으면 도곽·층 제목(`--list-floors`)으로 넘어갔는가 (중단하고 스킬 수정을 묻지 않음)
-- [ ] extract를 **층당 bash 1회**로만 돌리는가 (`for` 일괄·`--floor all` 없음)
-- [ ] 미리보기로 `floor_*_2d.png` / `floor_overview.*`를 쓰지 않는가 (`floor_original.png`만)
+- [ ] extract를 **층당 bash 1회**로만 돌리는가 (`for` 일괄·`--floor all` 없음, 층 사이 사용자 확인 없음)
+- [ ] 미리보기로 `floor_structure.*` / `floor_*_2d.png` / `floor_overview.*`를 쓰지 않는가 (`floor_original.png`만)
+- [ ] `drawing_list.json` 각 도면에 원본 DXF `source_filename`을 `floors`보다 앞에 넣었는가
 
 ---
 
@@ -352,14 +349,16 @@ $ARTIFACTS_DIR/<drawing_id>/
 
 | 증상 | 대응 |
 |------|------|
-| 동일 `drawing_id` 폴더 이미 존재 | 사용자에게 계속/중단 확인 — 허락 전 덮어쓰기 금지 |
-| `XA-S-{N}F 평면` 블록 없음 | 중단·스킬 보완 질문 금지. `--list-floors`로 도곽·층 제목을 확인한 뒤 **파일럿 1층만** 추출하고 확인받는다 |
+| 동일 `drawing_id` 폴더 이미 존재 | 묻지 않고 덮어쓴다. 폴더는 삭제하지 않는다 |
+| `XA-S-{N}F 평면` 블록 없음 | 중단·스킬 보완 질문 금지. `--list-floors`로 도곽·층 제목을 확인한 뒤 **전 층**을 확인 없이 추출한다 |
+| 목록에 `1F`가 없고 `sheet_XX`가 있음 | `--floor 1F`로 재시도하지 않는다. `sheet_01`부터 발견된 이름 그대로 추출한다. 사용자에게 "영역을 확정하지 못했다"고 쓰지 않는다. 미확정은 층 이름만 해당하고 도곽은 이미 있다 |
+| `요청한 1F 이름의 도곽은 없습니다` | 실패로 끝내지 않는다. 출력된 발견 목록의 각 이름을 `--floor`에 넣어 이어서 추출한다 |
 | 도곽·층 제목도 없음 | 추출하지 않는다. 원본은 그대로 두고, 찾은 테두리·경고를 보고한다 |
 | `TimeoutExpired` (extract) | 여러 층 일괄 루프·`--floor all` 금지 → **층당 bash 1회**로 재시도 |
 | PNG에 도면이 좌·우 둘 | primary 클러스터(LINE 많은 쪽)만 bbox — `extract_2d` 공통 |
 | 치수 없음 | `--with-dims`, PNG 오버레이 + DXF `DIMS` 레이어 |
 | 원본 277MB 로드 실패 | 층별 `floor_original.dxf`를 먼저 만든 뒤 후속 스킬 |
-| `floor_*_2d.png` / `floor_overview.*` | 생성 금지 산출물 — `floors/<F>/floor_original.png`만 확인 |
+| `floor_structure.*` / `floor_*_2d.png` / `floor_overview.*` | 생성 금지 산출물 — `floors/<F>/floor_original.png`만 확인 |
 | `/skills/...` 없음 · `WORKING_DIR=` 빈 값 | **env 없이** SKILL.md 옆 `scripts/` 절대경로를 `SCRIPTS`로 지정 (빈 `$WORKING_DIR` 연결 금지) |
 | `/sk_yongin_jiwon` Read-only | `ARTIFACTS_DIR` 미설정으로 루트에 mkdir 시도 — artifacts 절대경로 `export` 후 재시도 |
 

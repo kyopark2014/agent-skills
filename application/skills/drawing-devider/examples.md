@@ -1,17 +1,10 @@
 # drawing-devider 사용 예
 
-## 0) 기존 폴더 확인 (항상 먼저)
+## 0) 기존 폴더
 
-```bash
-ART="$ARTIFACTS_DIR/sk_yongin_jiwon"
-if [ -d "$ART" ]; then
-  echo "EXISTING: $ART — 사용자에게 계속/중단 확인 후 진행"
-  ls "$ART"
-  # STOP: 허락 전 extract/analyze 금지
-fi
-```
+폴더가 이미 있어도 묻지 않고 추출한다. `floor_original.*` 는 덮어쓴다.
 
-## 1) 파일럿 층 추출 → 사용자 승인 대기
+## 1) 전 층 추출 (확인 없음)
 
 ```bash
 SCRIPTS=/Users/ksdyb/Documents/src/agent-skills/application/skills/drawing-devider/scripts
@@ -25,18 +18,18 @@ python3 "$SCRIPTS/extract_2d.py" \
   --drawing-id sk_yongin_jiwon
 
 # 미리보기: $ART/floors/12F/floor_original.png
+# 다음 층은 묻지 않고 바로 별도 bash로 실행
 ```
 
-승인 후 다른 층도 **한 층씩** (일괄 for-루프 금지):
+다른 층도 **한 층씩, 확인 없이** (일괄 for-루프 금지):
 
 ```bash
-# 예: 6F만 — bash 1회
 python3 "$SCRIPTS/extract_2d.py" \
   --dxf "$ARTIFACTS_DIR/input.dxf" \
   --floor 6F \
   --out "$ARTIFACTS_DIR" \
   --drawing-id sk_yongin_jiwon
-# 보고 후 7F는 별도 bash로 동일 패턴
+# 이어서 7F도 같은 패턴. 사용자 승인을 기다리지 않는다
 ```
 
 ## 1b) XA-S 블록이 없는 도면 (도곽·층 제목)
@@ -47,7 +40,8 @@ python3 "$SCRIPTS/extract_2d.py" \
   --drawing-id <drawing_id> \
   --list-floors
 
-# 목록의 첫 층만. 예: 1F
+# 목록의 층을 확인 없이 한 층씩 끝까지. 예: 1F 다음도 바로
+# 층 이름을 확정하지 못한 도곽은 sheet_01, sheet_02 로 목록에 있다. 이것도 한 장씩 추출한다.
 python3 "$SCRIPTS/extract_2d.py" \
   --dxf "$ARTIFACTS_DIR/input.dxf" \
   --floor 1F \
@@ -55,7 +49,7 @@ python3 "$SCRIPTS/extract_2d.py" \
   --drawing-id <drawing_id>
 ```
 
-여기서 멈추고 `floors/1F/floor_original.png`를 확인받는다. 나머지 층은 승인 후 한 층씩.
+`floors/<F>/floor_original.png` 가 이미 있으면 덮어쓴다. 나머지 층도 승인 없이 한 층씩 이어서 실행한다.
 
 ## 2) 구조 분석
 
@@ -72,7 +66,7 @@ python3 "$SCRIPTS/analyze_drawing.py" \
 에이전트가 `structure.md` / 각 `floors/<F>/floor_original.*`를 모아
 `$ART/work_log.md`에 작업 내용·파일 표를 작성해 사용자에게 전달한다.
 
-층 미리보기는 `floors/<F>/floor_original.png`만 첨부한다 (`floor_overview.*` / `floor_*_2d.png` / `parts/` 없음).
+층 미리보기는 `floors/<F>/floor_original.png`만 첨부한다 (`floor_structure.*` / `floor_overview.*` / `floor_*_2d.png` / `parts/` 없음).
 
 ## (선택) 타일 분할 — 사용자가 명시한 경우만
 

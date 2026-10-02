@@ -20,8 +20,14 @@ MAX_STORED_LINES = 20_000
 
 
 def normalize_floor_token(floor: str) -> str:
-    """'5', '5F', 'b1', '1F_2' → '5F' / 'B1F' / '1F_2' / 'RF' / 'PH'."""
+    """'5', '5F', 'b1', '1F_2', 'sheet_3' → '5F' / 'B1F' / '1F_2' / 'RF' / 'PH' / 'sheet_03'."""
     s = floor.strip().upper().replace(" ", "")
+    m = re.fullmatch(r"SHEET_(\d+)", s)
+    if m:
+        number = int(m.group(1))
+        if number < 1:
+            raise ValueError(f"층 형식 오류: {floor!r} (예: 5F, B1F, 1F_2, RF, sheet_01)")
+        return f"sheet_{number:02d}"
     m = re.fullmatch(r"(\d+)F(?:_(\d+))?", s)
     if m:
         suffix = f"_{int(m.group(2))}" if m.group(2) else ""
@@ -37,7 +43,7 @@ def normalize_floor_token(floor: str) -> str:
         return "RF"
     if s in {"PH", "PENTHOUSE"}:
         return "PH"
-    raise ValueError(f"층 형식 오류: {floor!r} (예: 5F, B1F, 1F_2, RF)")
+    raise ValueError(f"층 형식 오류: {floor!r} (예: 5F, B1F, 1F_2, RF, sheet_01)")
 
 
 def is_floor_name(name: str) -> bool:
@@ -59,6 +65,9 @@ def floor_sort_key(floor: str) -> tuple:
         return (3, 0, 0, floor)
     if floor == "PH":
         return (4, 0, 0, floor)
+    matched = re.fullmatch(r"sheet_(\d+)", floor)
+    if matched:
+        return (5, int(matched.group(1)), 0, floor)
     return (2, 0, 0, floor)
 
 
@@ -443,6 +452,7 @@ def _split_multi(rect, hits: list[_TextHit]):
 
 def _frames_from(rects, texts: list[_TextHit], warnings: list[str]) -> list[SheetFrame]:
     frames: list[SheetFrame] = []
+    pending: list[tuple[tuple[float, float, float, float], list[str]]] = []
     for rect in rects:
         hits = [t for t in texts if _inside(rect, t.x, t.y)]
         if not hits:
@@ -458,17 +468,52 @@ def _frames_from(rects, texts: list[_TextHit], warnings: list[str]) -> list[Shee
         if rivals:
             split = _split_multi(rect, hits)
             if not split:
-                warnings.append(
-                    f"도곽 ({rect[0]:.0f},{rect[1]:.0f})-({rect[2]:.0f},{rect[3]:.0f}) 안에 "
-                    f"층 제목이 여럿입니다: {sorted({h.floor for h in ranked})}"
-                )
+                pending.append((rect, sorted({h.floor for h in ranked})))
                 continue
             for hit, sub in split:
                 frames.append(SheetFrame(hit.floor, hit.text, sub, hit.height))
             continue
         frames.append(SheetFrame(best.floor, best.text, rect, best.height))
 
-    return _assign_sheet_ids(frames, warnings)
+    named = _assign_sheet_ids(frames, warnings)
+    return named + _assign_unresolved_ids(pending, named, warnings)
+
+
+def _assign_unresolved_ids(
+    pending: list[tuple[tuple[float, float, float, float], list[str]]],
+    named: list[SheetFrame],
+    warnings: list[str],
+) -> list[SheetFrame]:
+    """층 표기가 한 도곽에 뭉쳐 나누지 못한 테두리를 위치 순번으로 남긴다.
+
+    이미 층이 확정된 도곽과 겹치거나, 더 큰 도곽 안에 들어간 테두리는 뺀다.
+    남은 도곽은 왼쪽·아래부터 sheet_01, sheet_02 이다. 표기 중 하나를 층 이름으로 쓰지 않는다.
+    """
+    candidates: list[tuple[tuple[float, float, float, float], list[str]]] = []
+    for rect, labels in pending:
+        if any(_sheets_overlap(rect, frame.bbox) for frame in named):
+            continue
+        candidates.append((rect, labels))
+    candidates.sort(key=lambda item: _area(item[0]), reverse=True)
+    selected: list[tuple[tuple[float, float, float, float], list[str]]] = []
+    for rect, labels in candidates:
+        if any(_sheets_overlap(rect, prev) for prev, _labels in selected):
+            continue
+        selected.append((rect, labels))
+    selected.sort(key=lambda item: (item[0][0], item[0][1]))
+
+    out: list[SheetFrame] = []
+    for index, (rect, labels) in enumerate(selected, start=1):
+        token = f"sheet_{index:02d}"
+        title = "미확정: " + ", ".join(labels)
+        out.append(SheetFrame(token, title, rect, 0.0))
+    if out:
+        names = ", ".join(frame.floor for frame in out)
+        warnings.append(
+            f"층 이름을 확정하지 못한 도곽 {len(out)}곳입니다. "
+            f"왼쪽·아래부터 {names} 입니다."
+        )
+    return out
 
 
 def _sheets_overlap(a: tuple[float, float, float, float], b: tuple[float, float, float, float]) -> bool:

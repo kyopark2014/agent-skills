@@ -3,8 +3,9 @@
 지원동 DXF → 층별 floor_original.dxf (+ .png) 전처리.
 
 원본은 XREF/블록 중심(277MB)이라 modelspace 순회만으로는 도면이 거의 없다.
-해당 층 INSERT만 골라 explode한 뒤 `floors/<F>/floor_original.dxf`를 만든다
-(조경·가구 포함, plan/original 좌표계에 맞춤).
+해당 층 INSERT만 골라 explode한 뒤 `floors/<F>/floor_original.dxf`를 만든다.
+도곽 안에 건축 레이어가 있으면 벽·실명·문 스윙만 남긴다
+(가구·카세트 배관·등고선은 제외). 미리보기 이름은 floor_original.png 만 쓴다.
 XA-S-{N}F 평면 블록이 없으면 도곽(축정렬 테두리)과 층 제목으로 영역을 자른다.
 기본으로 같은 경로에 `floor_original.png` / `_meta.json`도 렌더한다 (`--no-png`로 생략).
 
@@ -24,6 +25,7 @@ import os
 import re
 import sys
 from collections import Counter
+from datetime import datetime
 from pathlib import Path
 
 import ezdxf
@@ -39,6 +41,7 @@ if str(SCRIPTS_DIR) not in sys.path:
 from lib_render import render_floor_original_preview  # noqa: E402
 from lib_sheet import discover_layout, normalize_floor_token  # noqa: E402
 from lib_split import find_primary_floor_bbox, find_primary_line_bbox  # noqa: E402
+from lib_structure import collect_structural_sheet  # noqa: E402
 
 
 def resolve_artifacts_dir() -> Path:
@@ -456,6 +459,227 @@ def collect_modelspace_labels(
     return out
 
 
+def _now_iso() -> str:
+    return datetime.now().astimezone().isoformat(timespec="seconds")
+
+
+def _path_under(path: str | None, root: Path) -> str | None:
+    if not path:
+        return None
+    candidate = Path(path)
+    try:
+        return candidate.resolve().relative_to(root.resolve()).as_posix()
+    except (OSError, ValueError):
+        return candidate.as_posix()
+
+
+def _floor_name_confirmed(floor: str, title: str | None) -> bool:
+    if floor.startswith("sheet_"):
+        return False
+    if title and str(title).startswith("미확정"):
+        return False
+    return True
+
+
+def drawing_list_path(out_dir: Path) -> Path:
+    """프로젝트 도면 목록. artifacts 루트 하나이며 도면 폴더 안이 아니다."""
+    return out_dir / "drawing_list.json"
+
+
+# floors 배열이 길어 source_filename이 뒤로 밀리지 않게, 원본 DXF 이름을 앞에 둔다.
+_DRAWING_KEY_ORDER = (
+    "drawing_id",
+    "folder",
+    "source_filename",
+    "source_path",
+    "source_size_bytes",
+    "created_at",
+    "updated_at",
+    "status",
+    "layout_method",
+    "discovered_floors",
+    "layout_warnings",
+    "floors",
+)
+
+
+def _ordered_drawing(entry: dict) -> dict:
+    ordered = {key: entry[key] for key in _DRAWING_KEY_ORDER if key in entry}
+    for key, value in entry.items():
+        if key not in ordered:
+            ordered[key] = value
+    return ordered
+
+
+def _load_drawing_list(path: Path) -> dict:
+    if not path.is_file():
+        return {"drawings": []}
+    try:
+        loaded = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {"drawings": []}
+    if not isinstance(loaded, dict) or not isinstance(loaded.get("drawings"), list):
+        return {"drawings": []}
+    loaded["drawings"] = [item for item in loaded["drawings"] if isinstance(item, dict)]
+    return loaded
+
+
+def upsert_drawing_list(
+    out_dir: Path,
+    drawing_id: str,
+    dxf_path: Path,
+    layout,
+    summary: list[dict],
+) -> Path:
+    """도면 메뉴용 목록을 갱신한다. 같은 drawing_id만 바꾸고 다른 도면은 유지한다."""
+    path = drawing_list_path(out_dir)
+    catalog = _load_drawing_list(path)
+    now = _now_iso()
+    drawings: list[dict] = catalog["drawings"]
+    entry = next((item for item in drawings if item.get("drawing_id") == drawing_id), None)
+    if entry is None:
+        entry = {
+            "drawing_id": drawing_id,
+            "folder": drawing_id,
+            "created_at": now,
+            "floors": [],
+        }
+        drawings.append(entry)
+
+    entry["folder"] = drawing_id
+    entry["source_filename"] = dxf_path.name
+    try:
+        resolved_source = dxf_path.resolve()
+        entry["source_path"] = str(resolved_source)
+        entry["source_size_bytes"] = resolved_source.stat().st_size
+    except OSError:
+        entry["source_path"] = str(dxf_path)
+        entry["source_size_bytes"] = entry.get("source_size_bytes")
+    entry["updated_at"] = now
+    entry["layout_method"] = getattr(layout, "method", None)
+    discovered = list(getattr(layout, "floors", []) or [])
+    entry["discovered_floors"] = discovered
+    entry["layout_warnings"] = list(getattr(layout, "warnings", []) or [])
+
+    titles = {sheet.floor: sheet.title for sheet in getattr(layout, "sheets", []) or []}
+    by_floor: dict[str, dict] = {}
+    order: list[str] = []
+    for item in entry.get("floors") or []:
+        if isinstance(item, dict) and item.get("floor") and item["floor"] not in by_floor:
+            by_floor[item["floor"]] = item
+            order.append(item["floor"])
+
+    for floor in discovered:
+        title = titles.get(floor)
+        if floor not in by_floor:
+            by_floor[floor] = {
+                "floor": floor,
+                "title": title,
+                "name_confirmed": _floor_name_confirmed(floor, title),
+                "status": "pending",
+                "extracted_at": None,
+                "variant": None,
+                "dxf": None,
+                "png": None,
+                "entity_count": None,
+                "preview_size_m": None,
+                "error": None,
+            }
+            order.append(floor)
+            continue
+        record = by_floor[floor]
+        if title:
+            record["title"] = title
+        record["name_confirmed"] = _floor_name_confirmed(floor, record.get("title"))
+        if record.get("status") not in {"ready", "error"}:
+            record["status"] = "pending"
+
+    for item in summary:
+        floor = item.get("floor")
+        if not floor:
+            continue
+        if floor not in by_floor:
+            order.append(floor)
+            by_floor[floor] = {"floor": floor}
+        record = by_floor[floor]
+        title = item.get("title") or record.get("title")
+        record["floor"] = floor
+        record["title"] = title
+        record["name_confirmed"] = _floor_name_confirmed(floor, title)
+        record["variant"] = item.get("variant")
+        record["extracted_at"] = now
+        if item.get("error"):
+            record["status"] = "error"
+            record["error"] = item["error"]
+            continue
+        counts = item.get("entity_counts") or {}
+        record["status"] = "ready"
+        record["error"] = None
+        record["entity_count"] = sum(counts.values()) if isinstance(counts, dict) else None
+        files = item.get("files") or {}
+        record["dxf"] = _path_under(files.get("dxf"), out_dir)
+        record["png"] = _path_under(files.get("png"), out_dir)
+        preview = item.get("preview") or {}
+        record["preview_size_m"] = preview.get("size_m")
+
+    entry["floors"] = [by_floor[floor] for floor in order]
+    discovered_set = set(discovered)
+    ready = [
+        item for item in entry["floors"]
+        if item.get("status") == "ready" and item.get("floor") in discovered_set
+    ]
+    errors = [
+        item for item in entry["floors"]
+        if item.get("status") == "error" and item.get("floor") in discovered_set
+    ]
+    if discovered and len(ready) == len(discovered) and not errors:
+        entry["status"] = "ready"
+    elif ready:
+        entry["status"] = "partial"
+    elif errors:
+        entry["status"] = "error"
+    else:
+        entry["status"] = "pending"
+
+    entry = _ordered_drawing(entry)
+    for index, item in enumerate(drawings):
+        if item.get("drawing_id") == drawing_id:
+            drawings[index] = entry
+            break
+
+    catalog["updated_at"] = now
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(".json.tmp")
+    temporary.write_text(json.dumps(catalog, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    temporary.replace(path)
+    return path
+
+
+def resolve_summary_path(out_dir: Path, drawing_id: str) -> Path:
+    """추출 요약은 도면 폴더에 둔다. artifacts 루트에 두면 다른 DXF 실행이 덮어쓴다."""
+    return out_dir / drawing_id / "extract_summary.json"
+
+
+def merge_extract_summary(path: Path, summary: list[dict]) -> list[dict]:
+    """같은 도면의 이전 층 요약을 유지하고, 이번 층은 교체한다."""
+    existing: list[dict] = []
+    if path.is_file():
+        try:
+            loaded = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            loaded = []
+        if isinstance(loaded, list):
+            existing = [item for item in loaded if isinstance(item, dict)]
+    merged: dict[tuple, dict] = {}
+    order: list[tuple] = []
+    for item in existing + summary:
+        key = (item.get("floor"), item.get("variant"))
+        if key not in merged:
+            order.append(key)
+        merged[key] = item
+    return [merged[key] for key in order]
+
+
 def resolve_original_path(
     out_dir: Path,
     floor: str,
@@ -697,7 +921,10 @@ def extract_sheet_floor(
     include_text: bool = True,
     origin_shift_mode: str = "none",
 ) -> dict:
-    """도곽 bbox 안의 modelspace 기하와, 그 안에 놓인 INSERT를 층으로 저장."""
+    """도곽 bbox를 층으로 저장. 결과는 floor_original.dxf / floor_original.png.
+
+    건축 레이어가 있으면 벽·실명·문만 남긴다. floor_structure.* 는 쓰지 않는다.
+    """
     if variant not in {"clean", "original"}:
         raise ValueError(f"variant 오류: {variant!r}")
 
@@ -709,6 +936,17 @@ def extract_sheet_floor(
 
     entities: list[DXFEntity] = []
     used_inserts: set[int] = set()
+    structural_mode = False
+    if variant == "original":
+        packed = collect_structural_sheet(doc, clip)
+        if packed is not None:
+            entities, info = packed
+            structural_mode = True
+            print(
+                f"  structural floor_original: direct={info['n_direct']} "
+                f"doors={info['n_door_entities']} layers={info['layers']}"
+            )
+            print(f"  door blocks: {info['door_blocks']}")
 
     def absorb_insert(ins: Insert) -> None:
         if id(ins) in used_inserts:
@@ -722,21 +960,22 @@ def extract_sheet_floor(
         print(f"  exploded {name}: {len(ents)} → {len(kept)} inside frame")
         entities.extend(kept)
 
-    for entity in doc.modelspace():
-        if entity.dxftype() == "INSERT":
-            try:
-                ix, iy = float(entity.dxf.insert.x), float(entity.dxf.insert.y)
-            except Exception:  # noqa: BLE001
+    if not structural_mode:
+        for entity in doc.modelspace():
+            if entity.dxftype() == "INSERT":
+                try:
+                    ix, iy = float(entity.dxf.insert.x), float(entity.dxf.insert.y)
+                except Exception:  # noqa: BLE001
+                    continue
+                if clip[0] <= ix <= clip[2] and clip[1] <= iy <= clip[3]:
+                    absorb_insert(entity)
                 continue
-            if clip[0] <= ix <= clip[2] and clip[1] <= iy <= clip[3]:
-                absorb_insert(entity)
-            continue
-        center = _centroid(entity)
-        if center and clip[0] <= center[0] <= clip[2] and clip[1] <= center[1] <= clip[3]:
-            entities.append(entity)
+            center = _centroid(entity)
+            if center and clip[0] <= center[0] <= clip[2] and clip[1] <= center[1] <= clip[3]:
+                entities.append(entity)
 
     line_count = sum(1 for e in entities if e.dxftype() == "LINE")
-    if line_count < 30:
+    if not structural_mode and line_count < 30:
         try:
             from ezdxf import bbox as ezbbox
         except Exception:  # noqa: BLE001
@@ -761,11 +1000,9 @@ def extract_sheet_floor(
         raise RuntimeError(f"{floor}: 도곽 안에 기하가 없습니다 ({sheet.title})")
 
     bbox = clip
-    plan_bb = _load_plan_core_bbox(out_dir, drawing_id, floor)
-    if plan_bb is not None:
-        origin = (bbox[0] - plan_bb[0], bbox[1] - plan_bb[1])
-        align_note = "aligned to plan/original"
-    elif origin_shift_mode == "bbox":
+    # 미리보기 bbox는 크롭 범위라 좌표 원점이 아니다. 맞추면 재추출마다 도면이 밀린다.
+    plan_bb = None
+    if origin_shift_mode == "bbox":
         origin = (bbox[0], bbox[1])
         align_note = "origin=bbox min"
     else:
@@ -949,7 +1186,9 @@ def main() -> int:
         return 2
     if layout.method == "sheet" and floor_arg != "ALL" and floor_arg not in sheets:
         print(
-            f"[error] {floor_arg} 도곽이 없습니다. 발견된 층: {floors}",
+            f"[error] 요청한 {floor_arg} 이름의 도곽은 없습니다. "
+            f"도곽은 이미 나뉘어 있습니다. 미확정 도곽은 sheet_XX 이며 영역을 다시 찾지 않습니다. "
+            f"발견된 이름 그대로 한 장씩 추출하세요: {floors}",
             file=sys.stderr,
         )
         return 2
@@ -1011,9 +1250,14 @@ def main() -> int:
                 print(f"[error] {fl}/{var}: {exc}", file=sys.stderr)
                 summary.append({"floor": fl, "variant": var, "error": str(exc)})
 
-    meta_path = out_dir / "extract_summary.json"
+    meta_path = resolve_summary_path(out_dir, args.drawing_id)
+    meta_path.parent.mkdir(parents=True, exist_ok=True)
+    run_summary = summary
+    summary = merge_extract_summary(meta_path, summary)
     meta_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
+    list_path = upsert_drawing_list(out_dir, args.drawing_id, dxf_path, layout, run_summary)
     print(f"\nsummary → {meta_path}")
+    print(f"drawing list → {list_path}")
     return 1 if any("error" in item for item in summary) else 0
 
 

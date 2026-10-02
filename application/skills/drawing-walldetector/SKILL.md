@@ -3,7 +3,8 @@ name: drawing-walldetector
 description: >-
   drawing-devider가 만든 층 floor_original DXF에서 벽을 검출하고 빨간색 WALL
   레이어 DXF/PNG로 저장합니다. 벽 검출, wall detect, wall DXF, 평면도 벽체,
-  floor_wall_original 요청 시 사용합니다.
+  floor_wall_original, "하이닉스 5F 벽"처럼 건물·층으로 지정하는 요청 시 사용합니다.
+  대상 파일은 artifacts/drawing_list.json으로 찾습니다.
 ---
 
 # drawing-walldetector (벽 검출)
@@ -15,14 +16,24 @@ description: >-
 
 - `floors/<F>/floor_original.dxf`에서 층 전체 벽을 뽑을 때
 - 벽체 DXF / 빨간 벽 오버레이 / wall detect / `floor_wall_original` 요청 시
+- "하이닉스 5F 벽"처럼 **건물·층**만 있고 경로가 없을 때
+
+## 대상 도면 찾기
+
+건물·층 이름이 있으면 폴더를 만들지 말고 `$ARTIFACTS_DIR/drawing_list.json`에서 고른다.
+
+1. `$ARTIFACTS_DIR/drawing_list.json`이 있으면 그 파일. 없으면 `/Users/ksdyb/Documents/src/agent-skills/application/.session_storage/lge/artifacts/drawing_list.json`.
+2. 사용자가 말한 건물·프로젝트 이름을 `drawings[].source_filename`에 맞춘다. 공백·대소문자는 무시하고, 그 말이 파일명에 들어 있으면 그 도면이다. 예: `하이닉스` → `SK용인하이닉스_지원동 평면도_241014.dxf` → `folder` `sk_yongin_jiwon`. `source_filename`에 없으면 `drawing_id`, `folder`를 같은 방식으로 본다. 없거나 둘 이상이면 `source_filename`을 보여주고 고르게 한다.
+3. 그 도면의 `floors[].floor`가 요청 층과 같으면 그 항목이다. `1층`은 `1F`, `지하1층`은 `B1F`, `옥상`은 `RF`로 본다. `floor`가 없고 `name_confirmed`가 false이면 `title`에 그 층 표기가 있는 항목이 후보다. 후보가 둘 이상이면 `floor`와 `title`을 보여주고 고르게 한다. 없으면 `discovered_floors`를 알리고 없는 층 폴더는 만들지 않는다.
+4. 이 스킬의 입력은 그 층의 `dxf`·`png`이다. artifacts 루트 기준 상대경로이며 파일은 `floor_original.dxf` / `floor_original.png`이다. 절대경로는 `$ARTIFACTS_DIR/<folder>/floors/<floor>/floor_original.dxf`이다. 사용자가 층을 하나만 말하면 그 층만 검출한다. 층을 말하지 않으면 `discovered_floors`를 순서대로 검출한다.
 
 ## Critical Rules
 
-1. **입력은 층 floor_original** — `$ARTIFACTS_DIR/<drawing_id>/floors/<F>/floor_original.dxf`만 사용한다. 원본 277MB DXF를 직접 돌리지 않는다. `parts/`·`floor_parts_index.json`은 **필수가 아니다**.
-2. **층 구조 먼저** — `$ARTIFACTS_DIR/<drawing_id>/floors/<F>/floor_original.png`로 전체 구조를 확인한다.
-3. **기존 산출 게이트** — `floors/<F>/floor_wall_original.*`가 **이미 있으면** 경로·요약을 보여 주고 **계속(덮어쓰기) / 중단**을 물은 뒤, 허락이 있을 때만 진행한다.
-4. **파일럿 게이트** — 다층이면 **1개 층만** `detect_walls_floor` 후 사용자 컨펌 → 나머지 층도 **층당 bash 1회**.
-5. **층별 1개씩** — 한 bash에 `for FLOOR in …` 일괄·`detect_walls_all`로 전층 한 번에 돌리는 것을 기본 **금지**한다 (대용량에서 Timeout). 사용자가 일괄을 명시할 때만 `detect_walls_all` 허용.
+1. **입력은 층 floor_original** — 위 절차로 고른 `$ARTIFACTS_DIR/<folder>/floors/<F>/floor_original.dxf`만 사용한다. 원본 277MB DXF를 직접 돌리지 않는다. `parts/`·`floor_parts_index.json`은 **필수가 아니다**.
+2. **입력 미리보기** — 검출 입력은 `$ARTIFACTS_DIR/<drawing_id>/floors/<F>/floor_original.png` 이다. 사용자에게 진행 여부를 묻지 않는다.
+3. **기존 산출** — `floors/<F>/floor_wall_original.*`가 **이미 있어도 묻지 않는다**. 바로 검출하고 **덮어쓴다**. 폴더를 통째로 지우지는 않는다.
+4. **범위** — 사용자가 층을 지정하면 그 층만 검출한다. 층을 말하지 않으면 `discovered_floors`를 순서대로 끝까지 검출한다. 파일럿 확인은 받지 않는다.
+5. **층별 1개씩, 확인 없이** — 한 bash에 `for FLOOR in …` 일괄·`detect_walls_all`로 전층 한 번에 돌리는 것을 기본 **금지**한다 (대용량에서 Timeout). 한 층이 끝나면 **사용자에게 묻지 말고** 바로 다음 층을 같은 방식으로 실행한다. 사용자가 일괄을 명시할 때만 `detect_walls_all` 허용.
 6. **벽은 빨간색** — 출력 DXF의 `WALL` 레이어(ACI 1). 베이스 기하는 `BASE`(회색).
 7. **산출 경로** — `$ARTIFACTS_DIR/<drawing_id>/floors/<F>/floor_wall_original.*` (기본). 레거시 타일은 `walls/` (선택).
 8. **스크립트 사용** — `$WORKING_DIR/skills/drawing-walldetector/scripts/` 로만 수행. ad-hoc 대용량 파싱 금지.
@@ -48,7 +59,7 @@ description: >-
 SCRIPTS="$WORKING_DIR/skills/drawing-walldetector/scripts"
 ART="$ARTIFACTS_DIR/<drawing_id>"
 
-# 파일럿 1층 (층 전체만)
+# 한 층. 끝나면 묻지 않고 다음 층도 같은 호출
 python3 "$SCRIPTS/detect_walls_floor.py" --artifacts "$ART" --floor 12F
 ```
 
@@ -64,34 +75,22 @@ ART=/path/to/user/artifacts/<drawing_id>
 ## Workflow (필수 순서)
 
 ```
+drawing_list.json 에서 건물(source_filename) · 층(floor) 결정
+  ↓
 drawing-devider 산출물
-  $ARTIFACTS_DIR/<drawing_id>/floors/<F>/floor_original.{dxf,png}
+  $ARTIFACTS_DIR/<folder>/floors/<F>/floor_original.{dxf,png}
   ↓
-⓪ floor_wall_original.* 존재 여부 확인 → 있으면 계속/중단 확인
-  ↓
-① 파일럿 층: floor_original.png 확인
-  ↓
-② detect_walls_floor.py --floor <FIRST>   ← bash 1회
+⓪ floor_original.dxf 확인 (없으면 devider 먼저. 목록의 sheet_XX 포함)
+  ↓ (floor_wall_original.* 가 있어도 묻지 않고 덮어쓰기)
+① detect_walls_floor.py --floor <각 층>   ← 층당 bash 1회, 확인 없이 전 층
      → floors/<F>/floor_wall_original.*
   ↓
-③ 사용자 컨펌 (나머지 층)
-  ↓
-④ 허락 시 다음 층만 detect_walls_floor   ← 층당 1회
-  ↓
-⑤ walls_all_index.json / work_log 갱신 (선택)
+② walls_all_index.json / work_log 갱신 (선택)
 ```
 
-### ⓪ 기존 산출 확인
+### ⓪ 기존 산출
 
-```bash
-ART="$ARTIFACTS_DIR/<drawing_id>"
-FLOOR=12F
-if [ -f "$ART/floors/$FLOOR/floor_wall_original.dxf" ]; then
-  echo "EXISTING: $ART/floors/$FLOOR/floor_wall_original.*"
-  ls "$ART/floors/$FLOOR"/floor_wall_original.* 2>/dev/null
-  # STOP: 허락 전 detect 금지
-fi
-```
+`floor_wall_original.dxf` / `.png` / `_meta.json` / `floor_wall_index.json`이 이미 있어도 **묻지 않고 덮어쓴다**. 폴더 전체를 삭제하지 않는다.
 
 ### 검출 개요
 
@@ -101,6 +100,12 @@ fi
 - 최소 세그먼트 길이: 500 mm
 - 벽 두께 안에 간격이 촘촘한 긴 평행선(외벽 여러 겹)은 벽으로 유지
 - 같은 대역에서 간격이 성긴 다수 평행선(계단 해칭) · ARC/CIRCLE(문·설비) 제외
+- **X자 문은 벽이 아니다.** 교차하는 대각선(LINE 쌍 또는 X 폴리라인)은 WALL에서 뺀다. 문 궤적선이 이중선 사이에 있으면 그 궤적은 제외하고 바깥 면만 벽으로 둔다.
+- **돌출창은 벽이다.** 한 폴리선에서 45° 볼살, 축에 나란한 바깥면, 반대 45° 볼살이 이어지고 돌출이 0.25–1.0 m이면 그 윤곽을 WALL로 올린다. 창틀 모서리의 짧은 사각은 벽이 아니다.
+- **문짝 너머의 양옆 벽은 벽이다.** 두 면이 모두 1.5 m 이상이고 간격이 250 mm 이하인데 그 사이에 더 짧은 문선이 있으면, 문선은 WALL에서 빼고 양옆 면은 WALL로 둔다. 작은 사각 두 개와 짧은 스윙으로 그린 여닫이문도 같다. 문 표시와 벽 두께 안의 문선은 내리고, 양옆 면은 올린다. 1/4 스윙의 문짝이 여러 줄이면 그 한가운데에 WALL 한 줄을 둔다. 힌지에 붙은 문짝이 한 줄이면 그 줄을 WALL로 둔다. 스윙 호는 벽이 아니다.
+- **여닫이문 잎은 벽이 아니다.** 두께 20–80 mm, 폭 0.65–1.45 m 인 문짝과, 그 잎에 겹친 0.6–1.6 m 평행선은 WALL에서 뺀다. 문끝에 붙어 있고 기존 벽과 80 mm 이내로 이어진 짧은 벽(문선·벽 끝)은 WALL로 올린다.
+- **개구로 잘린 간벽은 벽이다.** 옷장에 붙은 이중선처럼 조각이 0.6–1.3 m여도, 같은 직선에서 맞닿은 런이 2.2 m 이상이고 간격이 120–180 mm(간벽)이면 WALL로 유지한다. 세로 간벽은 조각이 1 m 안팎이어도, 같은 두 면 위에서 X 문 개구에 맞닿아 있으면 벽이다.
+- **창호 중간 벽은 벽이다.** 닫힌 사각 두 개가 1.2 m 이상 변을 맞대고 양쪽 바깥 변이 벽이면, 그 공유 변(두께 0으로 겹친 세로 멀리언)도 WALL로 남긴다. 사각이 가구로 제외돼도 이 변만 빨강으로 그린다.
 - **H-Beam 기둥**(중첩 정사각, 변 ≤ 1.2 m, 가로·세로 차이 22% 이내)은 WALL로 유지 — 가구 사각만 제외. 사각 안에 호가 둘 이상이거나 짧은 선이 많은 표식(휠체어)은 기둥이 아니다.
 
 ---
@@ -124,11 +129,12 @@ $ARTIFACTS_DIR/<drawing_id>/
 
 ## Decision Checklist
 
-- [ ] `$ARTIFACTS_DIR/<drawing_id>/floors/<F>/floor_original.dxf`가 있는가
-- [ ] `floor_wall_original.*`가 이미 있으면 **계속/중단**을 물었는가
+- [ ] 건물·층은 `drawing_list.json`의 `source_filename`·`floor`로 골랐는가
+- [ ] `$ARTIFACTS_DIR/<folder>/floors/<F>/floor_original.dxf`가 있는가
+- [ ] `floor_wall_original.*`가 이미 있어도 묻지 않고 덮어썼는가
 - [ ] 스크립트를 `$WORKING_DIR/skills/drawing-walldetector/scripts/...`로 호출하는가
-- [ ] 파일럿 1층만 돌렸고 사용자 허락을 기다리는가
-- [ ] 나머지 층도 **층당 bash 1회**인가
+- [ ] 다층이면 확인 없이 전 층을 이어서 검출했는가
+- [ ] 검출을 **층당 bash 1회**로만 돌리는가 (`for` 일괄·`detect_walls_all` 기본 금지, 층 사이 사용자 확인 없음)
 
 ---
 
@@ -136,9 +142,11 @@ $ARTIFACTS_DIR/<drawing_id>/
 
 | 증상 | 대응 |
 |------|------|
-| `floor_original.dxf` 없음 | 먼저 `drawing-devider` `extract_2d.py --floor <F>` |
+| `floor_original.dxf` 없음 | 먼저 `drawing-devider` `extract_2d.py --floor <F>`. `<F>`는 `--list-floors`에 있는 이름만 쓴다 |
+| 요청 층이 `1F`인데 목록은 `sheet_XX` | `--floor 1F`로 끝내지 않는다. `sheet_XX`를 추출한 뒤 그 폴더로 벽 검출을 이어 간다. "여러 층 표기가 혼재해 영역을 확정하지 못했다"고 보고하지 않는다. 층 이름만 미확정이다 |
 | `skills/...` / `cde-pilot/...` 경로 실패 | `$WORKING_DIR/skills/drawing-walldetector/scripts/...` 사용 |
-| Timeout / 전층 일괄 실패 | `detect_walls_all` 금지 → `detect_walls_floor --floor <F>` 층당 1회 |
+| `floor_wall_original.*` 이미 존재 | 묻지 않고 덮어쓴다. 폴더는 삭제하지 않는다 |
+| Timeout / 전층 일괄 실패 | `detect_walls_all` 금지 → `detect_walls_floor --floor <F>` 층당 1회, 확인 없이 다음 층 |
 | 과검출·미검출 | `min_len_mm` / `thick_min_mm` / `thick_max_mm` 조정 (reference.md) |
 
 ---
@@ -146,8 +154,9 @@ $ARTIFACTS_DIR/<drawing_id>/
 ## 사용자에게 전달할 내용
 
 - 층별 `$ARTIFACTS_DIR/<drawing_id>/floors/<F>/floor_wall_original.*` 경로
-- 샘플 `floor_wall_original.png` (벽=빨강)
-- 파일럿 시: **나머지 층 진행 여부** / 완료 시: 층별 벽 통계
+- `floor_wall_original.png` (벽=빨강)
+- 완료 시: 층별 벽 통계. 중간 층에서 진행 여부를 묻지 않는다
+- `sheet_XX`는 추출·검출이 끝난 도곽이다. 지상 1층 미완료로 적지 않고, 층 이름이 미확정인 도곽으로 적는다
 
 ## Related
 

@@ -320,7 +320,6 @@ def main() -> int:
         },
     )
     print(f"\n→ {index_path}  parts={len(part_records)}")
-    print("STOP: 사용자 허락 후 나머지 층 진행 (SKILL Gate).")
     return 0
 
 

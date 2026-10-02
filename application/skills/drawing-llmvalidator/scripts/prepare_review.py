@@ -162,9 +162,11 @@ def main() -> None:
     meta = json.loads(meta_path.read_text())
     out = floor_dir / "llm_review"
     out.mkdir(parents=True, exist_ok=True)
-    stale = out / "floor_wall_full.png"
-    if stale.is_file():
+    for stale in out.glob("*.png"):
         stale.unlink()
+    old_review = out / "review.json"
+    if old_review.is_file():
+        old_review.unlink()
 
     window = _render_window(meta["bbox_mm"])
     img = Image.open(png)

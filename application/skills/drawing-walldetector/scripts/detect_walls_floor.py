@@ -62,6 +62,7 @@ def _detect_one(
         f"  walls: entities={clf['n_wall_entities']} segs={clf['n_wall_segs']} "
         f"furn_skip={clf.get('n_furniture_skipped', 0)} "
         f"hatch_skip={clf.get('n_hatch_skipped', 0)} "
+        f"door_x={clf.get('n_door_x', 0)} "
         f"cols_skip={len(clf['skip_column_idxs'])}  ents={len(entities)}"
     )
     dxf_out = walls_dir / f"{stem}.dxf"
@@ -95,6 +96,7 @@ def _detect_one(
             "n_columns_skipped": len(clf["skip_column_idxs"]),
             "n_furniture_skipped": clf.get("n_furniture_skipped"),
             "n_hatch_skipped": clf.get("n_hatch_skipped"),
+            "n_door_x": clf.get("n_door_x"),
             "entity_wall_ratio": clf.get("entity_wall_ratio"),
             "furniture_box_max_mm": clf.get("furniture_box_max_mm"),
         },

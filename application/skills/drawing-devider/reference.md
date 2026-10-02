@@ -7,25 +7,22 @@ bash/`execute_code` cwd는 사용자 `artifacts/`이며, Runtime에서는 `$ARTI
 
 ```text
 $ARTIFACTS_DIR/
+  drawing_list.json                            # 프로젝트 도면 목록. 각 항목 floors 앞에 source_filename(원본 DXF 파일명)
   <drawing_id>/
+    extract_summary.json                       # 이 도면만. artifacts 루트에 두지 않는다
     structure.md / .json
     work_log.md
     floors/<F>/
       floor_original.dxf / .png / _meta.json   # extract_2d (층 단위 · 미리보기)
 ```
 
-- `floor_overview.*` / `floor_*_clean.dxf`는 **사용·생성하지 않는다** (제거됨).
+- `floor_structure.*` / `floor_overview.*` / `floor_*_clean.dxf`는 **사용·생성하지 않는다**. 구조용으로 걸러 낸 도면도 `floor_original.png` 이다.
 - `parts/` · `floor_parts_index.json` · `split_plan.*`는 **기본 워크플로에서 만들지 않는다**.
 - 로컬 개발 시에도 **사용자 artifacts**를 쓴다.
 
-## 기존 폴더 게이트
+## 기존 폴더
 
-`$ARTIFACTS_DIR/<drawing_id>/`가 이미 있으면:
-
-1. 경로·기존 파일 요약을 사용자에게 보여 준다
-2. **계속 / 중단** (또는 다른 `drawing_id`)을 묻는다
-3. 허락 전에는 `extract_2d` / `analyze`를 실행하지 않는다
-4. 중단 시 폴더를 임의 삭제하지 않는다
+`$ARTIFACTS_DIR/<drawing_id>/`가 이미 있어도 묻지 않고 추출·분석을 진행한다. `floor_original.*`, `structure.md`, `structure.json`, `work_log.md`는 덮어쓴다. 폴더를 통째로 삭제하지 않는다.
 
 ## 층 구분
 
@@ -34,18 +31,19 @@ $ARTIFACTS_DIR/
 | 1 | `XA-S-{N}F 평면` INSERT | 블록 이름이 있을 때 |
 | 2 | 도곽 + 층 제목 (`lib_sheet.py`) | 1이 비어 있을 때. `--layout auto` |
 
-2번에서도 **파일럿 1층 → 확인 → 나머지** 다. 형식이 없다고 추출을 멈추거나 스킬 변경을 묻지 않는다. 목록은 `--list-floors`.
+2번에서도 **확인 없이 전 층**을 추출한다. 형식이 없다고 추출을 멈추거나 스킬 변경을 묻지 않는다. 목록은 `--list-floors`.
 
 제목으로 인정하는 예: `1층 평면도`, `1층 냉난방 평면도`, `제2층`, `지하1층`, `B1F`, `12F PLAN`, `옥상 평면도`.  
 층과 `평면도` 사이의 용도 단어는 허용한다. 치수·실명·`2층 참조` 같은 문구는 층으로 세지 않는다.  
-같은 제목이 떨어진 도곽에 여러 번 있으면 왼쪽부터 `1F`, `1F_2` 로 구분한다.
+같은 제목이 떨어진 도곽에 여러 번 있으면 왼쪽부터 `1F`, `1F_2` 로 구분한다.  
+한 도곽 안에 층 표기가 여럿이고 서로 떨어져 있지 않아 나누지 못하면, 그 도곽을 건너뛰지 않는다. 표기로 층 이름을 정하지 않고 왼쪽·아래부터 `sheet_01`, `sheet_02` 로 남긴다. 경고에 층 이름이 미확정임을 적는다. 층이 이미 확정된 도곽과 겹치거나, 더 큰 도곽에 포함된 테두리는 제외한다. `sheet_XX` 도 확인 없이 추출한다.
 
-## 층 게이트 · 층별 1개씩
+## 층별 1개씩 · 확인 없음
 
-1. `pilot_floor` 한 층만 `extract_2d.py`
-2. 허락 후 나머지 층도 **층당 bash 1회** (`extract_2d` → 보고)
-3. **금지:** `for FLOOR in 6F 7F …` 일괄 루프, `--floor all`, 한 커맨드에 여러 층
-4. 대용량 DXF(수백 MB)에서 일괄 추출은 `TimeoutExpired`를 유발한다
+1. 발견된 층을 **층당 bash 1회**로 끝까지 추출한다. 파일럿 확인을 받지 않는다
+2. 같은 경로의 `floor_original.*` 가 있으면 덮어쓴다
+3. **금지:** `for FLOOR in 6F 7F …` 일괄 루프, `--floor all`, 한 커맨드에 여러 층, 층 사이에 사용자 확인
+4. 대용량 DXF(수백 MB)에서 일괄 추출은 `TimeoutExpired`를 유발한다. 층마다 호출은 나누되, 다음 층은 바로 실행한다
 
 ## 층 단위 처리 (기본)
 
@@ -65,4 +63,4 @@ $ARTIFACTS_DIR/
 
 - 치수·렌더 함수는 **같은 스킬** `scripts/lib_render.py`를 import 하여 재사용
 - `extract_2d.py` → `floors/<F>/floor_original.dxf` (+ `.png`)
-- 스킬은 **기존 폴더 확인·층별 1개씩·다층 게이트·artifacts 규약**을 강제한다
+- 스킬은 **기존 파일 덮어쓰기·층별 1개씩 연속 실행·artifacts 규약**을 강제한다. 층 사이·기존 폴더에서 사용자 확인을 받지 않는다

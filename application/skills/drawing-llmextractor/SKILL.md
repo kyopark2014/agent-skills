@@ -4,7 +4,8 @@ description: >-
   사용자가 지정한 주제와 이미지 경로를 받아, UI에서 선택한 Vision LLM으로
   도면·이미지 속 객체를 찾고 원본 위에 빨간색으로 표시합니다.
   객체 추출, 주제별 마킹, 빨간 박스, drawing llm extractor, 도면에서 기둥/문/설비
-  찾기 요청 시 사용합니다.
+  찾기, "하이닉스 5F에서 기둥을 찾아"처럼 건물·층으로 이미지를 지정하는 요청 시 사용합니다.
+  대상 파일은 artifacts/drawing_list.json으로 찾습니다.
 ---
 
 # drawing-llmextractor (주제 객체 추출·빨간 표시)
@@ -20,10 +21,20 @@ LLM은 **UI에서 사용자가 선택한 모델**이다. 에이전트가 모델�
 - 도면·스캔·평면도 PNG에서 특정 대상(기둥, 문, 엘리베이터, 계단, 가구 등)을 찾아 표시할 때
 - “이 이미지에서 ○○만 빨간색으로 추출/표시” 요청 시
 - 이미지 경로와 주제가 함께 주어졌을 때
+- "하이닉스 5F에서 기둥을 찾아"처럼 **건물·층·주제**만 있을 때
+
+## 대상 도면 찾기
+
+이미지 절대경로나 Load files의 `절대 경로:`가 있으면 그 파일을 쓴다. 건물·층만 있으면 폴더를 만들지 말고 `$ARTIFACTS_DIR/drawing_list.json`에서 고른다.
+
+1. `$ARTIFACTS_DIR/drawing_list.json`이 있으면 그 파일. 없으면 `/Users/ksdyb/Documents/src/agent-skills/application/.session_storage/lge/artifacts/drawing_list.json`.
+2. 사용자가 말한 건물·프로젝트 이름을 `drawings[].source_filename`에 맞춘다. 공백·대소문자는 무시하고, 그 말이 파일명에 들어 있으면 그 도면이다. 예: `하이닉스` → `SK용인하이닉스_지원동 평면도_241014.dxf` → `folder` `sk_yongin_jiwon`. `source_filename`에 없으면 `drawing_id`, `folder`를 같은 방식으로 본다. 없거나 둘 이상이면 `source_filename`을 보여주고 고르게 한다.
+3. 그 도면의 `floors[].floor`가 요청 층과 같으면 그 항목이다. `1층`은 `1F`, `지하1층`은 `B1F`, `옥상`은 `RF`로 본다. `floor`가 없고 `name_confirmed`가 false이면 `title`에 그 층 표기가 있는 항목이 후보다. 후보가 둘 이상이면 `floor`와 `title`을 보여주고 고르게 한다. 없으면 `discovered_floors`를 알리고 없는 층 폴더는 만들지 않는다.
+4. 기본 `--image`는 그 층의 `png`이다. artifacts 루트에 붙이면 `$ARTIFACTS_DIR/<folder>/floors/<floor>/floor_original.png`이다. 사용자가 벽 도면을 말하면 같은 폴더의 `floor_wall_validated.png`, 그 파일이 없으면 `floor_wall_original.png`를 쓴다. 경로도 건물·층도 없으면 실행하지 말고 어느 쪽인지 묻는다.
 
 ## Critical Rules
 
-1. **입력** — 사용자가 준 **주제**와 **이미지 파일 경로**만 사용한다. 경로를 추측해 다른 파일을 열지 않는다. Load files로 고른 이미지는 대화의 `절대 경로:` 가 그 경로다. 이미지가 보여도 그 줄이 없으면 실행하지 말고 경로를 요청한다.
+1. **입력** — 사용자가 준 **주제**와, 위 절차로 정한 **이미지 파일**만 사용한다. 목록에 없는 경로를 만들지 않는다. Load files로 고른 이미지는 대화의 `절대 경로:` 가 그 경로다.
 2. **원본 보존** — 입력 이미지는 수정하지 않는다. 표시 결과는 별도 PNG다.
 3. **모델** — `--model`을 붙이지 않는다. 스크립트가 환경변수 `UI_MODEL_NAME`으로 UI 선택 모델을 쓴다. 사용자가 다른 모델을 **명시**한 경우에만 `--model "UI에 있는 표시 이름"`을 넘긴다.
 4. **스크립트 절대경로** — `$WORKING_DIR/skills/drawing-llmextractor/scripts/` 또는 이 SKILL.md 옆 `scripts/` 절대경로. cwd 상대 `skills/...` 금지.
@@ -65,7 +76,9 @@ tail -n 20 "$LOG"
 ## Workflow
 
 ```
-사용자: 주제 + 이미지 경로
+이미지 경로, 또는 drawing_list.json 의 건물(source_filename) · 층(floor) → png
+  ↓
+사용자 주제
   ↓
 extract_objects.py
   1. UI_MODEL_NAME → chat.update → get_chat()  (UI에서 고른 모델)
@@ -109,7 +122,7 @@ JSON `objects[]` 항목:
 
 ## Decision Checklist
 
-- [ ] 주제와 이미지 경로가 사용자 입력에서 왔는가
+- [ ] 주제는 사용자 말이고, 이미지는 절대경로 또는 `drawing_list.json`의 `source_filename`·`floor`인가
 - [ ] `--model` 없이 UI 선택 모델을 썼는가 (사용자가 모델을 지정한 경우만 예외)
 - [ ] 원본 이미지는 그대로이고, 빨간 표시는 별도 PNG인가
 - [ ] 결과 JSON의 `model`이 UI에서 고른 이름과 같은가
