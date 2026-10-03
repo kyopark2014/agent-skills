@@ -2731,6 +2731,117 @@ button.config-popover-choice.is-selected {
   overflow: hidden;
 }
 
+.drawing-list-body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 20px 24px 28px;
+}
+
+.drawing-list-muted,
+.drawing-list-empty {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.drawing-list-empty {
+  padding: 14px 16px;
+  border: 1px dashed var(--border);
+  border-radius: 8px;
+}
+
+.drawing-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.drawing-list-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--border);
+}
+
+.drawing-list-item:last-child {
+  border-bottom: none;
+}
+
+.drawing-list-meta {
+  min-width: 0;
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.drawing-list-name {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.drawing-list-sub {
+  font-size: 12px;
+  color: var(--text-muted);
+  line-height: 1.4;
+}
+
+.drawing-list-actions {
+  display: flex;
+  flex-shrink: 0;
+  gap: 6px;
+}
+
+.drawing-list-btn {
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-primary);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.drawing-list-btn:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.drawing-list-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.drawing-list-btn-danger {
+  color: #f85149;
+  border-color: rgba(248, 81, 73, 0.45);
+}
+
+.drawing-list-btn-danger:hover:not(:disabled) {
+  border-color: #f85149;
+  color: #ff7b72;
+  background: rgba(248, 81, 73, 0.08);
+}
+
+.drawing-delete-confirm {
+  background: #da3633;
+}
+
+.drawing-delete-confirm:hover:not(:disabled) {
+  background: #f85149;
+}
+
 .drawing-back-btn {
   margin-left: auto;
   flex-shrink: 0;
@@ -2943,6 +3054,15 @@ button.config-popover-choice.is-selected {
 
   .drawing-toolbar {
     flex-wrap: wrap;
+  }
+
+  .drawing-list-item {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .drawing-list-actions {
+    justify-content: flex-end;
   }
 }
 

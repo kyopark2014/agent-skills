@@ -2,8 +2,6 @@ import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } f
 import { api, type DrawingCatalog } from "../api";
 import { MenuIcon } from "./SidebarIcons";
 
-const FLOORS = ["5F", "6F", "7F", "8F", "9F", "10F", "11F", "12F"] as const;
-const DEFAULT_FLOOR = "5F";
 const MIN_ZOOM = 0.25;
 const MAX_ZOOM = 16;
 const ZOOM_STEP = 1.25;
@@ -17,12 +15,13 @@ const PREVIEWS = [
 type PreviewKind = (typeof PREVIEWS)[number]["kind"];
 
 interface Props {
+  drawingId: string;
   onMenuClick?: () => void;
   onBack: () => void;
 }
 
-function imageSrc(floor: string, kind: PreviewKind): string {
-  return `/api/drawings/floors/${encodeURIComponent(floor)}/${kind}`;
+function imageSrc(drawingId: string, floor: string, kind: PreviewKind): string {
+  return `/api/drawings/${encodeURIComponent(drawingId)}/floors/${encodeURIComponent(floor)}/${kind}`;
 }
 
 function clampZoom(value: number): number {
@@ -60,8 +59,8 @@ function ZoomInIcon() {
   );
 }
 
-export function DrawingView({ onMenuClick, onBack }: Props) {
-  const [floor, setFloor] = useState<string>(DEFAULT_FLOOR);
+export function DrawingView({ drawingId, onMenuClick, onBack }: Props) {
+  const [floor, setFloor] = useState("");
   const [kind, setKind] = useState<PreviewKind>("original");
   const [catalog, setCatalog] = useState<DrawingCatalog | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -83,16 +82,27 @@ export function DrawingView({ onMenuClick, onBack }: Props) {
   fitRef.current = fit;
 
   const preview = PREVIEWS.find((item) => item.kind === kind) ?? PREVIEWS[0];
-  const selected = catalog?.floors.find((item) => item.id === floor);
+  const floors = catalog?.floors ?? [];
+  const selected = floors.find((item) => item.id === floor);
   const available = selected ? Boolean(selected[kind]) : null;
-  const src = imageSrc(floor, kind);
+  const src = floor ? imageSrc(drawingId, floor, kind) : "";
+  const headerTitle = catalog?.source_filename || catalog?.drawing_id || drawingId;
 
   useEffect(() => {
     let cancelled = false;
+    setCatalog(null);
+    setFloor("");
+    setError(null);
     api
-      .getDrawingFloors()
+      .getDrawingFloors(drawingId)
       .then((data) => {
-        if (!cancelled) setCatalog(data);
+        if (cancelled) return;
+        setCatalog(data);
+        const next =
+          data.floors.find((item) => item.original || item.wall || item.validated)?.id ||
+          data.floors[0]?.id ||
+          "";
+        setFloor(next);
       })
       .catch((err: unknown) => {
         if (!cancelled) {
@@ -102,7 +112,7 @@ export function DrawingView({ onMenuClick, onBack }: Props) {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [drawingId]);
 
   function beginImage() {
     setImageState("loading");
@@ -220,26 +230,30 @@ export function DrawingView({ onMenuClick, onBack }: Props) {
         >
           <MenuIcon className="sidebar-icon" />
         </button>
-        <span className="main-header-title">Drawing · {floor}</span>
+        <span className="main-header-title">
+          {headerTitle}
+          {floor ? ` · ${floor}` : ""}
+        </span>
         <button type="button" className="drawing-back-btn" onClick={onBack}>
-          채팅으로
+          목록
         </button>
       </header>
       <div className="drawing-body">
         <nav className="drawing-floors" aria-label="층 선택">
-          {FLOORS.map((id) => (
+          {floors.map((item) => (
             <button
-              key={id}
+              key={item.id}
               type="button"
-              className={`drawing-floor-btn${floor === id ? " is-active" : ""}`}
-              aria-current={floor === id ? "true" : undefined}
+              className={`drawing-floor-btn${floor === item.id ? " is-active" : ""}`}
+              aria-current={floor === item.id ? "true" : undefined}
+              title={item.status ? `${item.id} · ${item.status}` : item.id}
               onClick={() => {
-                if (id === floor) return;
-                setFloor(id);
+                if (item.id === floor) return;
+                setFloor(item.id);
                 beginImage();
               }}
             >
-              {id}
+              {item.id}
             </button>
           ))}
         </nav>
@@ -305,8 +319,12 @@ export function DrawingView({ onMenuClick, onBack }: Props) {
             onPointerUp={endPan}
             onPointerCancel={endPan}
           >
-            {available === false || imageState === "missing" ? (
-              <p className="drawing-card-status">이미지를 불러오지 못했습니다.</p>
+            {!catalog && !error ? (
+              <p className="drawing-card-status">불러오는 중…</p>
+            ) : !floor || available === false || imageState === "missing" ? (
+              <p className="drawing-card-status">
+                {floors.length === 0 ? "표시할 층이 없습니다." : "이미지를 불러오지 못했습니다."}
+              </p>
             ) : (
               <>
                 {imageState === "loading" && (

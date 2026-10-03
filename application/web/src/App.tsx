@@ -25,6 +25,7 @@ import { ChatThread } from "./components/ChatThread";
 import { ChatInput } from "./components/ChatInput";
 import { GoogleLoginModal } from "./components/GoogleLoginModal";
 import { Dashboard } from "./components/Dashboard";
+import { DrawingListView } from "./components/DrawingListView";
 import { DrawingView } from "./components/DrawingView";
 import {
   SIDEBAR_W_DEFAULT,
@@ -69,7 +70,8 @@ export default function App() {
   const [sidebarResizing, setSidebarResizing] = useState(false);
   const sidebarWidthRef = useRef(sidebarWidth);
   sidebarWidthRef.current = sidebarWidth;
-  const [view, setView] = useState<"chat" | "dashboard" | "drawing">("chat");
+  const [view, setView] = useState<"chat" | "dashboard" | "drawings" | "drawing">("chat");
+  const [activeDrawingId, setActiveDrawingId] = useState<string | null>(null);
   const [queuedByTaskId, setQueuedByTaskId] = useState<
     Record<string, QueuedMessage[]>
   >({});
@@ -799,9 +801,9 @@ export default function App() {
               }
             : undefined
         }
-        drawingActive={view === "drawing"}
+        drawingActive={view === "drawings" || view === "drawing"}
         onOpenDrawing={() => {
-          setView("drawing");
+          setView("drawings");
           setSidebarOpen(false);
         }}
         onRefreshConfig={refreshConfig}
@@ -812,10 +814,21 @@ export default function App() {
       <div className="main-panel">
         {view === "dashboard" ? (
           <Dashboard onBack={() => setView("chat")} />
-        ) : view === "drawing" ? (
+        ) : view === "drawing" && activeDrawingId ? (
           <DrawingView
+            key={activeDrawingId}
+            drawingId={activeDrawingId}
+            onMenuClick={() => setSidebarOpen(true)}
+            onBack={() => setView("drawings")}
+          />
+        ) : view === "drawings" ? (
+          <DrawingListView
             onMenuClick={() => setSidebarOpen(true)}
             onBack={() => setView("chat")}
+            onOpen={(drawingId) => {
+              setActiveDrawingId(drawingId);
+              setView("drawing");
+            }}
           />
         ) : (
           <ChatThread
