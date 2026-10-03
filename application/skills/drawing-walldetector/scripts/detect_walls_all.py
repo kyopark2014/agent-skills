@@ -45,9 +45,10 @@ def main() -> int:
         help="쉼표 구분 층 (미지정 시 floors/ 전부)",
     )
     p.add_argument("--skip", default=None, help="건너뛸 층 (예: 12F)")
-    p.add_argument("--min-len-mm", type=float, default=500.0)
-    p.add_argument("--thick-min-mm", type=float, default=30.0)
-    p.add_argument("--thick-max-mm", type=float, default=420.0)
+    p.add_argument("--project", default=None, help="wall_conditions.json projects 키")
+    p.add_argument("--min-len-mm", type=float, default=None)
+    p.add_argument("--thick-min-mm", type=float, default=None)
+    p.add_argument("--thick-max-mm", type=float, default=None)
     p.add_argument("--no-png", action="store_true")
     p.add_argument(
         "--with-tiles",
@@ -79,17 +80,19 @@ def main() -> int:
             str(args.artifacts),
             "--floor",
             fl,
-            "--min-len-mm",
-            str(args.min_len_mm),
-            "--thick-min-mm",
-            str(args.thick_min_mm),
-            "--thick-max-mm",
-            str(args.thick_max_mm),
             "--dpi",
             str(args.dpi),
             "--px-width",
             str(args.px_width),
         ]
+        if args.project:
+            cmd.extend(["--project", args.project])
+        if args.min_len_mm is not None:
+            cmd.extend(["--min-len-mm", str(args.min_len_mm)])
+        if args.thick_min_mm is not None:
+            cmd.extend(["--thick-min-mm", str(args.thick_min_mm)])
+        if args.thick_max_mm is not None:
+            cmd.extend(["--thick-max-mm", str(args.thick_max_mm)])
         if args.no_png:
             cmd.append("--no-png")
         if args.with_tiles:

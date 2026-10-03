@@ -47,7 +47,8 @@ $ARTIFACTS_DIR/<drawing_id>/
 6. ARC/CIRCLE은 벽이 아님
 7. 폴리라인은 벽 비율 ≥ 75%일 때만 통째 WALL
 8. **X자 문** — 교차 대각선(LINE 두 개, 또는 개구 0.5–2.2 m · 짧은 변 ≤ 0.45 m 인 X 폴리라인)은 벽이 아니다. 이중선 사이의 문 궤적(더 짧은 중간선)도 벽 면에서 제외한다.
-9. **개구로 잘린 간벽** — 조각 길이가 1.7 m 미만이어도, 같은 직선에서 40 mm 이내로 맞닿은 런이 2.2 m 이상이고 두 면 모두 조각이 둘 이상이며 간격이 120–180 mm이면 벽이다. 옷장에 붙은 150 mm 이중선이 이 경우다. 세로 간벽은 런이 2.2 m에 못 미쳐도, 그 이중선이 X 문과 같은 두 면에 맞닿아 있으면 벽이다. X 획 자체는 벽이 아니다.
+9. **개구로 잘린 간벽** — 같은 직선에서 40 mm 이내로 맞닿은 런이 두 면 모두 2.2 m 이상이고 간격이 120–180 mm이면 벽이다. 한 면이 조각 하나여도 된다. 옷장에 붙은 150 mm 이중선이 이 경우다. 세로 간벽은 런이 2.2 m에 못 미쳐도, 그 이중선이 X 문과 같은 두 면에 맞닿아 있으면 벽이다. X 획 자체는 벽이 아니다.
+10. **연속된 실 테두리** — 가장 가까운 평행선 간격이 30–420 mm이고, 짧은 쪽이 6 m 이상이며, 겹침이 짧은 쪽의 80% 이상이면 벽이다. 그 두 면과 8 mm 이내인 2.5 m 이상 조각도 벽이다. 접견실#3의 200 mm 이중선(7.7–7.9 m, 개구 너머 2.8 m)이 이 경우다. 1.7 m 이상·간격 250 mm 이하인 개구 조각은 이 조건에 넣지 않는다. 2.2 m 이상으로 80% 이상 겹치는 평행선이 8개 이상이면 길이만으로 외벽이 되지 않는다. 끝의 짧은 문짝은 그 개수에 넣지 않는다.
 ## 파라미터
 
 | 이름 | 기본 | 의미 |
@@ -71,3 +72,18 @@ $ARTIFACTS_DIR/<drawing_id>/
 | 벽 | `drawing-walldetector` | `$ARTIFACTS_DIR/<id>/floors/<F>/floor_wall_original.dxf` |
 
 타일 `parts/` 분할은 기본 파이프라인에서 쓰지 않는다.
+
+## Known Issues / Fix Log
+
+- **2026-10-03 수정** — `lib_walls.py`의 `classify_entities()` 반환 딕셔너리에서
+  `wall_project` 키를 만들 때 정의되지 않은 지역변수 `cond`를 참조해 모든 호출이
+  `NameError: name 'cond' is not defined`로 실패했다 (`project`/`conditions`
+  기반 다중 프로파일(`wall_conditions.json`)을 지원하도록 리팩터링하면서
+  `_detect_wall_keys_one`의 루프 변수 `cond`가 `classify_entities` 쪽에 남은
+  흔적이었다). `profiles[0].get("_project") if profiles else project`로
+  고쳐 적용 중인 프로파일의 `_project`(없으면 호출 시 넘긴 `project`)를
+  반환하도록 수정했다. `detect_walls_floor.py` / `detect_walls_tile.py` /
+  `detect_walls_all.py`는 모두 `classify_entities`를 통해 호출하므로 이 수정
+  하나로 전부 반영된다. 재현: 임의 층에서
+  `detect_walls_floor.py --artifacts <ART> --floor <F>` 실행 시 100% 재현됨.
+  수정 후 정상 산출 확인(예: `sk_yongin_jiwon` 5F).

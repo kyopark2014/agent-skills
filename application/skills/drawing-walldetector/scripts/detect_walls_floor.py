@@ -25,6 +25,7 @@ from lib_walls import (  # noqa: E402
     classify_entities,
     load_tile_entities,
     render_walls_png,
+    resolve_project_name,
     write_walls_dxf,
 )
 
@@ -35,9 +36,10 @@ def _detect_one(
     tile_id: str,
     src: Path,
     walls_dir: Path,
-    min_len_mm: float,
-    thick_min_mm: float,
-    thick_max_mm: float,
+    project: str | None,
+    min_len_mm: float | None,
+    thick_min_mm: float | None,
+    thick_max_mm: float | None,
     no_png: bool,
     dpi: int,
     px_width: int,
@@ -52,8 +54,10 @@ def _detect_one(
     print(f"\n== {floor} {tile_id} ==", flush=True)
     print(f"  source={src}")
     _, entities = load_tile_entities(src)
+    print(f"  project={project or 'common'}")
     clf = classify_entities(
         entities,
+        project=project,
         min_len_mm=min_len_mm,
         thick_min_mm=thick_min_mm,
         thick_max_mm=thick_max_mm,
@@ -99,6 +103,7 @@ def _detect_one(
             "n_door_x": clf.get("n_door_x"),
             "entity_wall_ratio": clf.get("entity_wall_ratio"),
             "furniture_box_max_mm": clf.get("furniture_box_max_mm"),
+            "wall_project": clf.get("wall_project"),
         },
         "files": {
             "dxf": str(dxf_out),
@@ -146,6 +151,11 @@ def main() -> int:
     )
     p.add_argument("--floor", required=True, help="예: 12F")
     p.add_argument(
+        "--project",
+        default=None,
+        help="wall_conditions.json projects 키. 생략 시 도면 폴더명으로 찾는다.",
+    )
+    p.add_argument(
         "--with-tiles",
         action="store_true",
         help="레거시 parts 타일도 검출 (floor_parts_index.json 필요)",
@@ -162,9 +172,9 @@ def main() -> int:
         help="(레거시) 층 전체만 — 기본 동작과 동일",
     )
     p.add_argument("--original-only", action="store_true", help="층 전체만 (= 기본)")
-    p.add_argument("--min-len-mm", type=float, default=500.0)
-    p.add_argument("--thick-min-mm", type=float, default=30.0)
-    p.add_argument("--thick-max-mm", type=float, default=420.0)
+    p.add_argument("--min-len-mm", type=float, default=None)
+    p.add_argument("--thick-min-mm", type=float, default=None)
+    p.add_argument("--thick-max-mm", type=float, default=None)
     p.add_argument("--no-png", action="store_true")
     p.add_argument("--dpi", type=int, default=200)
     p.add_argument("--px-width", type=int, default=2400)
@@ -219,8 +229,15 @@ def main() -> int:
             original_meta = None
 
     drawing_id = (index or {}).get("drawing_id") or args.artifacts.name
+    if args.project:
+        project = resolve_project_name(args.project)
+        if project is None:
+            raise SystemExit(f"unknown wall project: {args.project}")
+    else:
+        project = resolve_project_name(str(drawing_id))
 
     print(f"floor={args.floor}")
+    print(f"project={project or 'common'}")
     print(f"floor_original_dxf={original_dxf}")
     print(f"floor_original_png={original_png if original_png.is_file() else None}")
     mode = "floor+tiles" if (run_floor and do_tiles) else ("tiles" if do_tiles else "floor")
@@ -254,6 +271,7 @@ def main() -> int:
                     tile_id=tid,
                     src=src,
                     walls_dir=walls_dir,
+                    project=project,
                     min_len_mm=args.min_len_mm,
                     thick_min_mm=args.thick_min_mm,
                     thick_max_mm=args.thick_max_mm,
@@ -294,6 +312,7 @@ def main() -> int:
             tile_id="floor_original",
             src=original_dxf,
             walls_dir=floor_dir,
+            project=project,
             min_len_mm=args.min_len_mm,
             thick_min_mm=args.thick_min_mm,
             thick_max_mm=args.thick_max_mm,
@@ -343,6 +362,7 @@ def main() -> int:
         else None,
         "n_tiles": len(results),
         "params": {
+            "project": project,
             "min_len_mm": args.min_len_mm,
             "thick_min_mm": args.thick_min_mm,
             "thick_max_mm": args.thick_max_mm,

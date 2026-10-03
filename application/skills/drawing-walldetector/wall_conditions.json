@@ -1,0 +1,92 @@
+{
+  "common": [
+    {
+      "candidate": {
+        "angle_tolerance_deg": 8,
+        "min_length_mm": 500,
+        "gap_mm": { "min": 30, "max": 420 },
+        "overlap_mm_min": 400,
+        "overlap_ratio_of_shorter": 0.25
+      },
+      "packed_lines": {
+        "neighbor_count_gte": 3,
+        "median_gap_mm_lte": 160,
+        "ignore_gap_below_mm": 15,
+        "partner_length_mm_gte": 3500
+      },
+      "broken_partition": {
+        "enabled": true,
+        "gap_mm": { "min": 120, "max": 180 },
+        "run_min_length_mm": 2200,
+        "ortho_tolerance_mm": 8,
+        "join_gap_mm": 40
+      },
+      "abuts_door_opening": {
+        "enabled": true,
+        "gap_mm": { "min": 120, "max": 180 },
+        "face_tolerance_mm": 25,
+        "end_touch_mm": 50
+      },
+      "long_double_wall": {
+        "enabled": true,
+        "gap_mm": { "min": 30, "max": 420 },
+        "shorter_length_mm_gte": 6000,
+        "overlap_ratio_of_shorter_gte": 0.8,
+        "long_neighbor_length_mm_gte": 2200,
+        "long_neighbor_overlap_ratio_gte": 0.8,
+        "long_neighbor_count_gte": 8,
+        "face_tolerance_mm": 8,
+        "same_face_shorter_length_mm_gte": 2500
+      },
+      "not_wall": {
+        "opening_fragment": {
+          "both_length_mm_gte": 1700,
+          "gap_mm_lte": 250,
+          "note": "이 이유만으로 벽 쌍으로 두지 않는다."
+        }
+      }
+    }
+  ],
+  "projects": {
+    "hotel": {
+      "match": ["gyeongju_boutique_hotel", "hotel", "호텔"],
+      "note": "304호 오른쪽·305호 왼쪽. 간격 100 mm, 짧은 쪽 3.0 m.",
+      "packed_lines": {
+        "median_gap_mm_lte": 200,
+        "partner_length_mm_gte": 3000
+      },
+      "long_double_wall": {
+        "shorter_length_mm_gte": 3000
+      }
+    },
+    "hynix": {
+      "match": ["sk_yongin_jiwon", "hynix", "하이닉스"],
+      "note": "호텔과 같은 추가 조건. 이웃 간격 중앙값 200 mm, 짝·짧은 쪽 최소 3.0 m.",
+      "packed_lines": {
+        "median_gap_mm_lte": 200,
+        "partner_length_mm_gte": 3000
+      },
+      "long_double_wall": {
+        "shorter_length_mm_gte": 3000
+      }
+    },
+    "hospital": {
+      "match": ["wonkwang_hospital_ward1", "hospital", "병원"],
+      "note": "회의실·교육실 네 변. 간격 200 mm, 짧은 쪽 4.0 m. 오른쪽 면 길이가 4000보다 조금 작다.",
+      "long_double_wall": {
+        "shorter_length_mm_gte": 3990
+      }
+    },
+    "house": {
+      "match": ["seongbuk_dong_rowhouse", "house", "주택"],
+      "note": "옷방 네 변. 간격 50 mm, 짧은 쪽 1.51 m. 오른쪽은 창살 때문에 짝 최소 2.5 m, 위쪽 조각은 같은 면 0.69 m.",
+      "packed_lines": {
+        "partner_length_mm_gte": 2500
+      },
+      "long_double_wall": {
+        "shorter_length_mm_gte": 1510,
+        "same_face_shorter_length_mm_gte": 690
+      }
+    }
+  }
+}

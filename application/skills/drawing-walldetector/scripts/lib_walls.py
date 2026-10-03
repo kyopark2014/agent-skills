@@ -3,8 +3,11 @@
 
 from __future__ import annotations
 
+import copy
+import json
 import math
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 import ezdxf
@@ -25,6 +28,94 @@ COLUMN_LAYER = "COLUMN"
 
 GEOM_TYPES = frozenset({"LINE", "LWPOLYLINE", "POLYLINE", "ARC", "CIRCLE", "ELLIPSE", "SPLINE"})
 
+CONDITIONS_PATH = Path(__file__).resolve().parent.parent / "wall_conditions.json"
+
+
+def read_wall_conditions(path: Path | None = None) -> dict:
+    src = path or CONDITIONS_PATH
+    return json.loads(src.read_text(encoding="utf-8"))
+
+
+def resolve_project_name(hint: str | None, raw: dict | None = None) -> str | None:
+    """프로젝트 키 또는 match 별칭을 projects 키로 바꾼다. 없으면 None."""
+    if not hint:
+        return None
+    data = raw if raw is not None else read_wall_conditions()
+    projects = data.get("projects") or {}
+    if hint in projects:
+        return hint
+    folded = hint.casefold()
+    for name, cfg in projects.items():
+        aliases = [name, *(cfg.get("match") or [])]
+        if any(str(alias).casefold() == folded for alias in aliases):
+            return name
+    return None
+
+
+def _deep_merge(base: dict, override: dict) -> dict:
+    """project에 없는 키는 common 값을 유지한다."""
+    merged = copy.deepcopy(base)
+    for key, value in override.items():
+        if key in ("match", "_project"):
+            continue
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = _deep_merge(merged[key], value)
+        else:
+            merged[key] = copy.deepcopy(value)
+    return merged
+
+
+def _common_condition_list(common: Any) -> list[dict]:
+    """common은 조건 객체 배열이다. 예전 단일 객체도 한 칸으로 읽는다."""
+    if isinstance(common, dict):
+        return [copy.deepcopy(common)]
+    if isinstance(common, list):
+        items = [copy.deepcopy(item) for item in common if isinstance(item, dict)]
+        if len(items) != len(common):
+            raise TypeError("wall_conditions common items must be objects")
+        return items
+    raise TypeError("wall_conditions common must be a list of condition objects")
+
+
+def load_wall_conditions(project: str | None = None, path: Path | None = None) -> list[dict]:
+    """적용할 평행 이중선 조건 목록.
+
+    common[0], common[1], … 를 순서대로 쓴다. project가 맞으면
+    projects.<이름> 조건을 같은 형식으로 뒤에 붙인다. 별칭은 projects 키로 푼다.
+    """
+    raw = read_wall_conditions(path)
+    conditions = _common_condition_list(raw["common"])
+    if not conditions:
+        raise ValueError("wall_conditions common is empty")
+    resolved = None
+    if project:
+        resolved = resolve_project_name(project, raw)
+        if resolved is None:
+            known = ", ".join(sorted(raw.get("projects") or {}))
+            raise KeyError(f"unknown wall project: {project} (known: {known})")
+        extra = copy.deepcopy(raw["projects"][resolved])
+        extra.pop("match", None)
+        bases = list(conditions)
+        for base in bases:
+            conditions.append(_deep_merge(base, extra))
+    for cond in conditions:
+        cond["_project"] = resolved
+    return conditions
+
+
+def _wall_condition_profiles(
+    conditions: dict | list[dict] | None,
+    project: str | None,
+) -> list[dict]:
+    """검출에 쓸 조건 목록. 이미 고른 목록은 프로젝트를 다시 붙이지 않는다."""
+    if conditions is None:
+        return load_wall_conditions(project)
+    if isinstance(conditions, list):
+        return [copy.deepcopy(item) for item in conditions if isinstance(item, dict)]
+    if isinstance(conditions, dict):
+        return [copy.deepcopy(conditions)]
+    raise TypeError("wall conditions must be an object or a list of objects")
+
 
 @dataclass
 class Seg:
@@ -38,14 +129,16 @@ class Seg:
     is_h: bool = False
     is_v: bool = False
     key: tuple[int, int] = field(default_factory=tuple)
+    angle_tol_deg: float = 8.0
 
     def __post_init__(self) -> None:
         dx = self.x1 - self.x0
         dy = self.y1 - self.y0
         self.length = math.hypot(dx, dy)
         ang = abs(math.degrees(math.atan2(dy, dx))) % 180.0
-        self.is_h = ang < 8.0 or abs(ang - 180.0) < 8.0
-        self.is_v = abs(ang - 90.0) < 8.0
+        tol = self.angle_tol_deg
+        self.is_h = ang < tol or abs(ang - 180.0) < tol
+        self.is_v = abs(ang - 90.0) < tol
         self.key = (self.entity_idx, self.seg_idx)
         # normalize direction for overlap tests
         if self.is_h and self.x0 > self.x1:
@@ -62,13 +155,15 @@ def _overlap_1d(a0: float, a1: float, b0: float, b1: float) -> float:
     return max(0.0, hi - lo)
 
 
-def extract_segments(entities: list[DXFEntity]) -> list[Seg]:
+def extract_segments(entities: list[DXFEntity], *, angle_tol_deg: float = 8.0) -> list[Seg]:
     segs: list[Seg] = []
     for ei, e in enumerate(entities):
         t = e.dxftype()
         if t == "LINE":
             s, ed = e.dxf.start, e.dxf.end
-            segs.append(Seg(float(s.x), float(s.y), float(ed.x), float(ed.y), ei, 0))
+            segs.append(
+                Seg(float(s.x), float(s.y), float(ed.x), float(ed.y), ei, 0, angle_tol_deg=angle_tol_deg)
+            )
         elif t == "LWPOLYLINE":
             pts = [(float(p[0]), float(p[1])) for p in e.get_points("xy")]
             if len(pts) < 2:
@@ -77,7 +172,7 @@ def extract_segments(entities: list[DXFEntity]) -> list[Seg]:
             if e.closed and pts[0] != pts[-1]:
                 pairs.append((pts[-1], pts[0]))
             for si, (a, b) in enumerate(pairs):
-                segs.append(Seg(a[0], a[1], b[0], b[1], ei, si))
+                segs.append(Seg(a[0], a[1], b[0], b[1], ei, si, angle_tol_deg=angle_tol_deg))
     return segs
 
 
@@ -440,12 +535,16 @@ def _abuts_door_opening(
     *,
     along_x: bool,
     slots: list[tuple[bool, float, float, float, float]],
+    cfg: dict,
 ) -> bool:
     """간벽 이중선이 X 문 개구와 같은 두 면에 맞닿아 있으면 벽.
 
     세로 벽은 조각이 1 m 안팎이라 2.2 m 런에 못 들어간다. 문 심볼 자체는 제외한다.
     """
-    if not slots or not (120.0 <= dist_mm <= 180.0):
+    if not cfg.get("enabled", True) or not slots:
+        return False
+    gap = cfg["gap_mm"]
+    if not (gap["min"] <= dist_mm <= gap["max"]):
         return False
     if along_x:
         o0 = min((a.y0 + a.y1) * 0.5, (b.y0 + b.y1) * 0.5)
@@ -464,11 +563,52 @@ def _abuts_door_opening(
     for slot_along_x, slo, shi, alo, ahi in slots:
         if slot_along_x != along_x:
             continue
-        if abs(slo - o0) > 25.0 or abs(shi - o1) > 25.0:
+        face_tol = cfg["face_tolerance_mm"]
+        if abs(slo - o0) > face_tol or abs(shi - o1) > face_tol:
             continue
-        if any(_interval_sep(s0, s1, alo, ahi) <= 50.0 for s0, s1 in spans):
+        touch = cfg["end_touch_mm"]
+        if any(_interval_sep(s0, s1, alo, ahi) <= touch for s0, s1 in spans):
             return True
     return False
+
+
+def _pair_overlap(a: Seg, b: Seg, *, along_x: bool) -> float:
+    if along_x:
+        return _overlap_1d(a.x0, a.x1, b.x0, b.x1)
+    return _overlap_1d(a.y0, a.y1, b.y0, b.y1)
+
+
+def _long_double_wall(
+    a: Seg,
+    b: Seg,
+    dist_mm: float,
+    overlap_mm: float,
+    cfg: dict,
+) -> bool:
+    """연속된 실 테두리. enabled인 프로젝트에서만 벽으로 둔다."""
+    if not cfg.get("enabled"):
+        return False
+    gap = cfg["gap_mm"]
+    if not (gap["min"] <= dist_mm <= gap["max"]):
+        return False
+    short = min(a.length, b.length)
+    if short < cfg["shorter_length_mm_gte"]:
+        return False
+    return overlap_mm >= cfg["overlap_ratio_of_shorter_gte"] * short
+
+
+def _remember_face(
+    faces: list[tuple[float, float]],
+    ortho_a: float,
+    ortho_b: float,
+    *,
+    tolerance_mm: float,
+) -> None:
+    lo, hi = (ortho_a, ortho_b) if ortho_a <= ortho_b else (ortho_b, ortho_a)
+    for a, b in faces:
+        if abs(a - lo) <= tolerance_mm and abs(b - hi) <= tolerance_mm:
+            return
+    faces.append((lo, hi))
 
 
 def _broken_partition_pair(
@@ -476,57 +616,118 @@ def _broken_partition_pair(
     b: Seg,
     dist_mm: float,
     runs: dict[tuple[int, int], tuple[float, int]],
+    cfg: dict,
 ) -> bool:
     """문·개구로 잘린 간벽.
 
-    조각은 1.7 m 미만이어도, 같은 직선에서 맞닿은 런이 2.2 m 이상이고
-    두 면 모두 조각이 둘 이상이며 간격이 간벽 두께(120–180 mm)이면 벽이다.
-    옷장에 붙은 150 mm 이중선이 이 경우다.
+    같은 직선에서 맞닿은 런이 2.2 m 이상이고 간격이 간벽 두께(120–180 mm)이면 벽이다.
+    한 면이 조각 하나여도 된다. 옷장에 붙은 150 mm 이중선이 이 경우다.
     """
-    if not (120.0 <= dist_mm <= 180.0):
+    if not cfg.get("enabled", True):
         return False
-    len_a, n_a = runs[a.key]
-    len_b, n_b = runs[b.key]
-    return min(len_a, len_b) >= 2200.0 and n_a >= 2 and n_b >= 2
+    gap = cfg["gap_mm"]
+    if not (gap["min"] <= dist_mm <= gap["max"]):
+        return False
+    len_a, _n_a = runs[a.key]
+    len_b, _n_b = runs[b.key]
+    return min(len_a, len_b) >= cfg["run_min_length_mm"]
+
+
+def _apply_candidate_overrides(
+    cond: dict,
+    *,
+    min_len_mm: float | None,
+    thick_min_mm: float | None,
+    thick_max_mm: float | None,
+    min_overlap_mm: float | None,
+    stair_count: int | None,
+    wall_pack_gap_mm: float | None,
+) -> dict:
+    """CLI로 넘긴 값이 있으면 JSON 후보·여러 겹 값을 덮어쓴다."""
+    cand = cond["candidate"]
+    if min_len_mm is not None:
+        cand["min_length_mm"] = min_len_mm
+    if thick_min_mm is not None:
+        cand["gap_mm"]["min"] = thick_min_mm
+    if thick_max_mm is not None:
+        cand["gap_mm"]["max"] = thick_max_mm
+    if min_overlap_mm is not None:
+        cand["overlap_mm_min"] = min_overlap_mm
+    packed = cond["packed_lines"]
+    if stair_count is not None:
+        packed["neighbor_count_gte"] = stair_count - 1
+    if wall_pack_gap_mm is not None:
+        packed["median_gap_mm_lte"] = wall_pack_gap_mm
+    return cond
 
 
 def detect_wall_keys(
     segs: list[Seg],
     *,
-    min_len_mm: float = 500.0,
-    thick_min_mm: float = 30.0,
-    thick_max_mm: float = 420.0,
-    min_overlap_mm: float = 400.0,
-    stair_count: int = 4,
-    wall_pack_gap_mm: float = 160.0,
+    project: str | None = None,
+    conditions: dict | list[dict] | None = None,
+    min_len_mm: float | None = None,
+    thick_min_mm: float | None = None,
+    thick_max_mm: float | None = None,
+    min_overlap_mm: float | None = None,
+    stair_count: int | None = None,
+    wall_pack_gap_mm: float | None = None,
     door_entity_idxs: set[int] | None = None,
     door_slots: list[tuple[bool, float, float, float, float]] | None = None,
 ) -> set[tuple[int, int]]:
-    """평행 이중선(벽 두께 대역) 기반 벽 세그먼트 키 집합.
+    """평행 이중선 벽 세그먼트 키.
 
-    stair_count: 두께 대역 안 평행 이웃이 (stair_count-1)개 이상이고
-    간격이 성기면 계단/해칭으로 제외 (기본 4 → 이웃 ≥3).
-
-    간격이 촘촘하다는 이유만으로 2.8 m 이상 긴 선을 외벽으로 두지 않는다.
-    wall_pack_gap_mm: 성긴 겹과 촘촘한 겹을 가르는 인접 간격 중앙값.
-
-    양쪽이 1.7 m 이상이고 간격이 250 mm 이하라는 이유만으로 개구 조각
-    벽 쌍으로 두지 않는다.
-
-    door_entity_idxs: X자 문. 대각선과 문 심볼 획은 벽이 아니다.
-    door_slots: X 개구의 두 면. 거기에 맞닿은 세로·가로 간벽 조각은 벽이다.
+    common 배열의 각 조건으로 고른 벽을 합친다. project가 맞으면 그 조건을 뒤에 붙여 같이 고른다.
+    min_len_mm 등을 넘기면 조건마다 그 값만 JSON을 덮어쓴다.
     """
     doors = door_entity_idxs or set()
     slots = door_slots or []
+    wall: set[tuple[int, int]] = set()
+    for profile in _wall_condition_profiles(conditions, project):
+        tuned = _apply_candidate_overrides(
+            profile,
+            min_len_mm=min_len_mm,
+            thick_min_mm=thick_min_mm,
+            thick_max_mm=thick_max_mm,
+            min_overlap_mm=min_overlap_mm,
+            stair_count=stair_count,
+            wall_pack_gap_mm=wall_pack_gap_mm,
+        )
+        wall |= _detect_wall_keys_one(segs, tuned, doors, slots)
+    return wall
+
+
+def _detect_wall_keys_one(
+    segs: list[Seg],
+    cond: dict,
+    doors: set[int],
+    slots: list[tuple[bool, float, float, float, float]],
+) -> set[tuple[int, int]]:
+    """조건 하나에서 평행 이중선 벽 키를 고른다."""
+    cand_cfg = cond["candidate"]
+    packed_cfg = cond["packed_lines"]
+    part_cfg = cond["broken_partition"]
+    door_cfg = cond["abuts_door_opening"]
+    long_cfg = cond.get("long_double_wall") or {"enabled": False}
+    min_len = float(cand_cfg["min_length_mm"])
+    thick_min = float(cand_cfg["gap_mm"]["min"])
+    thick_max = float(cand_cfg["gap_mm"]["max"])
+    min_overlap = float(cand_cfg["overlap_mm_min"])
+    overlap_ratio = float(cand_cfg["overlap_ratio_of_shorter"])
     cand = [
         s
         for s in segs
-        if (s.is_h or s.is_v) and s.length >= min_len_mm and s.entity_idx not in doors
+        if (s.is_h or s.is_v) and s.length >= min_len and s.entity_idx not in doors
     ]
     wall: set[tuple[int, int]] = set()
 
     def mark_pairs(group: list[Seg], ortho_attr: str, along: str) -> None:
-        runs = _collinear_runs(group, along_x=(along == "x"))
+        runs = _collinear_runs(
+            group,
+            along_x=(along == "x"),
+            gap_mm=float(part_cfg["join_gap_mm"]),
+            ortho_tol_mm=float(part_cfg["ortho_tolerance_mm"]),
+        )
 
         def mid_ortho(s: Seg) -> float:
             if ortho_attr == "y":
@@ -535,6 +736,8 @@ def detect_wall_keys(
 
         items = sorted(group, key=mid_ortho)
         n = len(items)
+        long_faces: list[tuple[float, float]] = []
+        along_x = along == "x"
         for i in range(n):
             a = items[i]
             ma = mid_ortho(a)
@@ -544,15 +747,12 @@ def detect_wall_keys(
                 b = items[j]
                 mb = mid_ortho(b)
                 d = mb - ma
-                if d > thick_max_mm:
+                if d > thick_max:
                     break
-                if d < thick_min_mm:
+                if d < thick_min:
                     continue
-                if along == "x":
-                    ov = _overlap_1d(a.x0, a.x1, b.x0, b.x1)
-                else:
-                    ov = _overlap_1d(a.y0, a.y1, b.y0, b.y1)
-                need = max(min_overlap_mm, 0.25 * min(a.length, b.length))
+                ov = _pair_overlap(a, b, along_x=along_x)
+                need = max(min_overlap, overlap_ratio * min(a.length, b.length))
                 if ov >= need:
                     neighbors.append((d, b))
             if not neighbors:
@@ -560,46 +760,93 @@ def detect_wall_keys(
             # 평행선이 여러 겹이면 성긴 간격만 계단/해칭으로 뺀다.
             # 촘촘하다고 긴 선을 외벽으로 넣지는 않는다.
             partners = neighbors
-            if len(neighbors) >= stair_count - 1:
+            if len(neighbors) >= int(packed_cfg["neighbor_count_gte"]):
                 distances = sorted(d for d, _ in neighbors)
                 gaps = [distances[0]] + [
                     distances[k] - distances[k - 1] for k in range(1, len(distances))
                 ]
-                real_gaps = [g for g in gaps if g >= 15.0] or gaps
-                packed = _median(real_gaps) <= wall_pack_gap_mm
+                ignore_below = float(packed_cfg["ignore_gap_below_mm"])
+                real_gaps = [g for g in gaps if g >= ignore_below] or gaps
+                packed = _median(real_gaps) <= float(packed_cfg["median_gap_mm_lte"])
                 if not packed:
                     continue
-                # 개구로 잘려 2m 안팎인 외벽. 짧은 멀라이언은 빼고 긴 겹만 짝으로 본다.
-                partners = [(d, b) for d, b in neighbors if b.length >= 1200.0]
+                partner_len = float(packed_cfg["partner_length_mm_gte"])
+                partners = [(d, b) for d, b in neighbors if b.length >= partner_len]
                 if not partners:
                     continue
-            # 가장 가까운 평행선이 1.7 m 이상이고 간격이 250 mm 이하여도
-            # 그 이유만으로 벽 쌍이 아니다. 같은 직선으로 이어진 간벽이거나
-            # X 문 개구에 맞닿을 때만 벽이다.
             d0, b0 = min(partners, key=lambda t: t[0])
-            if not (thick_min_mm <= d0 <= thick_max_mm):
+            if not (thick_min <= d0 <= thick_max):
                 continue
-            if (
-                _broken_partition_pair(a, b0, d0, runs)
-                or _abuts_door_opening(a, b0, d0, along_x=(along == "x"), slots=slots)
-            ):
+            # 간벽은 여러 겹 필터로 빠진 짧은 조각도 본다. 조각 수는 조건이 아니다.
+            for d_part, part in sorted(neighbors, key=lambda t: t[0]):
+                if _broken_partition_pair(a, part, d_part, runs, part_cfg):
+                    wall.add(a.key)
+                    wall.add(part.key)
+                    break
+            else:
+                part = None
+            if part is not None:
+                continue
+            if _abuts_door_opening(a, b0, d0, along_x=along_x, slots=slots, cfg=door_cfg):
                 wall.add(a.key)
                 wall.add(b0.key)
                 continue
+            if long_cfg.get("enabled"):
+                # 끝의 짧은 문짝은 여러 겹이 아니다.
+                neighbor_len = float(long_cfg["long_neighbor_length_mm_gte"])
+                neighbor_ratio = float(long_cfg["long_neighbor_overlap_ratio_gte"])
+                long_neighbors = [
+                    b
+                    for _, b in neighbors
+                    if b.length >= neighbor_len
+                    and _pair_overlap(a, b, along_x=along_x)
+                    >= neighbor_ratio * min(a.length, b.length)
+                ]
+                crowded = len(long_neighbors) >= int(long_cfg["long_neighbor_count_gte"])
+                ov0 = _pair_overlap(a, b0, along_x=along_x)
+                if not crowded and _long_double_wall(a, b0, d0, ov0, long_cfg):
+                    wall.add(a.key)
+                    wall.add(b0.key)
+                    _remember_face(
+                        long_faces,
+                        ma,
+                        mid_ortho(b0),
+                        tolerance_mm=float(long_cfg["face_tolerance_mm"]),
+                    )
+                    continue
             # 가장 가까운 선이 벽이 아니면, 더 먼 평행선은 길이만으로 짝이지 않다.
-            # 같은 직선으로 이어진 간벽이거나 X 문 개구에 맞닿을 때만 벽이다.
             for d2, c in sorted(partners, key=lambda t: t[0]):
                 if d2 <= d0 + 1.0:
                     continue
-                if (
-                    _broken_partition_pair(a, c, d2, runs)
-                    or _abuts_door_opening(
-                        a, c, d2, along_x=(along == "x"), slots=slots
-                    )
+                if _abuts_door_opening(
+                    a, c, d2, along_x=along_x, slots=slots, cfg=door_cfg
                 ):
                     wall.add(a.key)
                     wall.add(c.key)
                     break
+
+        if long_cfg.get("enabled") and long_faces:
+            face_tol = float(long_cfg["face_tolerance_mm"])
+            piece_len = float(long_cfg["same_face_shorter_length_mm_gte"])
+            piece_ratio = float(long_cfg["overlap_ratio_of_shorter_gte"])
+            for lo, hi in long_faces:
+                side_lo = [
+                    s
+                    for s in group
+                    if s.length >= piece_len and abs(mid_ortho(s) - lo) <= face_tol
+                ]
+                side_hi = [
+                    s
+                    for s in group
+                    if s.length >= piece_len and abs(mid_ortho(s) - hi) <= face_tol
+                ]
+                for left in side_lo:
+                    for right in side_hi:
+                        short = min(left.length, right.length)
+                        ov = _pair_overlap(left, right, along_x=along_x)
+                        if ov >= piece_ratio * short:
+                            wall.add(left.key)
+                            wall.add(right.key)
 
     h_segs = [s for s in cand if s.is_h]
     v_segs = [s for s in cand if s.is_v]
@@ -809,9 +1056,11 @@ def _bay_window_entity_idxs(entities: list[DXFEntity]) -> set[int]:
 def classify_entities(
     entities: list[DXFEntity],
     *,
-    min_len_mm: float = 500.0,
-    thick_min_mm: float = 30.0,
-    thick_max_mm: float = 420.0,
+    project: str | None = None,
+    conditions: dict | list[dict] | None = None,
+    min_len_mm: float | None = None,
+    thick_min_mm: float | None = None,
+    thick_max_mm: float | None = None,
     entity_wall_ratio: float = 0.75,
     furniture_box_max_mm: float = 3500.0,
 ) -> dict[str, Any]:
@@ -825,10 +1074,16 @@ def classify_entities(
       (미만이면 세그먼트만 wall_segs 로 빨강)
     - 두께 0으로 겹친 사각 공유 변은 벽이 아니다. 평행 이중선만 벽이다.
     """
-    segs = extract_segments(entities)
+    profiles = _wall_condition_profiles(conditions, project)
+    angle_tol = max(float(profile["candidate"]["angle_tolerance_deg"]) for profile in profiles)
+    segs = extract_segments(
+        entities,
+        angle_tol_deg=angle_tol,
+    )
     door_x_idxs = find_door_x_idxs(entities)
     wall_keys = detect_wall_keys(
         segs,
+        conditions=profiles,
         min_len_mm=min_len_mm,
         thick_min_mm=thick_min_mm,
         thick_max_mm=thick_max_mm,
@@ -905,6 +1160,7 @@ def classify_entities(
         "door_entity_idxs": sorted(set(door_x_idxs) | set(door_drop)),
         "entity_wall_ratio": entity_wall_ratio,
         "furniture_box_max_mm": furniture_box_max_mm,
+        "wall_project": (profiles[0].get("_project") if profiles else project),
     }
 
 

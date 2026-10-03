@@ -33,9 +33,10 @@ def main() -> int:
     p.add_argument("--out-dir", type=Path, required=True, help="walls/ 출력 디렉터리")
     p.add_argument("--tile-id", default=None, help="예: R0C0 (미지정 시 dxf stem)")
     p.add_argument("--floor", default="")
-    p.add_argument("--min-len-mm", type=float, default=500.0)
-    p.add_argument("--thick-min-mm", type=float, default=30.0)
-    p.add_argument("--thick-max-mm", type=float, default=420.0)
+    p.add_argument("--project", default=None, help="wall_conditions.json projects 키")
+    p.add_argument("--min-len-mm", type=float, default=None)
+    p.add_argument("--thick-min-mm", type=float, default=None)
+    p.add_argument("--thick-max-mm", type=float, default=None)
     p.add_argument("--no-png", action="store_true")
     p.add_argument("--dpi", type=int, default=200)
     p.add_argument("--px-width", type=int, default=2400)
@@ -51,6 +52,7 @@ def main() -> int:
 
     clf = classify_entities(
         entities,
+        project=args.project,
         min_len_mm=args.min_len_mm,
         thick_min_mm=args.thick_min_mm,
         thick_max_mm=args.thick_max_mm,
