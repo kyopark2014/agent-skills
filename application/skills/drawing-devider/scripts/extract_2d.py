@@ -4,7 +4,7 @@
 
 원본은 XREF/블록 중심(277MB)이라 modelspace 순회만으로는 도면이 거의 없다.
 해당 층 INSERT만 골라 explode한 뒤 `floors/<F>/floor_original.dxf`를 만든다.
-도곽 안에 건축 레이어가 있으면 벽·실명·문 스윙만 남긴다
+도곽 안에 건축 레이어가 있으면 벽·창·실명·문 스윙만 남긴다
 (가구·카세트 배관·등고선은 제외). 미리보기 이름은 floor_original.png 만 쓴다.
 XA-S-{N}F 평면 블록이 없으면 도곽(축정렬 테두리)과 층 제목으로 영역을 자른다.
 기본으로 같은 경로에 `floor_original.png` / `_meta.json`도 렌더한다 (`--no-png`로 생략).
@@ -923,7 +923,7 @@ def extract_sheet_floor(
 ) -> dict:
     """도곽 bbox를 층으로 저장. 결과는 floor_original.dxf / floor_original.png.
 
-    건축 레이어가 있으면 벽·실명·문만 남긴다. floor_structure.* 는 쓰지 않는다.
+    건축 레이어가 있으면 벽·창·실명·문만 남긴다. 창선은 벽과 같이 둔다. floor_structure.* 는 쓰지 않는다.
     """
     if variant not in {"clean", "original"}:
         raise ValueError(f"variant 오류: {variant!r}")

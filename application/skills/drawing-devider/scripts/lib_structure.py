@@ -1,6 +1,6 @@
 """floor_original용 구조 필터.
 
-건축 벽·실명과 문 스윙만 남긴다. 결과는 항상
+건축 벽·창·실명과 문 스윙만 남긴다. 창선은 벽과 같이 남긴다. 결과는 항상
 `floors/<F>/floor_original.dxf` / `floor_original.png` 로 저장한다.
 `floor_structure.*` 는 만들지 않는다.
 
@@ -81,7 +81,7 @@ def _place_insert(doc: Drawing, insert):
 
 
 def collect_structural_sheet(doc: Drawing, clip: tuple[float, float, float, float]):
-    """도곽 안의 벽·실명·문. 건축 레이어가 없으면 None."""
+    """도곽 안의 벽·창·실명·문. 건축 레이어의 창선은 벽과 같이 남긴다. 없으면 None."""
     direct = []
     layers: set[str] = set()
     for entity in doc.modelspace():

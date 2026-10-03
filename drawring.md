@@ -342,7 +342,7 @@ walldetector 휴리스틱 + Vision bbox가 겹치면 “구조적으로 이상�
 |--|------|
 | **증상** | 진짜 기둥이 회색이거나, 작은 정사각 밀집 격자가 WALL(빨강) |
 | **원인** | `_` 없는 사각 오인; 외부 연결선까지 승격하면 가구 이중선이 WALL 됨 |
-| **대응** | (1) 정사각+`_` 심볼만 `promote_hbeam_columns` (2) 외부 연결 승격 없음 (3) 소형 밀집 제외 (4) 가구 demote에서 기둥 exclude (5) `demote_line_furniture_boxes` — LINE 소파·테이블 직사각은 protect보다 우선 demote (6) `demote_fitness_equipment` — 「피트니스」라벨 주변 웨이트/짧은 BASE 밀집 셀의 짧은 WALL demote (7) `demote_landscape_walls` — 정원 물결 윤곽 내부·바위 클러스터를 가로지르는 WALL demote (facade 가장자리 유지) |
+| **대응** | (1) 정사각+`_` 심볼만 `promote_hbeam_columns` (2) 외부 연결 승격 없음 (3) 소형 밀집 제외 (4) 가구 demote에서 기둥 exclude (5) `demote_fitness_equipment` — 「피트니스」라벨 주변 웨이트/짧은 BASE 밀집 셀의 짧은 WALL demote (6) `demote_landscape_walls` — 정원 물결 윤곽 내부·바위 클러스터를 가로지르는 WALL demote (facade 가장자리 유지) |
 
 #### 처리 순서 (현재 `apply_corrections`)
 

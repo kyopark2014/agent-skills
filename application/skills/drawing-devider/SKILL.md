@@ -89,7 +89,7 @@ ART="$ARTIFACTS_DIR/sk_yongin_jiwon"
 
 | 스크립트 | 용도 |
 | --- | --- |
-| `$SCRIPTS/extract_2d.py` | 원본 → `floors/<F>/floor_original.dxf` (+ `.png` 자동). 건축 레이어가 있으면 벽·실명·문만 |
+| `$SCRIPTS/extract_2d.py` | 원본 → `floors/<F>/floor_original.dxf` (+ `.png` 자동). 건축 레이어가 있으면 벽·창·실명·문만 |
 | `$SCRIPTS/lib_structure.py` | 그 필터. 출력 이름은 `floor_original.png` (`floor_structure.*` 금지) |
 | `$SCRIPTS/analyze_drawing.py` | 구조 실측 → `structure.md` / `structure.json` |
 | `$SCRIPTS/lib_render.py` | 치수·고해상도 렌더 라이브러리 |
@@ -144,7 +144,7 @@ python3 "$SCRIPTS/extract_2d.py" \
 ```
 
 성공 시 `floors/12F/floor_original.dxf` / `.png` / `_meta.json`이 생긴다. 같은 파일이 있으면 덮어쓴다.  
-도곽 안에 건축 레이어(`ARCH`, `*_BG`·`*_CEN` 제외)가 있으면 그 선·실명과 문 스윙만 남긴다. 가구·카세트 배관·등고선은 넣지 않는다. 이 결과도 파일명은 `floor_original.png` 이다.  
+도곽 안에 건축 레이어(`ARCH`, `*_BG`·`*_CEN` 제외)가 있으면 그 선·실명과 문 스윙만 남긴다. 그 레이어의 창선은 벽과 같이 남긴다. 가구·카세트 배관·등고선은 넣지 않는다. 이 결과도 파일명은 `floor_original.png` 이다.  
 다층이면 **멈추지 말고** 다음 층을 바로 추출한다. 사용자 허락을 받지 않는다.
 
 ### 층 구분 (블록 이름 → 도곽)
@@ -245,7 +245,7 @@ $ARTIFACTS_DIR/
 | 산출 | 용도 |
 |------|------|
 | `drawing_list.json` | 도면 메뉴용 프로젝트 목록. 각 도면에 **원본 DXF 파일명** `source_filename`(및 `source_path`)을 `floors`보다 **앞**에 반드시 기록한다. 그 외 `drawing_id`, 폴더명, 생성·수정 시각, 발견 층, 층별 상태(`pending`/`ready`/`error`)와 DXF·PNG 상대경로. 삭제·재추출의 기준 |
-| `floors/<F>/floor_original.dxf` (+ `.png`) | **구조용 층** (벽·실명·문 스윙) → **공식 층 단위 입력** · **미리보기**. 건축 레이어가 있으면 가구·카세트 배관·등고선·중심선은 넣지 않는다 |
+| `floors/<F>/floor_original.dxf` (+ `.png`) | **구조용 층** (벽·창·실명·문 스윙) → **공식 층 단위 입력** · **미리보기**. 건축 레이어의 창선은 벽과 같이 남긴다. 가구·카세트 배관·등고선·중심선은 넣지 않는다 |
 | `parts/` · `floor_parts_index.json` · `split_plan.*` | **기본 미생성** (레거시·선택) |
 | `floor_structure.*` | **생성 금지** — 같은 내용은 `floor_original.png` |
 | `floor_overview.*` | **제거됨** — 생성·사용 금지 |

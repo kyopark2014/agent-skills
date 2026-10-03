@@ -14,12 +14,15 @@ import ezdxf
 import shapely
 from PIL import Image, ImageDraw, ImageFont
 from shapely.geometry import GeometryCollection, LineString, Point, Polygon, box
-from shapely.ops import polygonize
+from shapely.ops import polygonize, unary_union
 from shapely.strtree import STRtree
 
 Image.MAX_IMAGE_PIXELS = None
 
 WALL_LAYER = "WALL"
+WINDOW_LAYER = "WINDOW"
+COLUMN_LAYER = "COLUMN"
+BOUNDARY_LAYERS = (WALL_LAYER, WINDOW_LAYER, COLUMN_LAYER)
 AXIS_TOL_MM = 20.0
 CLUSTER_TOL_MM = 15.0
 JOIN_MM = 80.0
@@ -107,16 +110,24 @@ def _rect_box(pts: list[tuple[float, float]]) -> tuple[float, float, float, floa
 
 
 def column_boxes(msp) -> list[tuple[float, float, float, float]]:
-    """H-Beam: 변 0.45–1.5 m 축평행 정사각. 동심 쌍 또는 중심 짧은 선."""
+    """H-Beam: 변 0.45–1.5 m 축평행 정사각. 동심 쌍 또는 중심 짧은 선.
+
+    COLUMN 레이어의 정사각은 이미 기둥으로 저장됐으므로 그대로 쓴다.
+    """
     squares: list[tuple[float, float, float, float]] = []
+    column_layer_boxes: list[tuple[float, float, float, float]] = []
     for e in msp:
-        if e.dxf.layer != WALL_LAYER or e.dxftype() != "LWPOLYLINE" or not e.closed:
+        if e.dxf.layer not in (WALL_LAYER, COLUMN_LAYER) or e.dxftype() != "LWPOLYLINE" or not e.closed:
             continue
         pts = [(float(a), float(b)) for a, b in e.get_points("xy")]
         if len(pts) < 4:
             continue
         box = _rect_box(pts)
-        if box:
+        if not box:
+            continue
+        if e.dxf.layer == COLUMN_LAYER:
+            column_layer_boxes.append(box)
+        else:
             squares.append(box)
 
     def center(b):
@@ -124,7 +135,7 @@ def column_boxes(msp) -> list[tuple[float, float, float, float]]:
 
     ticks: list[tuple[float, float, float]] = []
     for e in msp:
-        if e.dxf.layer != WALL_LAYER or e.dxftype() != "LINE":
+        if e.dxf.layer not in (WALL_LAYER, COLUMN_LAYER) or e.dxftype() != "LINE":
             continue
         x0, y0 = float(e.dxf.start.x), float(e.dxf.start.y)
         x1, y1 = float(e.dxf.end.x), float(e.dxf.end.y)
@@ -164,6 +175,9 @@ def column_boxes(msp) -> list[tuple[float, float, float, float]]:
         outer = max(group, key=lambda b: (b[2] - b[0]) * (b[3] - b[1]))
         if not any(abs(outer[0] - u[0]) < 1 and abs(outer[1] - u[1]) < 1 for u in outers):
             outers.append(outer)
+    for box in column_layer_boxes:
+        if not any(abs(box[0] - u[0]) < 1 and abs(box[1] - u[1]) < 1 for u in outers):
+            outers.append(box)
     return outers
 
 
@@ -177,7 +191,8 @@ def _inside_box(x: float, y: float, boxes) -> bool:
 def wall_segments(msp, boxes) -> list[tuple[float, float, float, float]]:
     segs: list[tuple[float, float, float, float]] = []
     for e in msp:
-        if e.dxf.layer != WALL_LAYER:
+        # WALL·WINDOW·COLUMN 은 모두 면적 경계다. 레이어는 구분용이다.
+        if e.dxf.layer not in BOUNDARY_LAYERS:
             continue
         t = e.dxftype()
         parts: list[tuple[float, float, float, float]] = []
@@ -646,6 +661,70 @@ def _roomish(text: str) -> bool:
     return re.search(r"[가-힣]", name) is not None
 
 
+def _door_thresholds(msp, lines: list[LineString], origin: tuple[float, float], pad: float) -> list[LineString]:
+    """여닫이 문 개구를 문선으로 막는다.
+
+    힌지 뒤의 벽과 문짝 끝의 벽을 문 방향으로 잇는다.
+    면적은 그 선에서 멈추고 문 밖 공간으로 넘어가지 않는다.
+    """
+    if not lines:
+        return []
+    ox, oy = origin
+    walls = unary_union(lines)
+    extra: list[LineString] = []
+    for entity in msp:
+        if entity.dxftype() != "ARC" or getattr(entity.dxf, "layer", None) != "DOOR":
+            continue
+        try:
+            radius = float(entity.dxf.radius)
+            start_angle = float(entity.dxf.start_angle)
+            end_angle = float(entity.dxf.end_angle)
+            center = entity.dxf.center
+        except Exception:  # noqa: BLE001
+            continue
+        sweep = (end_angle - start_angle) % 360.0
+        if not (600.0 <= radius <= 1600.0 and 70.0 <= sweep <= 110.0):
+            continue
+        hx, hy = float(center.x), float(center.y)
+        if abs(hx - ox) > pad or abs(hy - oy) > pad:
+            continue
+        for angle in (start_angle, end_angle):
+            rad = math.radians(angle)
+            ux, uy = math.cos(rad), math.sin(rad)
+            ray = LineString(
+                [(hx - ux * 800.0, hy - uy * 800.0), (hx + ux * (radius + 200.0), hy + uy * (radius + 200.0))]
+            )
+            inter = walls.intersection(ray)
+            if inter.is_empty:
+                continue
+            geoms = list(inter.geoms) if hasattr(inter, "geoms") else [inter]
+            alongs: list[float] = []
+            for geom in geoms:
+                coords: list[tuple[float, float]] = []
+                if geom.geom_type == "Point":
+                    coords = [(float(geom.x), float(geom.y))]
+                elif geom.geom_type == "LineString":
+                    coords = [(float(x), float(y)) for x, y in geom.coords]
+                elif geom.geom_type == "MultiLineString":
+                    for part in geom.geoms:
+                        coords.extend((float(x), float(y)) for x, y in part.coords)
+                for x, y in coords:
+                    alongs.append((x - hx) * ux + (y - hy) * uy)
+            behind = [value for value in alongs if -700.0 <= value <= -30.0]
+            ahead = [value for value in alongs if radius * 0.75 <= value <= radius + 180.0]
+            if not behind or not ahead:
+                continue
+            start_at, end_at = min(behind), min(ahead)
+            if end_at - start_at < radius * 0.5:
+                continue
+            extra.append(
+                LineString(
+                    [(hx + ux * start_at, hy + uy * start_at), (hx + ux * end_at, hy + uy * end_at)]
+                )
+            )
+    return extra
+
+
 def evaluate(
     dxf_path: Path,
     meta_path: Path,
@@ -669,6 +748,7 @@ def evaluate(
             _snap_endpoints(_lines_from_runs(h_final, v_final, dsegs), JOIN_MM),
             WALL_CAP_MM,
         )
+        lines = lines + _door_thresholds(msp, lines, (lx, ly), pad + 2000)
         found = _face_at(lines, lx, ly)
         if found is not None and not _touches_window(found, (lx, ly), pad + 2000):
             face = found
@@ -748,7 +828,8 @@ def main() -> None:
     if (args.x is None) != (args.y is None):
         raise SystemExit("--x 와 --y 는 함께 지정하세요.")
     at = (args.x, args.y) if args.x is not None else None
-    out = args.out or (args.dxf.parent / "room_eval")
+    # 번호 붙은 room_eval_N 은 만들지 않는다. 항상 DXF 옆 room_eval 에 덮어쓴다.
+    out = args.dxf.parent / "room_eval"
     info = evaluate(args.dxf, args.meta, args.png, args.room, out, at)
     print(f"room: {info['room']}")
     print(f"area_m2: {info['area_m2']:.2f}")

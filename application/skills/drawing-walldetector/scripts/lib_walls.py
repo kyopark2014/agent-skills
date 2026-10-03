@@ -14,8 +14,14 @@ from ezdxf.entities import DXFEntity
 # ACI red
 WALL_COLOR = 1
 BASE_COLOR = 8  # gray
+DOOR_COLOR = 3
+WINDOW_COLOR = 4
+COLUMN_COLOR = 5
 WALL_LAYER = "WALL"
 BASE_LAYER = "BASE"
+DOOR_LAYER = "DOOR"
+WINDOW_LAYER = "WINDOW"
+COLUMN_LAYER = "COLUMN"
 
 GEOM_TYPES = frozenset({"LINE", "LWPOLYLINE", "POLYLINE", "ARC", "CIRCLE", "ELLIPSE", "SPLINE"})
 
@@ -401,15 +407,6 @@ def _collinear_runs(
     return out
 
 
-def _legacy_wall_pair(a: Seg, b: Seg, dist_mm: float, short_pair_max_mm: float) -> bool:
-    """긴 이중선, 또는 1.7 m 이상·두께 250 mm 이하인 개구 조각."""
-    if a.length >= short_pair_max_mm or b.length >= short_pair_max_mm:
-        return True
-    if min(a.length, b.length) >= 1700.0 and dist_mm <= 250.0:
-        return True
-    return False
-
-
 def _door_opening_slots(
     entities: list[DXFEntity], door_idxs: set[int]
 ) -> list[tuple[bool, float, float, float, float]]:
@@ -501,7 +498,6 @@ def detect_wall_keys(
     thick_max_mm: float = 420.0,
     min_overlap_mm: float = 400.0,
     stair_count: int = 4,
-    short_pair_max_mm: float = 2800.0,
     wall_pack_gap_mm: float = 160.0,
     door_entity_idxs: set[int] | None = None,
     door_slots: list[tuple[bool, float, float, float, float]] | None = None,
@@ -511,11 +507,11 @@ def detect_wall_keys(
     stair_count: 두께 대역 안 평행 이웃이 (stair_count-1)개 이상이고
     간격이 성기면 계단/해칭으로 제외 (기본 4 → 이웃 ≥3).
 
-    같은 대역 안에 간격이 촘촘한 긴 선(외벽 여러 겹)은 벽으로 남긴다.
-    wall_pack_gap_mm: 그 겹의 인접 간격 중앙값 상한.
+    간격이 촘촘하다는 이유만으로 2.8 m 이상 긴 선을 외벽으로 두지 않는다.
+    wall_pack_gap_mm: 성긴 겹과 촘촘한 겹을 가르는 인접 간격 중앙값.
 
-    short_pair_max_mm: 양쪽 모두 이보다 짧은 이중선 쌍은 가구·설비 변으로 제외.
-    다만 맞닿은 간벽 런(120–180 mm, 2.2 m 이상)은 개구로 잘린 벽으로 유지한다.
+    양쪽이 1.7 m 이상이고 간격이 250 mm 이하라는 이유만으로 개구 조각
+    벽 쌍으로 두지 않는다.
 
     door_entity_idxs: X자 문. 대각선과 문 심볼 획은 벽이 아니다.
     door_slots: X 개구의 두 면. 거기에 맞닿은 세로·가로 간벽 조각은 벽이다.
@@ -561,52 +557,42 @@ def detect_wall_keys(
                     neighbors.append((d, b))
             if not neighbors:
                 continue
-            # 평행선이 여러 겹. 간격이 촘촘하고 긴 선이면 외벽 포체, 성기면 계단/해칭.
+            # 평행선이 여러 겹이면 성긴 간격만 계단/해칭으로 뺀다.
+            # 촘촘하다고 긴 선을 외벽으로 넣지는 않는다.
             partners = neighbors
             if len(neighbors) >= stair_count - 1:
-                long_enough = a.length >= short_pair_max_mm or any(
-                    b.length >= short_pair_max_mm for _, b in neighbors
-                )
                 distances = sorted(d for d, _ in neighbors)
                 gaps = [distances[0]] + [
                     distances[k] - distances[k - 1] for k in range(1, len(distances))
                 ]
                 real_gaps = [g for g in gaps if g >= 15.0] or gaps
                 packed = _median(real_gaps) <= wall_pack_gap_mm
-                if long_enough and packed:
-                    wall.add(a.key)
-                    for _, b in neighbors:
-                        if b.length >= 1200.0:
-                            wall.add(b.key)
-                    continue
                 if not packed:
                     continue
                 # 개구로 잘려 2m 안팎인 외벽. 짧은 멀라이언은 빼고 긴 겹만 짝으로 본다.
                 partners = [(d, b) for d, b in neighbors if b.length >= 1200.0]
                 if not partners:
                     continue
-            # 가장 가까운 면을 벽 짝으로. 그 선이 문 궤적(이중선 사이의 짧은 선)이면
-            # 더 먼 간벽 면을 짝으로 본다. X 대각선은 cand 에 없다.
+            # 가장 가까운 평행선이 1.7 m 이상이고 간격이 250 mm 이하여도
+            # 그 이유만으로 벽 쌍이 아니다. 같은 직선으로 이어진 간벽이거나
+            # X 문 개구에 맞닿을 때만 벽이다.
             d0, b0 = min(partners, key=lambda t: t[0])
             if not (thick_min_mm <= d0 <= thick_max_mm):
                 continue
             if (
-                _legacy_wall_pair(a, b0, d0, short_pair_max_mm)
-                or _broken_partition_pair(a, b0, d0, runs)
+                _broken_partition_pair(a, b0, d0, runs)
                 or _abuts_door_opening(a, b0, d0, along_x=(along == "x"), slots=slots)
             ):
                 wall.add(a.key)
                 wall.add(b0.key)
                 continue
-            # 문짝이 두 벽면 사이에 있으면 가장 가까운 선은 문이다.
-            # 그 너머에서 길이 1.7 m 이상·간격 250 mm 이하인 면만 벽으로 둔다.
+            # 가장 가까운 선이 벽이 아니면, 더 먼 평행선은 길이만으로 짝이지 않다.
+            # 같은 직선으로 이어진 간벽이거나 X 문 개구에 맞닿을 때만 벽이다.
             for d2, c in sorted(partners, key=lambda t: t[0]):
                 if d2 <= d0 + 1.0:
                     continue
-                both_faces = min(a.length, c.length) >= 1500.0 and d2 <= 250.0
                 if (
-                    both_faces
-                    or _broken_partition_pair(a, c, d2, runs)
+                    _broken_partition_pair(a, c, d2, runs)
                     or _abuts_door_opening(
                         a, c, d2, along_x=(along == "x"), slots=slots
                     )
@@ -620,82 +606,6 @@ def detect_wall_keys(
     mark_pairs(h_segs, "y", "x")
     mark_pairs(v_segs, "x", "y")
     return wall
-
-
-def promote_shared_panel_edges(
-    entities: list[DXFEntity],
-    segs: list[Seg],
-    wall_keys: set[tuple[int, int]],
-    *,
-    min_len_mm: float = 1200.0,
-    ortho_tol_mm: float = 15.0,
-) -> set[tuple[int, int]]:
-    """맞붙은 두 벽패널의 공유 변.
-
-    침실 창호가 닫힌 사각 두 개로 나뉘면, 맞댄 중간 변은 같은 좌표에
-    겹쳐 두께가 0이라 이중선 벽이 아니다. 양쪽 바깥 변이 이미 벽이면
-    그 중간 세로·가로 변도 벽이다. 가구 사각으로 통째 제외돼도 이 변은 남긴다.
-    """
-    by_ent: dict[int, list[Seg]] = {}
-    for s in segs:
-        by_ent.setdefault(s.entity_idx, []).append(s)
-
-    # (entity, seg, along-center, span0, span1, other-side center, vertical)
-    edges: list[tuple[int, Seg, float, float, float, float, bool]] = []
-    for ei, e in enumerate(entities):
-        m = _box_metrics(e, max_mm=4000.0)
-        if not m:
-            continue
-        _cx, _cy, _w, _h, x0, x1, y0, y1 = m
-        for s in by_ent.get(ei, []):
-            if s.is_v:
-                x = (s.x0 + s.x1) * 0.5
-                if abs(x - x0) <= 2.0:
-                    other = x1
-                elif abs(x - x1) <= 2.0:
-                    other = x0
-                else:
-                    continue
-                edges.append((ei, s, x, min(s.y0, s.y1), max(s.y0, s.y1), other, True))
-            elif s.is_h:
-                y = (s.y0 + s.y1) * 0.5
-                if abs(y - y0) <= 2.0:
-                    other = y1
-                elif abs(y - y1) <= 2.0:
-                    other = y0
-                else:
-                    continue
-                edges.append((ei, s, y, min(s.x0, s.x1), max(s.x0, s.x1), other, False))
-
-    def opposite_is_wall(edge: tuple) -> bool:
-        ei, _s, _c, _a0, _a1, other, vertical = edge
-        for ej, sj, c, _b0, _b1, _o, vert in edges:
-            if ej == ei and vert == vertical and abs(c - other) <= 2.0:
-                return sj.key in wall_keys
-        return False
-
-    promoted: set[tuple[int, int]] = set()
-    n = len(edges)
-    for i in range(n):
-        a = edges[i]
-        for j in range(i + 1, n):
-            b = edges[j]
-            if a[0] == b[0] or a[6] != b[6]:
-                continue
-            if abs(a[2] - b[2]) > ortho_tol_mm:
-                continue
-            # 공유 변 양쪽으로 패널이 갈라져 있어야 한다.
-            if (a[5] - a[2]) * (b[5] - b[2]) >= 0.0:
-                continue
-            ov = _overlap_1d(a[3], a[4], b[3], b[4])
-            short = min(a[4] - a[3], b[4] - b[3])
-            if short < min_len_mm or ov < 0.85 * short:
-                continue
-            if not (opposite_is_wall(a) and opposite_is_wall(b)):
-                continue
-            promoted.add(a[1].key)
-            promoted.add(b[1].key)
-    return promoted
 
 
 def entity_wall_fraction(
@@ -749,21 +659,6 @@ def _swing_door_leaves(entities: list[DXFEntity]) -> list[dict]:
     return leaves
 
 
-def _is_swing_leaf_line(seg: Seg, leaf: dict) -> bool:
-    """문짝 잎과 겹치는 짧은 평행선. 길게 이어진 벽은 빼지 않는다."""
-    if not (600.0 <= seg.length <= 1600.0):
-        return False
-    if leaf["vertical"] != seg.is_v:
-        return False
-    if leaf["vertical"]:
-        dist = abs((seg.x0 + seg.x1) / 2 - leaf["center"])
-        overlap = _overlap_1d(seg.y0, seg.y1, leaf["along0"] - 200.0, leaf["along1"] + 1400.0)
-    else:
-        dist = abs((seg.y0 + seg.y1) / 2 - leaf["center"])
-        overlap = _overlap_1d(seg.x0, seg.x1, leaf["along0"] - 200.0, leaf["along1"] + 1400.0)
-    return dist <= 180.0 and overlap >= 0.7 * seg.length
-
-
 def _endpoint_gap(a: Seg, b: Seg) -> float:
     best = math.inf
     for ax, ay in ((a.x0, a.y0), (a.x1, a.y1)):
@@ -777,14 +672,12 @@ def _apply_swing_doors(
     segs: list[Seg],
     wall_keys: set[tuple[int, int]],
 ) -> tuple[set[int], set[tuple[int, int]]]:
-    """여닫이문 잎은 벽에서 빼고, 문끝에 붙은 짧은 벽은 벽으로 올린다."""
+    """여닫이문 잎만 벽에서 빼고, 문끝에 붙은 짧은 벽은 벽으로 올린다.
+
+    잎 옆의 선이 가깝다는 이유만으로 다른 도형을 문으로 넣지 않는다.
+    """
     leaves = _swing_door_leaves(entities)
     drop: set[int] = {leaf["ei"] for leaf in leaves}
-    for seg in segs:
-        if seg.entity_idx in drop:
-            continue
-        if any(_is_swing_leaf_line(seg, leaf) for leaf in leaves):
-            drop.add(seg.entity_idx)
     for key in list(wall_keys):
         if key[0] in drop:
             wall_keys.discard(key)
@@ -821,6 +714,41 @@ def _segment_angle(a: tuple[float, float], b: tuple[float, float]) -> float:
 def _near_angle(angle: float, target: float, tol: float = 12.0) -> bool:
     delta = abs(angle - target) % 180.0
     return min(delta, 180.0 - delta) < tol
+
+
+def _window_frame_entity_idxs(entities: list[DXFEntity]) -> set[int]:
+    """같은 개구에 나란히 겹친 얇은 창틀. 기둥과 같이 벽으로 둔다."""
+    panels: list[tuple[int, bool, float, float, float]] = []
+    for ei, entity in enumerate(entities):
+        if entity.dxftype() != "LWPOLYLINE" or not entity.closed:
+            continue
+        pts = [(float(p[0]), float(p[1])) for p in entity.get_points("xy")]
+        if len(pts) < 4:
+            continue
+        xs = [p[0] for p in pts]
+        ys = [p[1] for p in pts]
+        x0, x1, y0, y1 = min(xs), max(xs), min(ys), max(ys)
+        short, long = min(x1 - x0, y1 - y0), max(x1 - x0, y1 - y0)
+        if not (15.0 <= short <= 90.0 and 400.0 <= long <= 1600.0):
+            continue
+        horizontal = (x1 - x0) >= (y1 - y0)
+        along0 = x0 if horizontal else y0
+        along1 = x1 if horizontal else y1
+        perp = (y0 + y1) / 2.0 if horizontal else (x0 + x1) / 2.0
+        panels.append((ei, horizontal, along0, along1, perp))
+    found: set[int] = set()
+    for i, (ei, horizontal, along0, along1, perp) in enumerate(panels):
+        for ej, horizontal2, b0, b1, perp2 in panels[i + 1:]:
+            if horizontal is not horizontal2:
+                continue
+            overlap = min(along1, b1) - max(along0, b0)
+            shorter = min(along1 - along0, b1 - b0)
+            if overlap < 0.75 * shorter:
+                continue
+            if 15.0 <= abs(perp - perp2) <= 130.0:
+                found.add(ei)
+                found.add(ej)
+    return found
 
 
 def _bay_window_entity_idxs(entities: list[DXFEntity]) -> set[int]:
@@ -895,7 +823,7 @@ def classify_entities(
     - 짧은 다변 폴리라인 → 조경/해칭 제외
     - 폴리라인은 벽 비율 ≥ entity_wall_ratio 일 때만 통째로 WALL
       (미만이면 세그먼트만 wall_segs 로 빨강)
-    - 맞붙은 창호 패널의 중간 공유 변은 가구 사각이어도 벽으로 남긴다
+    - 두께 0으로 겹친 사각 공유 변은 벽이 아니다. 평행 이중선만 벽이다.
     """
     segs = extract_segments(entities)
     door_x_idxs = find_door_x_idxs(entities)
@@ -907,12 +835,8 @@ def classify_entities(
         door_entity_idxs=door_x_idxs,
         door_slots=_door_opening_slots(entities, door_x_idxs),
     )
-    # 창호 중간 멀리언. 닫힌 사각이라 skip 에 들어가도 이 변은 빨강으로 남긴다.
-    shared_keys = promote_shared_panel_edges(entities, segs, wall_keys)
-    wall_keys |= shared_keys
-    # 여닫이문 잎은 옆 벽과 나란히 붙어 벽으로 잡힌다. 잎은 빼고 문끝 벽은 올린다.
+    # 여닫이문 잎만 빼고 문끝 벽은 올린다. 잎에 가까운 다른 도형은 문으로 넣지 않는다.
     door_drop, door_jamb_keys = _apply_swing_doors(entities, segs, wall_keys)
-    shared_keys = {key for key in shared_keys if key[0] not in door_drop}
     hbeam_idxs = find_hbeam_column_idxs(entities)
     wall_entity_idxs: set[int] = set(hbeam_idxs)
     skip_idxs: set[int] = set(door_x_idxs) | door_drop
@@ -950,20 +874,19 @@ def classify_entities(
     bay_idxs = _bay_window_entity_idxs(entities)
     skip_idxs -= bay_idxs
     wall_entity_idxs |= bay_idxs
+    # 겹친 창틀도 벽이다. 색 구분은 validator가 하고, 여기서는 WALL로 올린다.
+    frame_idxs = _window_frame_entity_idxs(entities)
+    skip_idxs -= frame_idxs
+    wall_entity_idxs |= frame_idxs
     for seg in segs:
         if seg.entity_idx in bay_idxs and seg.length >= 400.0:
             wall_keys.add(seg.key)
 
-    wall_segs = [
-        s
-        for s in segs
-        if s.key in wall_keys and (s.entity_idx not in skip_idxs or s.key in shared_keys)
-    ]
+    wall_segs = [s for s in segs if s.key in wall_keys and s.entity_idx not in skip_idxs]
     return {
         "wall_entity_idxs": sorted(wall_entity_idxs),
         "wall_keys": sorted(wall_keys),
         "wall_segs": wall_segs,
-        "shared_panel_keys": sorted(shared_keys),
         "n_entities": len(entities),
         "n_wall_entities": len(wall_entity_idxs),
         "n_wall_segs": len(wall_segs),
@@ -976,6 +899,10 @@ def classify_entities(
         "n_swing_doors": len(door_drop),
         "n_door_jambs": len(door_jamb_keys),
         "n_bay_windows": len(bay_idxs),
+        "n_window_frames": len(frame_idxs),
+        "window_entity_idxs": sorted(frame_idxs),
+        "column_entity_idxs": sorted(hbeam_idxs),
+        "door_entity_idxs": sorted(set(door_x_idxs) | set(door_drop)),
         "entity_wall_ratio": entity_wall_ratio,
         "furniture_box_max_mm": furniture_box_max_mm,
     }
@@ -1026,19 +953,40 @@ def write_walls_dxf(
 ) -> dict[str, int]:
     """베이스(회색) + 벽(빨간색) DXF 저장."""
     doc = ezdxf.new("R2010")
-    if BASE_LAYER not in doc.layers:
-        doc.layers.add(BASE_LAYER, color=BASE_COLOR)
-    if WALL_LAYER not in doc.layers:
-        doc.layers.add(WALL_LAYER, color=WALL_COLOR)
+    for name, color in (
+        (BASE_LAYER, BASE_COLOR),
+        (WALL_LAYER, WALL_COLOR),
+        (DOOR_LAYER, DOOR_COLOR),
+        (WINDOW_LAYER, WINDOW_COLOR),
+        (COLUMN_LAYER, COLUMN_COLOR),
+    ):
+        if name not in doc.layers:
+            doc.layers.add(name, color=color)
     msp = doc.modelspace()
     wall_idxs = set(classification["wall_entity_idxs"])
+    window_idxs = set(classification.get("window_entity_idxs") or [])
+    column_idxs = set(classification.get("column_entity_idxs") or [])
+    door_idxs = set(classification.get("door_entity_idxs") or [])
     skip = set(classification.get("skip_column_idxs") or [])
-    counts = {"base": 0, "wall": 0, "wall_seg_lines": 0}
+    counts = {"base": 0, "wall": 0, "door": 0, "window": 0, "column": 0, "wall_seg_lines": 0}
+
+    def _stored_layer(ei: int) -> tuple[str, int] | None:
+        if ei in column_idxs:
+            return COLUMN_LAYER, COLUMN_COLOR
+        if ei in window_idxs:
+            return WINDOW_LAYER, WINDOW_COLOR
+        if ei in door_idxs:
+            return DOOR_LAYER, DOOR_COLOR
+        if ei in wall_idxs and ei not in skip:
+            return WALL_LAYER, WALL_COLOR
+        return None
 
     if include_base:
         for ei, e in enumerate(entities):
             t = e.dxftype()
             if t not in GEOM_TYPES and t not in ("TEXT", "MTEXT"):
+                continue
+            if _stored_layer(ei) is not None and t not in ("TEXT", "MTEXT"):
                 continue
             try:
                 _copy_entity(msp, e, layer=BASE_LAYER, color=BASE_COLOR)
@@ -1046,24 +994,24 @@ def write_walls_dxf(
             except Exception:  # noqa: BLE001
                 continue
 
-    # 벽: 엔티티 단위 빨강 + 세그먼트 키 기반 LINE 보강
-    for ei in wall_idxs:
-        if ei in skip:
+    # 벽·문·창·기둥은 레이어를 나눠 저장한다.
+    for ei, e in enumerate(entities):
+        stored = _stored_layer(ei)
+        if stored is None:
             continue
-        e = entities[ei]
+        layer, color = stored
         try:
-            _copy_entity(msp, e, layer=WALL_LAYER, color=WALL_COLOR)
-            counts["wall"] += 1
+            _copy_entity(msp, e, layer=layer, color=color)
+            counts[{"WALL": "wall", "DOOR": "door", "WINDOW": "window", "COLUMN": "column"}[layer]] += 1
         except Exception:  # noqa: BLE001
             continue
 
     # 부분만 벽인 폴리라인용: wall_segs를 빨간 LINE으로도 그림
     drawn = set()
-    shared_keys = set(classification.get("shared_panel_keys") or [])
     for s in classification["wall_segs"]:
         if s.entity_idx in wall_idxs:
             continue  # already whole entity
-        if s.entity_idx in skip and s.key not in shared_keys:
+        if s.entity_idx in skip:
             continue
         key = (round(s.x0, 3), round(s.y0, 3), round(s.x1, 3), round(s.y1, 3))
         if key in drawn:
@@ -1111,10 +1059,25 @@ def render_walls_png(
     ys: list[float] = []
     base_segs: list[list[tuple[float, float]]] = []
     wall_segs: list[list[tuple[float, float]]] = []
+    window_segs: list[list[tuple[float, float]]] = []
+    column_segs: list[list[tuple[float, float]]] = []
+    door_segs: list[list[tuple[float, float]]] = []
     texts: list[tuple[float, float, str, float, float]] = []
     wall_idxs = set(classification["wall_entity_idxs"])
+    window_idxs = set(classification.get("window_entity_idxs") or [])
+    column_idxs = set(classification.get("column_entity_idxs") or [])
+    door_idxs = set(classification.get("door_entity_idxs") or [])
     wall_keyset = set(classification["wall_keys"])
     skip = set(classification.get("skip_column_idxs") or [])
+
+    def _paint(ei: int) -> list[list[tuple[float, float]]]:
+        if ei in column_idxs:
+            return column_segs
+        if ei in window_idxs:
+            return window_segs
+        if ei in door_idxs:
+            return door_segs
+        return wall_segs
 
     import re as _re
 
@@ -1126,8 +1089,8 @@ def render_walls_png(
                 p1 = (float(e.dxf.end.x), float(e.dxf.end.y))
                 xs.extend([p0[0], p1[0]])
                 ys.extend([p0[1], p1[1]])
-                if ei in wall_idxs or (ei, 0) in wall_keyset:
-                    wall_segs.append([p0, p1])
+                if ei in column_idxs or ei in window_idxs or ei in door_idxs or ei in wall_idxs or (ei, 0) in wall_keyset:
+                    _paint(ei).append([p0, p1])
                 else:
                     base_segs.append([p0, p1])
             elif t == "LWPOLYLINE":
@@ -1139,10 +1102,10 @@ def render_walls_png(
                 for p in pts:
                     xs.append(p[0])
                     ys.append(p[1])
-                if ei in skip:
+                if ei in column_idxs or ei in window_idxs or ei in door_idxs or (ei in wall_idxs and ei not in skip):
+                    _paint(ei).append(pts)
+                elif ei in skip:
                     base_segs.append(pts)
-                elif ei in wall_idxs:
-                    wall_segs.append(pts)
                 else:
                     # mixed: draw base full + wall segs over
                     base_segs.append(pts)
@@ -1267,6 +1230,18 @@ def render_walls_png(
             LineCollection(
                 wall_segs, colors="#e74c3c", linewidths=wall_linewidth, antialiased=True
             )
+        )
+    if window_segs:
+        ax.add_collection(
+            LineCollection(window_segs, colors="#00bcd4", linewidths=wall_linewidth, antialiased=True)
+        )
+    if column_segs:
+        ax.add_collection(
+            LineCollection(column_segs, colors="#2980b9", linewidths=wall_linewidth, antialiased=True)
+        )
+    if door_segs:
+        ax.add_collection(
+            LineCollection(door_segs, colors="#7cba25", linewidths=wall_linewidth, antialiased=True)
         )
 
     # floor_original 과 동일: TEXT/MTEXT 실명·면적 라벨 (#1a5fb4, max 7pt)

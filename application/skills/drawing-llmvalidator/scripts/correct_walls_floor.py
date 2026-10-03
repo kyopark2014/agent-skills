@@ -42,7 +42,6 @@ def main() -> None:
         action="store_true",
         help="긴 벽 런에 안 붙은 짧은 WALL 강등 (복도 조각 손상 가능 — 기본 OFF, 복도 이중선은 보호)",
     )
-    ap.add_argument("--no-pack-demote", action="store_true")
     ap.add_argument(
         "--no-corridor-promote",
         action="store_true",
@@ -70,7 +69,6 @@ def main() -> None:
         review=review,
         do_gap_promote=not args.no_gap_promote,
         do_short_demote=bool(args.short_demote),
-        do_pack_demote=not args.no_pack_demote,
         do_corridor_promote=not args.no_corridor_promote,
     )
     print(

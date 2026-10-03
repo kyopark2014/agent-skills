@@ -243,7 +243,10 @@ def _fills_true_gap(...):
 ### 5.3 복도 문 양옆 (`promote_corridor_door_flanks`)
 
 같은 벽선에서 WALL–WALL 사이 또는 WALL 끝↔BASE가 **문 크기 갭(0.7–2.2 m)** 이면,  
-이미 한쪽이 빨강인 개구의 **반대쪽 BASE 플랭크**를 승격합니다.
+이미 한쪽이 빨강인 개구의 **반대쪽 BASE 플랭크**를 승격합니다.  
+그 플랭크의 두 면이 서로의 길이 대부분을 덮는 평행 이중선일 때만입니다. 긴 선이 짧은 사각 변을 덮는 것은 이중선이 아닙니다. 개구 한쪽에 벽이 있다는 이유만으로는 올리지 않습니다.
+
+문 개구에 맞닿은 평행 이중선(`promote_door_side_doubles`)은 길이와 관계없이 WALL입니다. 두 면이 서로의 길이 대부분을 덮고, 간격이 문 두께와 같으며, 겹친 구간이 문 밖에 있고 끝이 개구에 닿을 때만 올립니다.
 
 ### 5.4 연속 방 열 (`promote_collinear_room_walls`)
 
@@ -308,10 +311,7 @@ WALL 엔티티 **중심점**이 bbox 안이면 삭제 후보.
 
 | 함수 | 잡는 오검출 |
 |------|-------------|
-| `demote_parallel_packs` | 짧은 평행 WALL ≥4 (객석·계단 트레드) |
-| `demote_dense_short_clusters` | 4 m 셀에 짧은 WALL ≥8 (가구 포드) |
 | `demote_closed_furniture_boxes` | 닫힌 소·중형 폴리 + 장변에 붙은 WALL LINE |
-| `demote_line_furniture_boxes` | LINE만으로 된 가구 직사각 |
 | `demote_fitness_equipment` | 피트니스 라벨 근처 기구 윤곽 |
 | `demote_landscape_walls` | 조경 물결/바위 클러스터 내부 선 |
 | `demote_open_hall_center_walls` | “강당” 라벨 기준 **홀 중앙** 장축 |

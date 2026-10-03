@@ -39,11 +39,15 @@ def normalize_floor_token(floor: str) -> str:
     if m:
         suffix = f"_{int(m.group(2))}" if m.group(2) else ""
         return f"B{int(m.group(1))}F{suffix}"
-    if s in {"RF", "ROOF"}:
-        return "RF"
-    if s in {"PH", "PENTHOUSE"}:
-        return "PH"
-    raise ValueError(f"층 형식 오류: {floor!r} (예: 5F, B1F, 1F_2, RF, sheet_01)")
+    m = re.fullmatch(r"(RF|ROOF)(?:_(\d+))?", s)
+    if m:
+        suffix = f"_{int(m.group(2))}" if m.group(2) else ""
+        return f"RF{suffix}"
+    m = re.fullmatch(r"(PH|PENTHOUSE)(?:_(\d+))?", s)
+    if m:
+        suffix = f"_{int(m.group(2))}" if m.group(2) else ""
+        return f"PH{suffix}"
+    raise ValueError(f"층 형식 오류: {floor!r} (예: 5F, B1F, 1F_2, RF, RF_2, sheet_01)")
 
 
 def is_floor_name(name: str) -> bool:
@@ -61,10 +65,12 @@ def floor_sort_key(floor: str) -> tuple:
     matched = re.fullmatch(r"(\d+)F(?:_(\d+))?", floor)
     if matched:
         return (1, int(matched.group(1)), int(matched.group(2) or 1), floor)
-    if floor == "RF":
-        return (3, 0, 0, floor)
-    if floor == "PH":
-        return (4, 0, 0, floor)
+    matched = re.fullmatch(r"RF(?:_(\d+))?", floor)
+    if matched:
+        return (3, int(matched.group(1) or 1), 0, floor)
+    matched = re.fullmatch(r"PH(?:_(\d+))?", floor)
+    if matched:
+        return (4, int(matched.group(1) or 1), 0, floor)
     matched = re.fullmatch(r"sheet_(\d+)", floor)
     if matched:
         return (5, int(matched.group(1)), 0, floor)
