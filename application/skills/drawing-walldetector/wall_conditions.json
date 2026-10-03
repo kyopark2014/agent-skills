@@ -41,25 +41,46 @@
     }
   ],
   "projects": {
-    "hotel": {
-      "match": ["gyeongju_boutique_hotel", "hotel", "호텔"],
-      "note": "304호·305호 이중선은 common으로 잡힌다."
-    },
-    "hynix": {
-      "match": ["sk_yongin_jiwon", "hynix", "하이닉스"],
-      "note": "방송기자재실 아래 3.4 m 이중선은 common으로 잡힌다."
-    },
-    "hospital": {
-      "match": ["wonkwang_hospital_ward1", "hospital", "병원"],
-      "note": "회의실·교육실 네 변은 common으로 잡힌다."
-    },
-    "house": {
-      "match": ["seongbuk_dong_rowhouse", "house", "주택"],
-      "note": "옷방 본벽은 common. 오른쪽 1.51 m 면과 위쪽 0.69 m 조각만 여기서 더한다.",
-      "long_double_wall": {
-        "shorter_length_mm_gte": 1510,
-        "same_face_shorter_length_mm_gte": 690
+    "hotel": [
+      {
+        "match": ["gyeongju_boutique_hotel", "hotel", "호텔"],
+        "note": "304호·305호 이중선은 common으로 잡힌다."
       }
-    }
+    ],
+    "hynix": [
+      {
+        "match": ["sk_yongin_jiwon", "hynix", "하이닉스"],
+        "note": "방송기자재실 아래 3.4 m 이중선은 common으로 잡힌다."
+      }
+    ],
+    "hospital": [
+      {
+        "match": ["wonkwang_hospital_ward1", "hospital", "병원"],
+        "note": "회의실·교육실 네 변은 common으로 잡힌다."
+      }
+    ],
+    "house": [
+      {
+        "match": ["seongbuk_dong_rowhouse", "house", "주택"],
+        "note": "옷방 본벽은 common. 오른쪽 1.51 m 면과 위쪽 0.69 m 조각만 여기서 더한다.",
+        "long_double_wall": {
+          "shorter_length_mm_gte": 1510,
+          "same_face_shorter_length_mm_gte": 690
+        }
+      },
+      {
+        "note": "침실-3 오른쪽 위 단차. 간격 50 mm, 양쪽 0.8 m.",
+        "candidate": {
+          "min_length_mm": 790,
+          "max_length_mm": 810,
+          "gap_mm": { "min": 45, "max": 55 }
+        },
+        "long_double_wall": {
+          "gap_mm": { "min": 45, "max": 55 },
+          "shorter_length_mm_gte": 800,
+          "overlap_ratio_of_shorter_gte": 0.9
+        }
+      }
+    ]
   }
 }

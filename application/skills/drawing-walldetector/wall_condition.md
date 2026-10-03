@@ -1,6 +1,6 @@
 # 평행 이중선 벽 조건
 
-`drawing-walldetector`가 평행 이중선을 `WALL`로 올리는 현재 조건이다. 숫자는 `wall_conditions.json`에 있다. `common`은 조건 객체 배열이고 `common[0]`이 기본 조건이다. 조건을 더할 때는 `common[1]`, `common[2]`처럼 같은 형식의 객체를 뒤에 붙인다. `projects.<이름>`은 common과 다른 키만 적는다. `load_wall_conditions`는 `common`을 순서대로 쓰고, 프로젝트 키가 맞으면 common에 그 차이를 합쳐 뒤에 붙인다. `detect_wall_keys`는 각 조건으로 고른 벽을 합친다. 프로젝트 키가 없으면 `common`만 쓴다.
+`drawing-walldetector`가 평행 이중선을 `WALL`로 올리는 현재 조건이다. 숫자는 `wall_conditions.json`에 있다. `common`은 조건 객체 배열이고 `common[0]`이 기본 조건이다. 조건을 더할 때는 `common[1]`, `common[2]`처럼 같은 형식의 객체를 뒤에 붙인다. `projects.<이름>`은 common과 다른 키만 적은 조건 객체의 배열이다. 조건이 하나여도 배열로 둔다. `load_wall_conditions`는 `common`을 순서대로 쓰고, 프로젝트 키가 맞으면 그 배열의 각 조건을 common에 합쳐 뒤에 붙인다. `candidate.max_length_mm`이 있으면 그 길이보다 긴 선은 그 조건의 후보에서 뺀다. `detect_wall_keys`는 각 조건으로 고른 벽을 합친다. 프로젝트 키가 없으면 `common`만 쓴다.
 
 레이어가 `0arch` 하나인 도면이라 벽 레이어로 가르지 않는다. `LINE` / `LWPOLYLINE`에서 축에 나란한 세그먼트를 뽑고, 벽 두께 대역 안의 평행 쌍을 찾는다. 그 쌍이 벽이 되는 경우는 아래 세 가지다.
 

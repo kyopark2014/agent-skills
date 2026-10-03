@@ -46,10 +46,34 @@ def resolve_project_name(hint: str | None, raw: dict | None = None) -> str | Non
         return hint
     folded = hint.casefold()
     for name, cfg in projects.items():
-        aliases = [name, *(cfg.get("match") or [])]
+        aliases = [name, *_project_match_aliases(cfg)]
         if any(str(alias).casefold() == folded for alias in aliases):
             return name
     return None
+
+
+def _project_match_aliases(cfg: Any) -> list:
+    if isinstance(cfg, dict):
+        return list(cfg.get("match") or [])
+    if isinstance(cfg, list):
+        aliases = []
+        for item in cfg:
+            if isinstance(item, dict):
+                aliases.extend(item.get("match") or [])
+        return aliases
+    return []
+
+
+def _project_overrides(cfg: Any) -> list[dict]:
+    """프로젝트에 붙일 조건 차이. 객체 하나이거나, 그 객체의 배열이다."""
+    if isinstance(cfg, dict):
+        return [copy.deepcopy(cfg)]
+    if isinstance(cfg, list):
+        items = [copy.deepcopy(item) for item in cfg if isinstance(item, dict)]
+        if len(items) != len(cfg):
+            raise TypeError("wall_conditions project items must be objects")
+        return items
+    raise TypeError("wall_conditions project must be an object or a list")
 
 
 def _deep_merge(base: dict, override: dict) -> dict:
@@ -81,7 +105,8 @@ def load_wall_conditions(project: str | None = None, path: Path | None = None) -
     """적용할 평행 이중선 조건 목록.
 
     common[0], common[1], … 를 순서대로 쓴다. project가 맞으면
-    projects.<이름> 조건을 같은 형식으로 뒤에 붙인다. 별칭은 projects 키로 푼다.
+    projects.<이름> 배열의 각 조건을 common에 합쳐 뒤에 붙인다.
+    조건이 하나여도 배열이다. 객체 하나도 한 칸으로 읽는다. 별칭은 projects 키로 푼다.
     """
     raw = read_wall_conditions(path)
     conditions = _common_condition_list(raw["common"])
@@ -93,11 +118,11 @@ def load_wall_conditions(project: str | None = None, path: Path | None = None) -
         if resolved is None:
             known = ", ".join(sorted(raw.get("projects") or {}))
             raise KeyError(f"unknown wall project: {project} (known: {known})")
-        extra = copy.deepcopy(raw["projects"][resolved])
-        extra.pop("match", None)
         bases = list(conditions)
-        for base in bases:
-            conditions.append(_deep_merge(base, extra))
+        for extra in _project_overrides(raw["projects"][resolved]):
+            extra.pop("match", None)
+            for base in bases:
+                conditions.append(_deep_merge(base, extra))
     for cond in conditions:
         cond["_project"] = resolved
     return conditions
@@ -710,6 +735,8 @@ def _detect_wall_keys_one(
     door_cfg = cond["abuts_door_opening"]
     long_cfg = cond.get("long_double_wall") or {"enabled": False}
     min_len = float(cand_cfg["min_length_mm"])
+    max_len = cand_cfg.get("max_length_mm")
+    max_len = float(max_len) if max_len is not None else None
     thick_min = float(cand_cfg["gap_mm"]["min"])
     thick_max = float(cand_cfg["gap_mm"]["max"])
     min_overlap = float(cand_cfg["overlap_mm_min"])
@@ -717,7 +744,10 @@ def _detect_wall_keys_one(
     cand = [
         s
         for s in segs
-        if (s.is_h or s.is_v) and s.length >= min_len and s.entity_idx not in doors
+        if (s.is_h or s.is_v)
+        and s.length >= min_len
+        and (max_len is None or s.length <= max_len)
+        and s.entity_idx not in doors
     ]
     wall: set[tuple[int, int]] = set()
 
