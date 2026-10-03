@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """층 단위: floor_original → floor_wall_original 벽 검출.
 
-기본: floors/<F>/floor_wall_original.{dxf,png,_meta.json} 만 생성.
+기본: floors/<F>/floor_wall_original.{dxf,png,_meta.json} 과
+common 조건만 쓴 floors/<F>/floor_wall_common.png 를 생성.
 타일(parts) 분할은 기본 워크플로에서 제외. 레거시 parts가 있고
 --with-tiles 를 주면 floors/<F>/walls/R*C*_walls.* 도 생성.
 
@@ -49,6 +50,7 @@ def _detect_one(
     col=None,
     bbox_mm=None,
     size_m=None,
+    write_dxf: bool = True,
 ) -> dict:
     stem = out_stem or f"{tile_id}_walls"
     print(f"\n== {floor} {tile_id} ==", flush=True)
@@ -69,8 +71,8 @@ def _detect_one(
         f"door_x={clf.get('n_door_x', 0)} "
         f"cols_skip={len(clf['skip_column_idxs'])}  ents={len(entities)}"
     )
-    dxf_out = walls_dir / f"{stem}.dxf"
-    counts = write_walls_dxf(entities, clf, dxf_out)
+    dxf_out = walls_dir / f"{stem}.dxf" if write_dxf else None
+    counts = write_walls_dxf(entities, clf, dxf_out) if dxf_out else None
     png_out = None
     size = None
     if not no_png:
@@ -106,7 +108,7 @@ def _detect_one(
             "wall_project": clf.get("wall_project"),
         },
         "files": {
-            "dxf": str(dxf_out),
+            "dxf": str(dxf_out) if dxf_out else None,
             "png": str(png_out) if png_out else None,
         },
         "dxf_counts": counts,
@@ -114,7 +116,8 @@ def _detect_one(
     }
     meta_path = walls_dir / f"{stem}_meta.json"
     meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
-    print(f"  → {dxf_out.name}")
+    if dxf_out:
+        print(f"  → {dxf_out.name}")
     return meta
 
 
@@ -287,6 +290,7 @@ def main() -> int:
             )
 
     floor_original_walls_meta = None
+    floor_common_meta = None
     if run_floor:
         assert original_dxf is not None
         bbox_mm = (original_meta or {}).get("bbox_mm") or (index or {}).get("bbox_mm")
@@ -325,6 +329,29 @@ def main() -> int:
             size_m=size_m,
         )
         print("  → floors/<F>/floor_wall_original.dxf (층 전체 wall, source=floor_original)")
+        if w_m and h_m:
+            common_title = f"{args.floor} FLOOR WALL COMMON  {float(w_m):.2f}×{float(h_m):.2f} m"
+        else:
+            common_title = f"{args.floor} FLOOR WALL COMMON"
+        floor_common_meta = _detect_one(
+            floor=args.floor,
+            tile_id="floor_common",
+            src=original_dxf,
+            walls_dir=floor_dir,
+            project=None,
+            min_len_mm=args.min_len_mm,
+            thick_min_mm=args.thick_min_mm,
+            thick_max_mm=args.thick_max_mm,
+            no_png=args.no_png,
+            dpi=floor_dpi,
+            px_width=floor_px,
+            title=common_title,
+            out_stem="floor_wall_common",
+            bbox_mm=bbox_mm,
+            size_m=size_m,
+            write_dxf=False,
+        )
+        print("  → floors/<F>/floor_wall_common.png (common 조건만, project 미적용)")
         if walls_dir.is_dir():
             for name in (
                 "floor_walls_overview.dxf",
@@ -360,6 +387,12 @@ def main() -> int:
         }
         if floor_original_walls_meta
         else None,
+        "floor_wall_common": {
+            "png": str(floor_dir / "floor_wall_common.png"),
+            "meta": floor_common_meta,
+        }
+        if floor_common_meta
+        else None,
         "n_tiles": len(results),
         "params": {
             "project": project,
@@ -378,7 +411,8 @@ def main() -> int:
     sum_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
     print(
         f"\n→ {sum_path}  tiles={len(results)}  "
-        f"floor_wall_original={'yes' if floor_original_walls_meta else 'no'}"
+        f"floor_wall_original={'yes' if floor_original_walls_meta else 'no'}  "
+        f"floor_wall_common={'yes' if floor_common_meta else 'no'}"
     )
     return 0
 

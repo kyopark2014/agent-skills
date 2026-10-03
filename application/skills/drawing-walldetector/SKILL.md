@@ -10,7 +10,8 @@ description: >-
 # drawing-walldetector (벽 검출)
 
 `drawing-devider`가 만든 **층 단위** `floor_original.dxf`에서 벽을 찾아 **빨간색**으로
-표시한 DXF(및 검수용 PNG)를 생성한다. 기본 산출은 **`floor_wall_original.*`** 하나다.
+표시한 DXF(및 검수용 PNG)를 생성한다. 기본 산출은 **`floor_wall_original.*`** 이고,
+프로젝트 조건을 빼면 **`floor_wall_common.png`** 다.
 
 ## When to Use
 
@@ -35,7 +36,7 @@ description: >-
 4. **범위** — 사용자가 층을 지정하면 그 층만 검출한다. 층을 말하지 않으면 `discovered_floors`를 순서대로 끝까지 검출한다. 파일럿 확인은 받지 않는다.
 5. **층별 1개씩, 확인 없이** — 한 bash에 `for FLOOR in …` 일괄·`detect_walls_all`로 전층 한 번에 돌리는 것을 기본 **금지**한다 (대용량에서 Timeout). 한 층이 끝나면 **사용자에게 묻지 말고** 바로 다음 층을 같은 방식으로 실행한다. 사용자가 일괄을 명시할 때만 `detect_walls_all` 허용.
 6. **벽은 빨간색** — 출력 DXF의 `WALL` 레이어(ACI 1). 베이스 기하는 `BASE`(회색).
-7. **산출 경로** — `$ARTIFACTS_DIR/<drawing_id>/floors/<F>/floor_wall_original.*` (기본). 레거시 타일은 `walls/` (선택).
+7. **산출 경로** — `$ARTIFACTS_DIR/<drawing_id>/floors/<F>/floor_wall_original.*` (프로젝트 조건 포함). 같은 폴더의 `floor_wall_common.png`는 `common`만 적용한 검수용이다. 레거시 타일은 `walls/` (선택).
 8. **스크립트 사용** — `$WORKING_DIR/skills/drawing-walldetector/scripts/` 로만 수행. ad-hoc 대용량 파싱 금지.
 9. 응답은 **한국어**. 경로·JSON 키는 영문/숫자 유지.
 10. **타일 검출(레거시)** — `parts/`가 있고 사용자가 명시한 때만 `--with-tiles`.
@@ -84,6 +85,7 @@ drawing-devider 산출물
   ↓ (floor_wall_original.* 가 있어도 묻지 않고 덮어쓰기)
 ① detect_walls_floor.py --floor <각 층>   ← 층당 bash 1회, 확인 없이 전 층
      → floors/<F>/floor_wall_original.*
+     → floors/<F>/floor_wall_common.png   ← common 조건만, project 미적용
   ↓
 ② walls_all_index.json / work_log 갱신 (선택)
 ```
@@ -107,7 +109,7 @@ drawing-devider 산출물
 - **문짝 너머의 양옆 벽은 벽이다.** 가장 가까운 평행선이 벽이 아니면, 그다음 긴 평행선을 간격만으로 벽 짝에 넣지 않는다. 작은 사각 두 개와 짧은 스윙으로 그린 여닫이문도 같다. 문 표시와 벽 두께 안의 문선은 내리고, 양옆 면은 올린다. 1/4 스윙의 문짝이 여러 줄이면 그 한가운데에 WALL 한 줄을 둔다. 힌지에 붙은 문짝이 한 줄이면 그 줄을 WALL로 둔다. 스윙 호는 벽이 아니다.
 - **여닫이문 잎은 벽이 아니다.** 두께 20–80 mm, 폭 0.65–1.45 m 인 문짝만 WALL에서 뺀다. 그 잎 옆에 가깝다는 이유만으로 다른 도형을 문으로 넣지 않는다. 문끝에 붙어 있고 기존 벽과 80 mm 이내로 이어진 짧은 벽(문선·벽 끝)은 WALL로 올린다.
 - **개구로 잘린 간벽은 벽이다.** 옷장에 붙은 이중선처럼 조각이 0.6–1.3 m여도, 같은 직선에서 맞닿은 런이 2.2 m 이상이고 간격이 120–180 mm(간벽)이면 WALL로 유지한다. 세로 간벽은 조각이 1 m 안팎이어도, 같은 두 면 위에서 X 문 개구에 맞닿아 있으면 벽이다.
-- **연속된 실 테두리는 벽이다.** 가장 가까운 평행선 간격이 30–420 mm이고, 짧은 쪽이 6 m 이상이며, 겹침이 짧은 쪽의 80% 이상이면 WALL이다. 그 두 면과 좌표가 8 mm 이내이면, 짧은 쪽이 2.5 m 이상인 조각도 WALL이다. 접견실#3처럼 간격 200 mm이고 조각이 하나인 7.9 m 이중선과, 1.3 m 개구 너머의 2.8 m가 이 경우다. 2.2 m 이상으로 80% 이상 겹치는 평행선이 8개 이상이면 이 조건으로 올리지 않는다. 끝의 짧은 문짝은 그 개수에 넣지 않는다.
+- **연속된 실 테두리는 벽이다.** 가장 가까운 평행선 간격이 30–420 mm이고, 짧은 쪽이 2.2 m 이상이며, 겹침이 짧은 쪽의 80% 이상이면 WALL이다. 그 두 면과 좌표가 8 mm 이내이면, 짧은 쪽이 2.5 m 이상인 조각도 WALL이다. 접견실#3처럼 간격 200 mm이고 조각이 하나인 7.9 m 이중선과, 1.3 m 개구 너머의 2.8 m가 이 경우다. 2.2 m 이상으로 80% 이상 겹치는 평행선이 8개 이상이면 이 조건으로 올리지 않는다. 끝의 짧은 문짝은 그 개수에 넣지 않는다.
 - **H-Beam 기둥**(중첩 정사각, 변 ≤ 1.2 m, 가로·세로 차이 22% 이내)은 `COLUMN`으로 저장한다. 가구 사각은 제외한다. 사각 안에 호가 둘 이상이거나 짧은 선이 많은 표식(휠체어)은 기둥이 아니다.
 
 ---
@@ -120,7 +122,8 @@ drawing-devider 산출물
 $ARTIFACTS_DIR/<drawing_id>/
 ├── floors/<FLOOR>/
 │   ├── floor_original.dxf / .png          # (devider) 입력 · 미리보기
-│   ├── floor_wall_original.dxf / .png / _meta.json  # 층 전체 벽 (기본 산출)
+│   ├── floor_wall_original.dxf / .png / _meta.json  # 층 전체 벽 (프로젝트 조건 포함)
+│   ├── floor_wall_common.png / _meta.json           # common 조건만
 │   └── floor_wall_index.json              # 층 요약
 └── walls_all_index.json                   # (선택) 다층 요약
 ```
@@ -156,7 +159,8 @@ $ARTIFACTS_DIR/<drawing_id>/
 ## 사용자에게 전달할 내용
 
 - 층별 `$ARTIFACTS_DIR/<drawing_id>/floors/<F>/floor_wall_original.*` 경로
-- `floor_wall_original.png` (벽=빨강)
+- `floor_wall_original.png` (벽=빨강, 프로젝트 조건 포함)
+- `floor_wall_common.png` (벽=빨강, common 조건만)
 - 완료 시: 층별 벽 통계. 중간 층에서 진행 여부를 묻지 않는다
 - `sheet_XX`는 추출·검출이 끝난 도곽이다. 지상 1층 미완료로 적지 않고, 층 이름이 미확정인 도곽으로 적는다
 

@@ -3089,12 +3089,11 @@ def _collinear_span(
     *,
     ortho_tol: float = 80.0,
     gap_mm: float = 1500.0,
-    bridge_x: float | None = None,
-    bridge_gap: float = 8000.0,
 ) -> tuple[float, float]:
     """s와 같은 축 조각을 한 런으로 잇는다. (along0, along1).
 
-    문 개구 정도는 gap_mm. 홀 중심을 지나는 보이드(≤ bridge_gap)만 더 넓게 잇는다.
+    문 개구 정도(gap_mm)만 잇는다. 홀 중심 보이드를 넓게 이어 실벽을 객석 열로
+    보지 않는다.
     """
     intervals: list[tuple[float, float]] = [(s.along0, s.along1)]
     for p in peers:
@@ -3108,12 +3107,7 @@ def _collinear_span(
             merged.append([a0, a1])
             continue
         sep = a0 - merged[-1][1]
-        bridge = (
-            bridge_x is not None
-            and sep <= bridge_gap
-            and merged[-1][1] <= bridge_x <= a0
-        )
-        if sep <= gap_mm or bridge:
+        if sep <= gap_mm:
             merged[-1][1] = max(merged[-1][1], a1)
         else:
             merged.append([a0, a1])
@@ -3559,17 +3553,12 @@ def _is_open_hall_interior_v_seg(
             and not _has_parallel_pair(s, peers)
         ):
             wide_single = abs(mx - cx) <= min(half * 0.65, 10000.0)
-        # 외곽에서 1.5–6 m 안쪽을 객석 깊이로 내려가는 장축은 측면 벽이 아니다.
-        chase = False
         # 양쪽 외곽에서 6 m보다 깊어도, 라벨보다 객석 쪽을 길게 가르면 실벽이 아니다.
         # 행사창고처럼 구역명만 있고 의자가 이어지면 설명용 선이다.
         seating_divider = False
         if left_x is not None and right_x is not None and s.length >= min_len_mm:
             inset_l = mx - left_x
             inset_r = right_x - mx
-            in_chase = (1500.0 <= inset_l <= 6000.0) or (1500.0 <= inset_r <= 6000.0)
-            spans_seating = s.along0 <= ly - 6000.0 and s.along1 >= ly - 15000.0
-            chase = in_chase and spans_seating and s.along0 < ly
             seating_divider = (
                 inset_l > 6000.0
                 and inset_r > 6000.0
@@ -3577,7 +3566,7 @@ def _is_open_hall_interior_v_seg(
                 and s.along1 <= ly + 2000.0
                 and s.along0 <= ly - 8000.0
             )
-        if not (near_label or near_center or wide_single or chase or seating_divider):
+        if not (near_label or near_center or wide_single or seating_divider):
             continue
         if ly < s.along0:
             gap = s.along0 - ly
@@ -3664,12 +3653,10 @@ def _is_open_hall_interior_h_seg(
             continue
         if top_y is not None and abs(my - top_y) <= 500.0:
             continue
-        # 홀 폭을 가로질러야 함. 보이드(≤8 m)로 끊긴 조각은 한 런으로 합쳐 잰다.
+        # 홀 폭을 가로질러야 함. 문 개구 정도의 간격만 한 런으로 잇는다.
         if left_x is not None and right_x is not None:
             hall_w = right_x - left_x
-            # 라벨보다 무대 쪽만 중심 보이드를 잇는다. 위쪽 화장실·창고 벽은 분리된 채로 둔다.
-            bridge_x = cx if my <= ly else None
-            a0, a1 = _collinear_span(s, peers, bridge_x=bridge_x)
+            a0, a1 = _collinear_span(s, peers)
             ov = min(a1, right_x - 2500.0) - max(a0, left_x + 2500.0)
             need = max(min_len_mm * 0.55, hall_w * 0.35)
             inside = min(a1, right_x - 800.0) - max(a0, left_x + 800.0)
