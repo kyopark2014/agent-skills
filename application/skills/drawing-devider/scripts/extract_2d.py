@@ -38,6 +38,11 @@ SCRIPTS_DIR = Path(__file__).resolve().parent
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
+_SKILLS_DIR = SCRIPTS_DIR.parents[1]
+if str(_SKILLS_DIR) not in sys.path:
+    sys.path.insert(0, str(_SKILLS_DIR))
+
+from lib_korean_dxf import apply_korean_text  # noqa: E402
 from lib_render import render_floor_original_preview  # noqa: E402
 from lib_sheet import discover_layout, normalize_floor_token  # noqa: E402
 from lib_split import find_primary_floor_bbox, find_primary_line_bbox  # noqa: E402
@@ -388,6 +393,7 @@ def write_clean_dxf(
                 print(f"  [warn] copy {t}: {exc}", file=sys.stderr)
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
+    apply_korean_text(doc)
     doc.saveas(out_path)
     return counts
 

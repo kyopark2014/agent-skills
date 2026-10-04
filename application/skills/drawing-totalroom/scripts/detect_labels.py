@@ -21,6 +21,12 @@ import ezdxf
 from ezdxf.colors import float2transparency
 from PIL import Image, ImageDraw
 
+_SKILLS_DIR = Path(__file__).resolve().parents[2]
+if str(_SKILLS_DIR) not in sys.path:
+    sys.path.insert(0, str(_SKILLS_DIR))
+
+from lib_korean_dxf import apply_korean_text  # noqa: E402
+
 ROOM_SCRIPTS = Path(__file__).resolve().parents[2] / "drawing-roomevaluator" / "scripts"
 sys.path.insert(0, str(ROOM_SCRIPTS))
 import evaluate_room as room  # noqa: E402
@@ -166,6 +172,7 @@ def write_dxf(doc, path: Path, labels: list[dict]) -> None:
             hatch.seeds.append((inst["x"], inst["y"]))
             _add_label_tag(msp, name, (red, green, blue), inst)
     path.parent.mkdir(parents=True, exist_ok=True)
+    apply_korean_text(doc)
     doc.saveas(str(path))
 
 

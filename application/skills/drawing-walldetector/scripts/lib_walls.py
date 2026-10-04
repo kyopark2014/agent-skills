@@ -6,6 +6,7 @@ from __future__ import annotations
 import copy
 import json
 import math
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -13,6 +14,12 @@ from typing import Any
 import ezdxf
 from ezdxf.document import Drawing
 from ezdxf.entities import DXFEntity
+
+_SKILLS_DIR = Path(__file__).resolve().parents[2]
+if str(_SKILLS_DIR) not in sys.path:
+    sys.path.insert(0, str(_SKILLS_DIR))
+
+from lib_korean_dxf import apply_korean_text  # noqa: E402
 
 # ACI red
 WALL_COLOR = 1
@@ -1312,6 +1319,7 @@ def write_walls_dxf(
 
     out_path = __import__("pathlib").Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
+    apply_korean_text(doc)
     doc.saveas(str(out_path))
     return counts
 

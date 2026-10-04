@@ -39,6 +39,13 @@ from ezdxf.enums import TextEntityAlignment
 
 SCRIPTS_DIR = Path(__file__).resolve().parent
 ROOT = SCRIPTS_DIR  # 하위 호환 alias
+_SKILLS_DIR = SCRIPTS_DIR.parents[1]
+if str(_SKILLS_DIR) not in sys.path:
+    sys.path.insert(0, str(_SKILLS_DIR))
+
+from lib_korean_dxf import apply_korean_text  # noqa: E402
+
+
 def resolve_artifacts_dir() -> Path:
     env = os.environ.get("ARTIFACTS_DIR") or os.environ.get("ARTIFACT_DIR")
     return Path(env) if env else Path.cwd()
@@ -331,6 +338,7 @@ def write_clean_dxf(
         counts["DIMENSION"] = n
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
+    apply_korean_text(doc)
     doc.saveas(out_path)
     return counts
 

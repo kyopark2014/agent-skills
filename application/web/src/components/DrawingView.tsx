@@ -10,6 +10,7 @@ const PREVIEWS = [
   { kind: "original", label: "원본", file: "floor_original.png" },
   { kind: "wall", label: "Wall", file: "floor_wall_original.png" },
   { kind: "validated", label: "검증", file: "floor_wall_validated.png" },
+  { kind: "label", label: "라벨", file: "floor_label_detected.png" },
 ] as const;
 
 type PreviewKind = (typeof PREVIEWS)[number]["kind"];
@@ -99,7 +100,7 @@ export function DrawingView({ drawingId, onMenuClick, onBack }: Props) {
         if (cancelled) return;
         setCatalog(data);
         const next =
-          data.floors.find((item) => item.original || item.wall || item.validated)?.id ||
+          data.floors.find((item) => item.original || item.wall || item.validated || item.label)?.id ||
           data.floors[0]?.id ||
           "";
         setFloor(next);

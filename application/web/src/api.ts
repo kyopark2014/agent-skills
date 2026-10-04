@@ -119,6 +119,7 @@ export interface DrawingFloor {
   original: boolean;
   wall: boolean;
   validated: boolean;
+  label: boolean;
 }
 
 export interface DrawingCatalog {

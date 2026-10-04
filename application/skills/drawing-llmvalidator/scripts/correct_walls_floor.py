@@ -20,6 +20,11 @@ if str(_SCRIPTS) not in sys.path:
 
 import ezdxf  # noqa: E402
 
+_SKILLS_DIR = _SCRIPTS.parents[1]
+if str(_SKILLS_DIR) not in sys.path:
+    sys.path.insert(0, str(_SKILLS_DIR))
+
+from lib_korean_dxf import apply_korean_text  # noqa: E402
 from lib_llm_correct import (  # noqa: E402
     apply_corrections,
     load_review,
@@ -76,6 +81,7 @@ def main() -> None:
         f"corridor_protected={stats.get('n_corridor_protected', 0)} "
         f"wall_after={stats['n_wall_after']}"
     )
+    apply_korean_text(doc)
     doc.saveas(str(out_dxf))
     print(f"saved {out_dxf}")
 

@@ -21,6 +21,7 @@ _IMAGE_KINDS = {
     "original": "floor_original.png",
     "wall": "floor_wall_original.png",
     "validated": "floor_wall_validated.png",
+    "label": "floor_label_detected.png",
 }
 
 
@@ -146,6 +147,7 @@ def list_floor_catalog(artifacts: Path, drawing_id: str) -> dict:
                 "original": (floor_dir / _IMAGE_KINDS["original"]).is_file(),
                 "wall": (floor_dir / _IMAGE_KINDS["wall"]).is_file(),
                 "validated": (floor_dir / _IMAGE_KINDS["validated"]).is_file(),
+                "label": (floor_dir / _IMAGE_KINDS["label"]).is_file(),
             }
         )
     return {
