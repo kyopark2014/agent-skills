@@ -7,6 +7,7 @@ description: >-
   floor_label_detected.json을 씁니다. DXF는 검증 도면에 라벨별 레이어를
   더한 것이고, 각 레이어에 면적 HATCH와 이름·면적 문자가 있습니다.
   PNG는 그 층의 라벨 면적을 한 장에 보여 줍니다.
+  각 실의 벽 테두리에 닿는 문은 `--door close`(기본) 또는 `--door open`으로 고릅니다.
   한 층의 전체 실 면적, 라벨별 면적, floor_label_detected 요청 시 사용합니다.
   대상 파일은 artifacts/drawing_list.json으로 찾습니다.
 ---
@@ -14,7 +15,7 @@ description: >-
 # drawing-totalroom (층 전체 실명 면적)
 
 `floor_wall_validated.dxf` 의 실명 라벨마다, 그 글자가 들어 있는 **벽 안쪽 면**을 계산한다.
-면적 규칙은 `drawing-roomevaluator` 와 같다. 입력 DXF·PNG 는 수정하지 않는다.
+면적 규칙과 문 열림은 `drawing-roomevaluator` 와 같다. 입력 DXF·PNG 는 수정하지 않는다.
 
 ## When to Use
 
@@ -35,6 +36,9 @@ description: >-
 
 1. **라벨** — 모델스페이스의 `TEXT`/`MTEXT`만 본다. 블록 안 글자는 펼치지 않는다. 공백을 없앤 뒤 24자 이하이며 `면적`, `천장`, `:`, `=` 이 없는 글자 중, 한글이 있거나 영문 2자 이상에 숫자가 붙은 이름만 실명이다. `X1` 같은 축선, `6300`·`6,300` 같은 치수, `UP`/`DN` 은 빠진다. `MRI1` 은 포함한다. 집기 표기는 실명이 아니다. `미니바`, `미비바`, `옷장`, `신발장`, `화분`, `화장대`, `월풀욕조`, `욕조`, `(장애인)`과, 그 뒤에 번호만 붙은 글자(`옷장1`, `화분#2`)는 뺀다. `옷방`, `소파룸`처럼 집기 이름이 아닌 실명은 남긴다. 같은 실명이 50 mm 안에 있으면 한 곳이다. 위·아래 줄 간격이 글자 높이의 1.8배 안이고 가로로 겹치면 위 글자부터 이어 한 실명으로 만든다. 예: `투시영상` 과 `검사실7` → `투시영상검사실7`.
 2. **면적** — 라벨이 있는 쪽의 **벽 안쪽 면**까지. `WALL`·`WINDOW`·`COLUMN`·`DOOR` 선을 모두 경계로 읽는다. 문 스윙 호는 경계가 아니다. 같은 벽선의 문 개구(2.4 m 이하)는 그 벽선으로 이어 실에 포함한다. 여닫이 문이 있는 개구는 그 문선에서 멈춘다.
+   `--door` 기본값은 `close`다. 요청에 열림·오픈이 없으면 `close`로 실행한다. 값은 그 층의 모든 실에 같이 적용된다.
+   각 실은 문을 모두 닫아 벽 테두리를 잡은 뒤, 그 테두리 위의 `DOOR` 직선과 테두리 450 mm 안의 여닫이만 그 실의 문으로 본다.
+   `open`은 실마다 그 문만 연다. 테두리 밖 `DOOR`는 `open`이어도 닫힌 경계로 둔다.
 3. **기둥 돌출부는 항상 뺀다.** H-Beam이 벽 안쪽 면보다 실 안으로 들어온 면적은 `area_m2`에서 제외한다. 벽 두께 안에만 있는 부분은 빼지 않는다.
 4. **레이어** — `floor_label_detected.dxf` 는 `floor_wall_validated.dxf` 를 복사한 뒤 라벨 레이어를 더한 도면이다. 라벨 하나당 레이어 하나다. 같은 실명이 여러 곳이면 그 레이어에 HATCH 가 여러 개다. 레이어의 HATCH 면적 합이 그 라벨의 `area_m2`다. 각 자리에는 PNG 와 같이 실명과 `면적 ㎡` 문자를 흰 판 위에 둔다. 좌표는 입력 DXF 와 같은 mm 이다.
 5. **같은 면** — 서로 다른 실명이 한 면에 있으면 각 레이어에 그 면 전체가 들어간다. `shared_with` 가 있으면 `area_m2`를 서로 더하지 않는다. 같은 실명이 서로 다른 면에 있으면 각 면의 `area_m2`를 더한다.
@@ -52,14 +56,18 @@ ART="${ARTIFACTS_DIR:-/Users/ksdyb/Documents/src/agent-skills/application/.sessi
 python3.13 "$SCRIPTS/detect_labels.py" \
   --dxf "$ART/<folder>/floors/<floor>/floor_wall_validated.dxf" \
   --meta "$ART/<folder>/floors/<floor>/floor_wall_validated_meta.json" \
-  --png "$ART/<folder>/floors/<floor>/floor_wall_validated.png"
+  --png "$ART/<folder>/floors/<floor>/floor_wall_validated.png" \
+  --door close
 ```
+
+`--door`를 생략하면 `close`다. 사용자가 각 실의 인접 문을 열어서 계산하라고 하면 `--door open`을 붙인다.
 
 | 인자 | 의미 |
 | --- | --- |
 | `--dxf` | `floor_wall_validated.dxf` |
 | `--meta` | `floor_wall_validated_meta.json` (PNG 좌표 변환) |
 | `--png` | `floor_wall_validated.png` (면적 색의 배경) |
+| `--door` | `close`(기본) 또는 `open`. 실마다 그 실의 벽 테두리에 닿는 문만 연다 |
 
 ## Workflow
 
@@ -69,6 +77,7 @@ drawing_list.json 에서 건물 · 층 결정
 floor_wall_validated.dxf 의 TEXT/MTEXT 실명 목록
   ↓
 라벨마다 WALL·WINDOW·COLUMN·DOOR 안쪽 면 (drawing-roomevaluator 와 같은 규칙)
+  `--door open` 이면 그 실의 벽 테두리 문만 연다. 생략하면 close
   ↓
 floor_label_detected.dxf    # 검증 도면 + 라벨별 레이어, HATCH, 이름·면적 문자
 floor_label_detected.png    # 층 전체, 라벨별 색과 면적
@@ -78,6 +87,8 @@ floor_label_detected.json   # 라벨·인스턴스·빠진 라벨
 ## 출력
 
 - `labels[].layer` — 검증 도면 위에 더한 DXF 레이어 이름. 그 레이어에 면적, 실명, 면적 문자가 있다.
+- `rules.door` — 이번 층의 `close` 또는 `open`
+- `instances[].boundary_doors` — 그 자리의 벽 테두리 문. `x`,`y`와 `state`
 - `labels[].area_m2` — 그 라벨의 HATCH 면적 합 (m²). 같은 실명이 여러 면이면 더한 값이다.
 - `labels[].instances[]` — 글자 좌표, 그곳의 `area_m2`, `width_m`, `height_m`.
 - `instances[].shared_with` — 같은 면을 가리키는 다른 실명. 있으면 그 면은 한 번만 말한다.

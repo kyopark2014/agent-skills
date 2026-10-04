@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """층 도면 가운데 샘플을 읽어, LLM이 벽으로 본 구간의 두께·길이를 조건으로 저장한다.
 
-기본은 샘플 PNG 두 장과 samples.json 만 만든다. 에이전트가 view_image 로
-observations.json 을 쓴 뒤 같은 스크립트를 다시 실행하면
-wall_samples/wall_conditions.json 을 만든다. --vision 이면 그 호출까지 이 스크립트가 한다.
+기본은 샘플 PNG 두 장과 samples.json 만 만든다. --vision 이면 이 스크립트가
+Vision으로 observations.json 을 쓰고 wall_samples/wall_conditions.json 까지 만든다.
+view_image 도구는 없다.
 
 Usage:
   python sample_wall_conditions.py --artifacts $ARTIFACTS_DIR/<id> --floor 1F --prepare-only
@@ -231,7 +231,7 @@ def main() -> int:
         observations = _read_json_loose(obs_path)
     else:
         print(f"observations 없음: {obs_path}")
-        print("샘플 PNG 를 view_image 로 본 뒤 observations.json 을 쓰고 이 스크립트를 다시 실행하세요.")
+        print("observations 를 만들려면 같은 명령을 --vision 으로 다시 실행하세요.")
         print("prompt:")
         print(WALL_SAMPLE_PROMPT)
         return 0

@@ -86,9 +86,7 @@ drawing-devider 산출물
 ⓪ floor_original.dxf 확인 (없으면 devider 먼저. 목록의 sheet_XX 포함)
   ↓ (floor_wall_original.* 가 있어도 묻지 않고 덮어쓰기)
 ① 샘플 2장으로 도면별 벽 조건   ← wall_samples/wall_conditions.json 이 없을 때만
-     sample_wall_conditions.py --prepare-only
-     view_image 로 sample_01.png, sample_02.png
-     observations.json 을 쓴 뒤 sample_wall_conditions.py 를 다시 실행
+     sample_wall_conditions.py --vision
      → floors/<F>/wall_samples/wall_conditions.json
   ↓
 ② detect_walls_floor.py --floor <각 층>   ← 층당 bash 1회, 확인 없이 전 층
@@ -109,13 +107,14 @@ drawing-devider 산출물
 `floors/<F>/wall_samples/wall_conditions.json` 이 **이미 있으면 이 단계를 건너뛴다**. 사용자가 다시 뽑으라고 하면 `wall_samples/` 를 지우고 처음부터 한다.
 
 ```bash
-python3 "$SCRIPTS/sample_wall_conditions.py" \
-  --artifacts "$ART" --floor "$FLOOR" --prepare-only
+if command -v python3.13 >/dev/null 2>&1; then PY=python3.13; else PY=python3; fi
+"$PY" "$SCRIPTS/sample_wall_conditions.py" \
+  --artifacts "$ART" --floor "$FLOOR" --vision
 ```
 
-`floors/<F>/wall_samples/sample_01.png`, `sample_02.png`, `samples.json` 이 생긴다. 두 PNG를 `view_image(filepath, prompt)` 로 본다. `prompt` 는 `samples.json` 의 `prompt` 다. `filepath` 는 그 환경의 `ARTIFACTS_DIR` 절대 경로다. `read_file` 은 픽셀을 돌려주지 않는다. 샘플을 보려고 `upload_file_to_s3` 를 호출하지 않는다. `floor_original.png` 원본은 넣지 않는다.
+스크립트가 샘플 PNG 두 장을 만들고, Vision으로 `observations.json`을 쓴 뒤 `wall_conditions.json`까지 만든다. `view_image` 도구는 없다. `read_file`은 픽셀을 돌려주지 않는다. 샘플을 보려고 `upload_file_to_s3`를 호출하지 않는다. `floor_original.png` 원본은 넣지 않는다.
 
-답은 `floors/<F>/wall_samples/observations.json` 으로 쓴다. 샘플마다 벽 bbox 를 나눈다. 벽이 없으면 `walls` 는 `[]` 다.
+샘플마다 벽 bbox를 나눈다. 벽이 없으면 `walls`는 `[]`다.
 
 ```json
 {
@@ -127,11 +126,6 @@ python3 "$SCRIPTS/sample_wall_conditions.py" \
 ```
 
 bbox 는 그 샘플 이미지 기준이다. 왼쪽 위가 `(0, 0)`, 오른쪽 아래가 `(1, 1)` 이다.
-
-```bash
-python3 "$SCRIPTS/sample_wall_conditions.py" \
-  --artifacts "$ART" --floor "$FLOOR"
-```
 
 `wall_samples/wall_conditions.json` 의 `conditions` 가 검출에 붙는다. `measurements` 는 잰 간격·길이고, `covered_by_common` 이 true 인 쌍은 조건으로 만들지 않는다. 벽이 하나도 없어도 파일은 만든다. 그 경우 검출은 `common` 만 쓴다.
 
@@ -182,7 +176,7 @@ $ARTIFACTS_DIR/<drawing_id>/
 
 - [ ] 건물·층은 `drawing_list.json`의 `source_filename`·`floor`로 골랐는가
 - [ ] `$ARTIFACTS_DIR/<folder>/floors/<F>/floor_original.dxf`가 있는가
-- [ ] `wall_samples/wall_conditions.json` 이 없으면 샘플 2장을 `view_image` 로 보고 조건을 모았는가
+- [ ] `wall_samples/wall_conditions.json` 이 없으면 `sample_wall_conditions.py --vision` 으로 조건을 모았는가
 - [ ] `floor_wall_original.*`가 이미 있어도 묻지 않고 덮어썼는가
 - [ ] 스크립트를 `$WORKING_DIR/skills/drawing-walldetector/scripts/...`로 호출하는가
 - [ ] 다층이면 확인 없이 전 층을 이어서 검출했는가

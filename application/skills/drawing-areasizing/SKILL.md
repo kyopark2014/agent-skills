@@ -51,27 +51,11 @@ get_skill_instructions(plugin_name="base", skill_name="drawing-totalroom")
 
 1. **기존 스킬만 실행** — 추출·벽·보정·실면적 코드를 새로 작성하지 않는다. ad-hoc DXF 파싱도 하지 않는다.
 2. **층당 bash 1회** — `extract_2d`, `detect_walls_floor`, `prepare_review`, `correct_walls_floor`, `render_wall_diff`, `detect_labels`는 호출 하나당 층 하나. `for FLOOR in …` 일괄, `--floor all`, `detect_walls_all` 은 쓰지 않는다.
-3. **확인 없이 범위 끝까지** — 층 사이·단계 사이에 진행 여부를 묻지 않는다. 각 단계(추출·벽·검증·실면적)가 끝나면, 다음 도구를 호출하기 전에 채팅 본문에 진행 한 줄을 쓰고 바로 다음 단계로 간다. 전 층이 끝난 뒤에 `area_sizing.md`와 요약을 보고한다.
-4. **Vision은 생략하지 않는다** — `prepare_review.py` 다음에 그 층의 `llm_review/` 조각을 `view_image`로 보고 `review.json`을 작성한 뒤 `correct_walls_floor.py`를 실행한다. prepare와 correct를 한 bash에 넣지 않는다. `floor_wall_original.png` 원본은 Vision에 넣지 않는다. `read_file`과 S3 업로드로 조각을 보지 않는다.
+3. **확인 없이 범위 끝까지** — 층 사이·단계 사이에 진행 여부를 묻지 않는다. 그 사이에 채팅 문장도 쓰지 않고, 도구 결과 뒤에 바로 다음 도구를 호출한다. 사용자에게 보이는 글은 전 층이 끝난 뒤 `area_sizing.md`와 요약 한 번뿐이다.
+4. **Vision은 생략하지 않는다** — `prepare_review.py` 다음에 `view_image.py`를 그 층에 1회 실행한다. `view_image` 도구는 없다. 판정은 채팅에 쓰지 않는다. 로그에 `review.json` 경로가 나온 뒤에 `correct_walls_floor.py`를 실행한다. prepare와 correct를 한 bash에 넣지 않는다. `floor_wall_original.png` 원본은 Vision에 넣지 않는다. `read_file`과 S3 업로드로 이미지를 보지 않는다.
 5. **기존 파일은 skip 하지 않는다** — `floor_original.*`, `floor_wall_original.*`, `floor_wall_validated.*`, `llm_review/`, `floor_label_detected.*`, `structure.*`, `area_sizing.md`가 이미 있어도 그 층·그 단계를 건너뛰거나 묻지 않는다. 같은 경로에 다시 써서 **덮어쓴다**. 도면 폴더를 통째로 지우지는 않는다. 원본 DXF와 각 단계의 읽기 전용 입력(직전 단계 산출)은 그 단계에서 수정하지 않는다.
 6. **실패 층** — 그 층은 실패한 단계에서 멈춘다. 나머지 층은 이어서 처리하고, 마지막 보고에 실패 층을 적는다.
 7. 응답은 **한국어**. 경로·JSON 키·층 이름은 산출 그대로 쓴다.
-
-## 진행 한 줄
-
-도구 카드와 별도로, 사용자에게 보이는 문장으로 남긴다. 한 줄만 쓰고 설명이나 확인 질문은 붙이지 않는다. 다음 단계의 도구를 부르기 전에 쓴다.
-
-```
-<단계> <층> <완료|실패> — <방금 쓴 대표 파일>
-```
-
-- `추출 1F 완료 — floors/1F/floor_original.dxf`
-- `벽 2F 완료 — floors/2F/floor_wall_original.dxf`
-- `검증 1F 완료 — floors/1F/floor_wall_validated.dxf`
-- `실면적 1F 완료 — floors/1F/floor_label_detected.json (라벨 12, unique_face_area_m2 348.2)`
-- `검증 B1F 실패 — review.json 없음`
-
-실면적 완료 줄에는 그 층의 라벨 수와 `unique_face_area_m2`를 괄호에 넣는다. 경로는 산출 위치 그대로 쓴다. 실패면 그 단계에서 멈춘 이유를 적고, 그 층은 다음 단계로 가지 않는다.
 
 ## 경로
 
@@ -108,19 +92,19 @@ test -d "$ARTIFACTS_DIR"
 ```
 대상 도면 · 층 범위 결정
   ↓
-① drawing-devider     범위 안 전 층 추출 → 층마다 진행 한 줄 → analyze_drawing 1회
+① drawing-devider     범위 안 전 층 추출 → analyze_drawing 1회
   ↓                     (floor_original.* 가 있어도 skip 하지 않고 덮어쓰기)
-② 층마다, 확인 없이:
-     drawing-walldetector    → 진행 한 줄
-     drawing-llmvalidator    → 진행 한 줄   ← Vision review.json 필수
-     drawing-totalroom       → 진행 한 줄
+② 층마다, 확인 없이, 채팅 문장 없이:
+     drawing-walldetector
+     drawing-llmvalidator    ← Vision review.json 필수
+     drawing-totalroom
   ↓                     (각 산출이 있어도 skip 하지 않고 덮어쓰기)
-③ $ARTIFACTS_DIR/<drawing_id>/area_sizing.md
+③ $ARTIFACTS_DIR/<drawing_id>/area_sizing.md  ← 여기서만 사용자에게 보고
 ```
 
 산출물이 이미 있어도 그 단계를 생략하지 않는다. 범위 안 전 층·전 단계를 다시 실행하고 같은 경로에 덮어쓴다.
 
-①을 범위 안 전 층에 대해 끝낸 다음 ②로 간다. ②는 **층 하나 안에서** 벽 검출 → LLM 검증 → 실 면적을 끝내고 다음 층으로 간다. Vision 조각이 여러 층에 쌓이지 않게 한다. 층·단계의 스크립트가 끝나면 진행 한 줄을 쓴 뒤에만 다음 도구를 호출한다.
+①을 범위 안 전 층에 대해 끝낸 다음 ②로 간다. ②는 **층 하나 안에서** 벽 검출 → LLM 검증 → 실 면적을 끝내고 다음 층으로 간다. Vision 조각이 여러 층에 쌓이지 않게 한다. 스크립트가 끝나면 채팅에 쓰지 않고 바로 다음 도구를 호출한다.
 
 ### ① drawing-devider
 
@@ -163,7 +147,19 @@ python3 "$SKILLS/drawing-llmvalidator/scripts/prepare_review.py" \
   --floor <F>
 ```
 
-`floor_wall_validated.*`와 `llm_review/`가 이미 있어도 skip 하지 않는다. `llm_review/tiles.json`과 각 조각 PNG를 `view_image`로 보고 `llm_review/review.json`을 새로 쓴다. 판정은 그 스킬의 Vision 기준(문·기둥·창·복도·계단·엘리베이터)을 따른다.
+`floor_wall_validated.*`와 `llm_review/`가 이미 있어도 skip 하지 않는다. `view_image` 도구는 호출하지 않는다. `view_image.py`가 타일을 보고 `llm_review/review.json`을 쓴다. 판정은 채팅에 쓰지 않는다. 기준은 그 스킬의 Vision 판정(문·기둥·창·복도·계단·엘리베이터)을 따른다.
+
+```bash
+if command -v python3.13 >/dev/null 2>&1; then PY=python3.13; else PY=python3; fi
+LOG="$ARTIFACTS_DIR/<drawing_id>/floors/<F>/llm_review/view_image.log"
+nohup "$PY" "$SKILLS/drawing-llmvalidator/scripts/view_image.py" \
+  --artifacts "$ARTIFACTS_DIR/<drawing_id>" \
+  --floor <F> > "$LOG" 2>&1 &
+echo "started $!"
+tail -n 20 "$LOG"
+```
+
+로그에 `review.json` 경로가 나온 뒤에 correct를 실행한다.
 
 ```bash
 python3 "$SKILLS/drawing-llmvalidator/scripts/correct_walls_floor.py" \
@@ -185,8 +181,11 @@ python3 "$SKILLS/drawing-llmvalidator/scripts/render_wall_diff.py" \
 python3.13 "$SKILLS/drawing-totalroom/scripts/detect_labels.py" \
   --dxf "$ARTIFACTS_DIR/<drawing_id>/floors/<F>/floor_wall_validated.dxf" \
   --meta "$ARTIFACTS_DIR/<drawing_id>/floors/<F>/floor_wall_validated_meta.json" \
-  --png "$ARTIFACTS_DIR/<drawing_id>/floors/<F>/floor_wall_validated.png"
+  --png "$ARTIFACTS_DIR/<drawing_id>/floors/<F>/floor_wall_validated.png" \
+  --door close
 ```
+
+`--door`를 생략하면 `close`다. 사용자가 각 실의 인접 문을 열라고 하면 `--door open`을 붙인다.
 
 `floor_label_detected.*`가 이미 있어도 skip 하지 않고 같은 폴더에 덮어쓴다. 산출: `floor_label_detected.dxf`, `.png`, `.json`.
 
@@ -234,8 +233,8 @@ python3.13 "$SKILLS/drawing-totalroom/scripts/detect_labels.py" \
 - [ ] LLM 단계에서 `review.json`을 Vision으로 쓴 뒤에 correct를 실행했는가
 - [ ] 지정 층만, 또는 미지정이면 발견 층 전체를 처리했는가
 - [ ] 기존 산출이 있어도 단계를 skip 하지 않고 같은 경로에 덮어썼는가
-- [ ] 각 단계 직후, 다음 도구를 부르기 전에 진행 한 줄을 채팅에 썼는가
-- [ ] `area_sizing.md`와 층별 `floor_label_detected.*` 경로를 보고했는가
+- [ ] 단계 사이에 채팅 문장을 쓰지 않았는가
+- [ ] 전 층이 끝난 뒤에만 `area_sizing.md`와 층별 `floor_label_detected.*` 경로를 보고했는가
 
 ## Failure Modes
 

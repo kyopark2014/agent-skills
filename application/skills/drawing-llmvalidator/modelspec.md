@@ -5,12 +5,13 @@
 대상 코드:
 
 - `scripts/prepare_review.py` — Vision용 크롭
+- `scripts/view_image.py` — 타일 PNG를 Vision에 보내고 `review.json` 작성
 - `scripts/correct_walls_floor.py` — 보정 진입점, DXF/PNG 저장
 - `scripts/lib_llm_correct.py`의 `apply_corrections` (약 4892행) — 모델스페이스 수정
 
 ## LLM의 역할
 
-스크립트 안에는 LLM API 호출이 없습니다. 이 스킬을 수행하는 Vision 에이전트가 LLM입니다. 도면 엔티티를 직접 고치지 않고, 그림으로만 구분되는 오검출·미검출 영역을 기하 보정에 넘깁니다.
+Vision 호출은 `view_image.py` 한 번입니다. 에이전트 도구로 이미지를 보지 않습니다. 스크립트는 타일마다 bbox JSON만 받아 층 mm로 바꿔 `review.json`에 모읍니다. 도면 엔티티는 고치지 않고, 상자를 기하 보정에 넘깁니다.
 
 ```
 floor_wall_original.png / .dxf          walldetector 산출. 읽기 전용
@@ -18,7 +19,7 @@ floor_wall_original.png / .dxf          walldetector 산출. 읽기 전용
 prepare_review.py                       크롭만. LLM 없음
   llm_review/R*C*.png + tiles.json
   ↓
-Vision LLM                              조각 PNG를 읽고 review.json 작성
+view_image.py                          타일 PNG → review.json (도구 호출 아님)
   ↓
 correct_walls_floor.py
   load_review(review.json)

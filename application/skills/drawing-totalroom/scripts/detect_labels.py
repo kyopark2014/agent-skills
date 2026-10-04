@@ -84,28 +84,35 @@ def rgb_for(index: int) -> tuple[int, int, int]:
     return int(red * 255), int(green * 255), int(blue * 255)
 
 
-def detect_one(msp, boxes, segs, x: float, y: float) -> tuple[dict | None, str | None]:
-    """라벨 좌표를 둘러싼 벽 안쪽 면. 실패하면 (None, 이유)."""
-    pad = 12000.0
-    face = None
-    x_axes: list[float] = []
-    y_axes: list[float] = []
-    while pad <= 50000:
-        h_final, v_final, dsegs, x_axes, y_axes = room.bridged_runs(segs, (x, y), pad + 2000)
-        lines = room._cap_wall_ends(
-            room._snap_endpoints(room._lines_from_runs(h_final, v_final, dsegs), room.JOIN_MM),
-            room.WALL_CAP_MM,
-        )
-        lines = lines + room._door_thresholds(msp, lines, (x, y), pad + 2000)
-        found = room._face_at(lines, x, y)
-        if found is not None and not room._touches_window(found, (x, y), pad + 2000):
-            face = found
-            break
-        pad += 8000
-    else:
-        return None, "벽이 실을 닫지 않습니다"
+def _boundary_at(msp, face, swings) -> list[dict]:
+    """닫힌 실의 벽 테두리에 닿는 문. drawing-roomevaluator 와 같다."""
+    boundary = room._boundary_doors(swings, face) + room._leaf_doors_on_boundary(msp, face)
+    boundary.sort(key=lambda door: (round(door["x"], 1), round(door["y"], 1)))
+    return boundary
+
+
+def detect_one(
+    msp,
+    boxes,
+    segs,
+    x: float,
+    y: float,
+    door: str = "close",
+) -> tuple[dict | None, str | None]:
+    """라벨 좌표를 둘러싼 벽 안쪽 면. 실패하면 (None, 이유).
+
+    door=open 이면 그 실의 벽 테두리에 닿는 문만 연다.
+    """
+    face, x_axes, y_axes, swings = room._room_lines(msp, segs, (x, y), boxes, [])
     if face is None:
         return None, "벽이 실을 닫지 않습니다"
+    boundary = _boundary_at(msp, face, swings)
+    if door == "open" and boundary:
+        opened_segs = room.wall_segments(msp, boxes, open_doors=boundary)
+        opened, ox, oy, _swings = room._room_lines(msp, opened_segs, (x, y), boxes, boundary)
+        if opened is None:
+            return None, "문을 열면 벽이 실을 닫지 않아 면적이 창 밖으로 새었습니다."
+        face, x_axes, y_axes = opened, ox, oy
     try:
         net, protrusions = room._subtract_columns(face, boxes, (x, y))
     except SystemExit as exc:
@@ -128,6 +135,15 @@ def detect_one(msp, boxes, segs, x: float, y: float) -> tuple[dict | None, str |
         "width_m": (maxx - minx) / 1000.0,
         "height_m": (maxy - miny) / 1000.0,
         "drawing_area_m2": room.drawing_area_m2(msp, pts),
+        "boundary_doors": [
+            {
+                "kind": item["kind"],
+                "x": round(item["x"], 1),
+                "y": round(item["y"], 1),
+                "state": "open" if door == "open" else "close",
+            }
+            for item in boundary
+        ],
         "net": net,
     }, None
 
@@ -329,6 +345,7 @@ def _public_instance(inst: dict, shared_with: list[str]) -> dict:
         "width_m": round(inst["width_m"], 4),
         "height_m": round(inst["height_m"], 4),
         "drawing_area_m2": inst["drawing_area_m2"],
+        "boundary_doors": inst.get("boundary_doors") or [],
         "polygon_mm": [[round(x, 1), round(y, 1)] for x, y in inst["pts"]],
     }
     if shared_with:
@@ -336,19 +353,19 @@ def _public_instance(inst: dict, shared_with: list[str]) -> dict:
     return row
 
 
-def detect(dxf_path: Path, meta_path: Path, png_path: Path) -> dict:
+def detect(dxf_path: Path, meta_path: Path, png_path: Path, door: str = "close") -> dict:
     started = time.time()
     doc = ezdxf.readfile(str(dxf_path))
     msp = doc.modelspace()
     seeds = collect_labels(msp)
-    print(f"labels: {len(seeds)}", flush=True)
+    print(f"labels: {len(seeds)} door: {door}", flush=True)
     boxes = room.column_boxes(msp)
     segs = room.wall_segments(msp, boxes)
     detected: list[dict] = []
     skipped: list[dict] = []
     for index, (x, y, text) in enumerate(seeds, start=1):
         try:
-            found, reason = detect_one(msp, boxes, segs, x, y)
+            found, reason = detect_one(msp, boxes, segs, x, y, door=door)
         except Exception as exc:  # noqa: BLE001
             found, reason = None, str(exc) or exc.__class__.__name__
         if found is None:
@@ -423,7 +440,8 @@ def detect(dxf_path: Path, meta_path: Path, png_path: Path) -> dict:
         "rules": {
             "labels": "Korean room names, or Latin names with 2+ letters and a digit; stacked lines within 1.8 text heights are joined top to bottom; fixture callouts such as 미니바, 옷장, 신발장, 화분, 화장대, 월풀욕조, 욕조, (장애인) are excluded",
             "font": "tag text tracks the median room short side; with no room at least 1.5 m across, it tracks 1.1% of the sheet height",
-            "boundary": "inner face of WALL, WINDOW, COLUMN, and DOOR lines",
+            "door": door,
+            "boundary": "inner face of WALL, WINDOW, COLUMN, and DOOR lines; open affects only doors on that room's closed boundary",
             "layer": "validated drawing plus one layer per label; HATCH area is that label; name and area text sit on the layer",
             "shared_face": "each label keeps the whole face; do not sum shared faces",
         },
@@ -439,11 +457,18 @@ def main() -> None:
     parser.add_argument("--dxf", type=Path, required=True)
     parser.add_argument("--meta", type=Path, required=True)
     parser.add_argument("--png", type=Path, required=True)
+    parser.add_argument(
+        "--door",
+        choices=("close", "open"),
+        default="close",
+        help="각 실마다, 닫힌 벽 테두리에 닿는 문만 연다. close(기본)는 그 문도 막는다. 테두리 밖 DOOR는 어느 쪽이든 닫힌 경계로 둔다.",
+    )
     args = parser.parse_args()
     for path in (args.dxf, args.meta, args.png):
         if not path.is_file():
             raise SystemExit(f"파일이 없습니다: {path}")
-    info = detect(args.dxf, args.meta, args.png)
+    info = detect(args.dxf, args.meta, args.png, door=args.door)
+    print(f"door: {info['rules']['door']}")
     print(f"label_count: {info['label_count']}")
     print(f"instance_count: {info['instance_count']}")
     print(f"skipped_count: {info['skipped_count']}")

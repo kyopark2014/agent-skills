@@ -29,6 +29,7 @@ AXIS_TOL_MM = 20.0
 CLUSTER_TOL_MM = 15.0
 JOIN_MM = 80.0
 DOOR_GAP_MM = 2400.0
+DOOR_TOUCH_MM = 450.0
 WALL_CAP_MM = 300.0
 SNAP_MM = 40.0
 COLUMN_MIN_MM = 450.0
@@ -303,11 +304,27 @@ def _inside_box(x: float, y: float, boxes) -> bool:
     return False
 
 
-def wall_segments(msp, boxes) -> list[tuple[float, float, float, float]]:
+def _segment_on_open_door(x0: float, y0: float, x1: float, y1: float, open_doors) -> bool:
+    """연 문의 문선에서 350 mm 안인 짧은 DOOR 선은 그 개구의 문짝이다."""
+    if not open_doors:
+        return False
+    length = math.hypot(x1 - x0, y1 - y0)
+    if length > DOOR_GAP_MM + 200.0:
+        return False
+    mid = Point((x0 + x1) * 0.5, (y0 + y1) * 0.5)
+    for door in open_doors:
+        for line in door["lines"]:
+            if float(line.distance(mid)) <= 350.0:
+                return True
+    return False
+
+
+def wall_segments(msp, boxes, *, include_door: bool = True, open_doors=None) -> list[tuple[float, float, float, float]]:
     segs: list[tuple[float, float, float, float]] = []
+    layers = BOUNDARY_LAYERS if include_door else (WALL_LAYER, WINDOW_LAYER, COLUMN_LAYER)
     for e in msp:
-        # WALL·WINDOW·COLUMN·DOOR 선은 모두 면적 경계다. 레이어는 구분용이다.
-        if e.dxf.layer not in BOUNDARY_LAYERS:
+        # DOOR 선은 경계다. open_doors 에 있는 문짝만 뺀다.
+        if e.dxf.layer not in layers:
             continue
         t = e.dxftype()
         parts: list[tuple[float, float, float, float]] = []
@@ -328,6 +345,8 @@ def wall_segments(msp, boxes) -> list[tuple[float, float, float, float]]:
                 parts.append((a[0], a[1], b[0], b[1]))
         for x0, y0, x1, y1 in parts:
             if _inside_box((x0 + x1) * 0.5, (y0 + y1) * 0.5, boxes):
+                continue
+            if e.dxf.layer == DOOR_LAYER and _segment_on_open_door(x0, y0, x1, y1, open_doors):
                 continue
             segs.append((x0, y0, x1, y1))
     return segs
@@ -370,20 +389,51 @@ def _merge_intervals(intervals: list[tuple[float, float]], join: float) -> list[
     return out
 
 
-def _bridge(merged: list[list[float]], max_gap: float) -> list[list[float]]:
+def _bridge(merged: list[list[float]], max_gap: float, allow=None) -> list[list[float]]:
+    """allow(gap_start, gap_end) 가 False 인 틈은 잇지 않는다."""
     if not merged:
         return []
     out = [merged[0][:]]
     for a, b in merged[1:]:
-        gap = a - out[-1][1]
-        if 0 < gap <= max_gap:
+        gap_start = out[-1][1]
+        gap = a - gap_start
+        if 0 < gap <= max_gap and (allow is None or allow(gap_start, a)):
             out[-1][1] = max(out[-1][1], b)
         else:
             out.append([a, b])
     return out
 
 
-def bridged_runs(segs, origin: tuple[float, float], pad: float):
+def _gap_is_open_door(horizontal: bool, axis: float, a: float, b: float, open_doors) -> bool:
+    """틈이 연 문의 문선과 같은 축에서 겹치면 그 개구는 잇지 않는다."""
+    for door in open_doors or []:
+        span = door.get("span")
+        if not span:
+            continue
+        ori, ax, s0, s1 = span
+        if horizontal and ori == "h" and abs(axis - ax) <= DOOR_TOUCH_MM:
+            if min(b, s1) - max(a, s0) > 80.0:
+                return True
+        if (not horizontal) and ori == "v" and abs(axis - ax) <= DOOR_TOUCH_MM:
+            if min(b, s1) - max(a, s0) > 80.0:
+                return True
+    return False
+
+
+def _gap_hits_column(horizontal: bool, axis: float, a: float, b: float, boxes) -> bool:
+    """틈의 가운데가 기둥 박스(벽 두께 여유 200 mm) 안에 있으면 기둥이 끊은 벽이다."""
+    mid = (a + b) * 0.5
+    pad = 200.0
+    for x0, y0, x1, y1 in boxes:
+        if horizontal:
+            if (y0 - pad) <= axis <= (y1 + pad) and (x0 - pad) <= mid <= (x1 + pad):
+                return True
+        elif (x0 - pad) <= axis <= (x1 + pad) and (y0 - pad) <= mid <= (y1 + pad):
+            return True
+    return False
+
+
+def bridged_runs(segs, origin: tuple[float, float], pad: float, *, door: str = "close", boxes=None, open_doors=None):
     """원점 주변 세그만 모아 축별로 문 틈을 잇는다."""
     ox, oy = origin
     near = []
@@ -413,8 +463,28 @@ def bridged_runs(segs, origin: tuple[float, float], pad: float):
         if x is None:
             continue
         v_int[x].append((min(s[1], s[3]), max(s[1], s[3])))
-    h_final = {y: _bridge(_merge_intervals(iv, JOIN_MM), DOOR_GAP_MM) for y, iv in h_int.items()}
-    v_final = {x: _bridge(_merge_intervals(iv, JOIN_MM), DOOR_GAP_MM) for x, iv in v_int.items()}
+    def _finish(intervals, horizontal: bool, axis: float) -> list[list[float]]:
+        merged = _merge_intervals(intervals, JOIN_MM)
+        if open_doors:
+            return _bridge(
+                merged,
+                DOOR_GAP_MM,
+                allow=lambda a, b, horizontal=horizontal, axis=axis: not _gap_is_open_door(
+                    horizontal, axis, a, b, open_doors
+                ),
+            )
+        if door == "open":
+            return _bridge(
+                merged,
+                DOOR_GAP_MM,
+                allow=lambda a, b, horizontal=horizontal, axis=axis: _gap_hits_column(
+                    horizontal, axis, a, b, boxes or []
+                ),
+            )
+        return _bridge(merged, DOOR_GAP_MM)
+
+    h_final = {y: _finish(iv, True, y) for y, iv in h_int.items()}
+    v_final = {x: _finish(iv, False, x) for x, iv in v_int.items()}
     return h_final, v_final, dsegs, x_axes, y_axes
 
 
@@ -814,11 +884,18 @@ def safe_stem(room: str) -> str:
     return s or "room"
 
 
-def _door_thresholds(msp, lines: list[LineString], origin: tuple[float, float], pad: float) -> list[LineString]:
-    """여닫이 문 개구를 문선으로 막는다.
+def _span_of(line: LineString) -> tuple[str, float, float, float]:
+    x0, y0 = line.coords[0]
+    x1, y1 = line.coords[-1]
+    if abs(y1 - y0) <= abs(x1 - x0):
+        return ("h", (float(y0) + float(y1)) * 0.5, min(float(x0), float(x1)), max(float(x0), float(x1)))
+    return ("v", (float(x0) + float(x1)) * 0.5, min(float(y0), float(y1)), max(float(y0), float(y1)))
 
-    힌지 뒤의 벽과 문짝 끝의 벽을 문 방향으로 잇는다.
-    면적은 그 선에서 멈추고 문 밖 공간으로 넘어가지 않는다.
+
+def _swing_doors(msp, lines: list[LineString], origin: tuple[float, float], pad: float) -> list[dict]:
+    """여닫이 문. 힌지와, 그 개구를 막는 문선을 돌려준다.
+
+    문선은 힌지 뒤의 벽과 문짝 끝의 벽을 문 방향으로 잇는다.
     """
     if not lines:
         return []
@@ -835,7 +912,7 @@ def _door_thresholds(msp, lines: list[LineString], origin: tuple[float, float], 
             walls = None
     if walls is None or walls.is_empty:
         return []
-    extra: list[LineString] = []
+    found: dict[tuple[int, int], dict] = {}
     for entity in msp:
         if entity.dxftype() != "ARC" or getattr(entity.dxf, "layer", None) != "DOOR":
             continue
@@ -881,12 +958,115 @@ def _door_thresholds(msp, lines: list[LineString], origin: tuple[float, float], 
             start_at, end_at = min(behind), min(ahead)
             if end_at - start_at < radius * 0.5:
                 continue
-            extra.append(
-                LineString(
-                    [(hx + ux * start_at, hy + uy * start_at), (hx + ux * end_at, hy + uy * end_at)]
+            line = LineString(
+                [(hx + ux * start_at, hy + uy * start_at), (hx + ux * end_at, hy + uy * end_at)]
+            )
+            key = (round(hx), round(hy))
+            door = found.setdefault(
+                key,
+                {"kind": "swing", "x": hx, "y": hy, "radius": radius, "lines": [], "span": None},
+            )
+            door["lines"].append(line)
+    doors = list(found.values())
+    for door in doors:
+        door["span"] = _span_of(min(door["lines"], key=lambda line: line.length))
+    return doors
+
+
+def _door_thresholds(msp, lines: list[LineString], origin: tuple[float, float], pad: float) -> list[LineString]:
+    """여닫이 문 개구를 문선으로 막는다. 면적은 그 선에서 멈추고 문 밖으로 넘어가지 않는다."""
+    lines_out: list[LineString] = []
+    for door in _swing_doors(msp, lines, origin, pad):
+        lines_out.extend(door["lines"])
+    return lines_out
+
+
+def _leaf_doors_on_boundary(msp, face: Polygon) -> list[dict]:
+    """닫힌 실의 테두리 위에 놓인 DOOR 직선. 스윙 호는 넣지 않는다."""
+    ring = face.exterior
+    doors: list[dict] = []
+    for entity in msp:
+        if getattr(entity.dxf, "layer", None) != DOOR_LAYER or entity.dxftype() == "ARC":
+            continue
+        parts: list[tuple[float, float, float, float]] = []
+        if entity.dxftype() == "LINE":
+            parts.append(
+                (
+                    float(entity.dxf.start.x),
+                    float(entity.dxf.start.y),
+                    float(entity.dxf.end.x),
+                    float(entity.dxf.end.y),
                 )
             )
-    return extra
+        elif entity.dxftype() == "LWPOLYLINE":
+            pts = [(float(a), float(b)) for a, b in entity.get_points("xy")]
+            count = len(pts)
+            for index in range(count - 1 + (1 if entity.closed else 0)):
+                start, end = pts[index], pts[(index + 1) % count]
+                parts.append((start[0], start[1], end[0], end[1]))
+        on_ring: list[LineString] = []
+        for x0, y0, x1, y1 in parts:
+            if math.hypot(x1 - x0, y1 - y0) < 600.0:
+                continue
+            line = LineString([(x0, y0), (x1, y1)])
+            if float(ring.distance(line.interpolate(0.5, normalized=True))) <= 80.0:
+                on_ring.append(line)
+        if not on_ring:
+            continue
+        leaf = max(on_ring, key=lambda line: line.length)
+        span = _span_of(leaf)
+        doors.append(
+            {
+                "kind": "leaf",
+                "x": (leaf.coords[0][0] + leaf.coords[-1][0]) * 0.5,
+                "y": (leaf.coords[0][1] + leaf.coords[-1][1]) * 0.5,
+                "radius": leaf.length,
+                "lines": on_ring,
+                "span": span,
+            }
+        )
+    return doors
+
+
+def _boundary_doors(doors: list[dict], face: Polygon) -> list[dict]:
+    """닫힌 실의 벽 테두리에서 DOOR_TOUCH_MM 안에 문선이 있는 여닫이만 고른다."""
+    ring = face.exterior
+    kept: list[dict] = []
+    for door in doors:
+        hinge = Point(door["x"], door["y"])
+        nearest = min(door["lines"], key=lambda line: float(ring.distance(line)))
+        near = float(ring.distance(nearest)) <= DOOR_TOUCH_MM or float(ring.distance(hinge)) <= DOOR_TOUCH_MM
+        if near:
+            chosen = dict(door)
+            chosen["span"] = _span_of(nearest)
+            kept.append(chosen)
+    kept.sort(key=lambda door: (round(door["x"], 1), round(door["y"], 1)))
+    return kept
+
+
+def _room_lines(msp, segs, origin, boxes, open_doors):
+    """라벨이 들어 있는 닫힌 면. open_doors 의 여닫이는 개구로 남긴다."""
+    lx, ly = origin
+    pad = 12000.0
+    open_keys = {(round(door["x"]), round(door["y"])) for door in open_doors}
+    while pad <= 50000:
+        h_final, v_final, dsegs, x_axes, y_axes = bridged_runs(
+            segs, origin, pad + 2000, boxes=boxes, open_doors=open_doors
+        )
+        lines = _cap_wall_ends(
+            _snap_endpoints(_lines_from_runs(h_final, v_final, dsegs), JOIN_MM),
+            WALL_CAP_MM,
+        )
+        swings = _swing_doors(msp, lines, origin, pad + 2000)
+        for door in swings:
+            if (round(door["x"]), round(door["y"])) in open_keys:
+                continue
+            lines.extend(door["lines"])
+        found = _face_at(lines, lx, ly)
+        if found is not None and not _touches_window(found, origin, pad + 2000):
+            return found, x_axes, y_axes, swings
+        pad += 8000
+    return None, [], [], []
 
 
 def evaluate(
@@ -896,32 +1076,27 @@ def evaluate(
     room: str,
     out_dir: Path,
     at: tuple[float, float] | None = None,
+    door: str = "close",
 ) -> dict:
+    if door not in ("close", "open"):
+        raise SystemExit("--door 는 close 또는 open 입니다.")
     doc = ezdxf.readfile(str(dxf_path))
     msp = doc.modelspace()
     lx, ly, label = find_room_label(msp, room, at)
     boxes = column_boxes(msp)
-    segs = wall_segments(msp, boxes)
-    pad = 12000.0
-    face: Polygon | None = None
-    x_axes: list[float] = []
-    y_axes: list[float] = []
-    while pad <= 50000:
-        h_final, v_final, dsegs, x_axes, y_axes = bridged_runs(segs, (lx, ly), pad + 2000)
-        lines = _cap_wall_ends(
-            _snap_endpoints(_lines_from_runs(h_final, v_final, dsegs), JOIN_MM),
-            WALL_CAP_MM,
-        )
-        lines = lines + _door_thresholds(msp, lines, (lx, ly), pad + 2000)
-        found = _face_at(lines, lx, ly)
-        if found is not None and not _touches_window(found, (lx, ly), pad + 2000):
-            face = found
-            break
-        pad += 8000
-    else:
-        raise SystemExit("벽이 실을 닫지 않아 면적이 창 밖으로 새었습니다.")
+    closed_segs = wall_segments(msp, boxes)
+    face, x_axes, y_axes, swings = _room_lines(msp, closed_segs, (lx, ly), boxes, [])
     if face is None:
         raise SystemExit("벽이 실을 닫지 않아 면적이 창 밖으로 새었습니다.")
+    boundary = _boundary_doors(swings, face) + _leaf_doors_on_boundary(msp, face)
+    boundary.sort(key=lambda door: (round(door["x"], 1), round(door["y"], 1)))
+    open_doors = boundary if door == "open" else []
+    if open_doors:
+        segs = wall_segments(msp, boxes, open_doors=open_doors)
+        opened, ox, oy, _swings = _room_lines(msp, segs, (lx, ly), boxes, open_doors)
+        if opened is None:
+            raise SystemExit("문을 열면 벽이 실을 닫지 않아 면적이 창 밖으로 새었습니다.")
+        face, x_axes, y_axes = opened, ox, oy
 
     gross_m2 = face.area / 1_000_000.0
     net, protrusions = _subtract_columns(face, boxes, (lx, ly))
@@ -961,8 +1136,19 @@ def evaluate(
         "polygon_mm": [[round(x, 4), round(y, 4)] for x, y in pts],
         "enclosed_labels": enclosed,
         "drawing_area_m2": drawn,
+        "boundary_doors": [
+            {
+                "kind": item["kind"],
+                "x": round(item["x"], 1),
+                "y": round(item["y"], 1),
+                "state": "open" if door == "open" else "close",
+            }
+            for item in boundary
+        ],
         "rules": {
             "boundary": "inner face of WALL, WINDOW, COLUMN, and DOOR lines",
+            "door": door,
+            "boundary_door_mm": DOOR_TOUCH_MM,
             "door_gap_mm": DOOR_GAP_MM,
             "hbeam": "column protrusion inside the inner face is always subtracted",
             "method": "polygonize",
@@ -985,6 +1171,12 @@ def main() -> None:
     parser.add_argument("--meta", type=Path, required=True)
     parser.add_argument("--png", type=Path, required=True)
     parser.add_argument("--room", required=True)
+    parser.add_argument(
+        "--door",
+        choices=("close", "open"),
+        default="close",
+        help="닫힌 실의 벽 테두리에 놓인 DOOR 직선과, 테두리 450 mm 안의 여닫이만 연다. close(기본)는 그 문도 막는다. 테두리 밖 DOOR는 어느 쪽이든 닫힌 경계로 둔다.",
+    )
     parser.add_argument("--x", type=float, default=None, help="중복 라벨일 때 선택할 x (mm)")
     parser.add_argument("--y", type=float, default=None, help="중복 라벨일 때 선택할 y (mm)")
     parser.add_argument("--out", type=Path, default=None)
@@ -994,8 +1186,14 @@ def main() -> None:
     at = (args.x, args.y) if args.x is not None else None
     # 번호 붙은 room_eval_N 은 만들지 않는다. 항상 DXF 옆 room_eval 에 덮어쓴다.
     out = args.dxf.parent / "room_eval"
-    info = evaluate(args.dxf, args.meta, args.png, args.room, out, at)
+    info = evaluate(args.dxf, args.meta, args.png, args.room, out, at, door=args.door)
     print(f"room: {info['room']}")
+    print(f"door: {info['rules']['door']}")
+    if info["boundary_doors"]:
+        shown_doors = ", ".join(
+            f"{item['state']} ({item['x']:.0f},{item['y']:.0f})" for item in info["boundary_doors"]
+        )
+        print(f"boundary_doors: {shown_doors}")
     print(f"area_m2: {info['area_m2']:.2f}")
     print(f"column_protrusion_m2: {info['column_protrusion_m2']:.2f}")
     print(f"width_m: {info['width_m']:.3f}")

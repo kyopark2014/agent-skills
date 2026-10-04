@@ -2,9 +2,9 @@
 name: drawing-roomevaluator
 description: >-
   drawing-llmvalidator 산출(floor_wall_validated DXF/PNG)에서 실명으로
-  방을 찾고, WALL·WINDOW·COLUMN·DOOR 선으로 둘러싸인 안쪽 면적을 계산합니다. 창과 기둥, 문 선은
+  방을 찾고, WALL·WINDOW·COLUMN 선과, 기본값인 닫힌 문(DOOR)으로 둘러싸인 안쪽 면적을 계산합니다. 창과 기둥, 문 선은
   레이어가 달라도 벽 경계로 씁니다. 문 개구는 벽선으로
-  잇고, 실 안으로 나온 기둥 돌출부는 항상 뺍니다. 반투명 오버레이 PNG로
+  잇습니다. `--door open` 이면 닫힌 벽 테두리에 닿는 여닫이만 엽니다. 실 안으로 나온 기둥 돌출부는 항상 뺍니다. 반투명 오버레이 PNG로
   계측 범위를 확인합니다. 실 면적, room area, 접견실 면적,
   "하이닉스의 1F에서 회의실#1의 면적"처럼 건물·층·실명으로 묻는 요청 시 사용합니다.
   대상 파일은 artifacts/drawing_list.json으로 찾습니다.
@@ -35,11 +35,15 @@ description: >-
 1. **입력** — 위 절차로 고른 `floor_wall_validated.dxf` + 같은 폴더의 `_meta.json` + `.png`.
    벽은 `WALL`, 창은 `WINDOW`, 기둥은 `COLUMN`, 문은 `DOOR`. 실명은 `TEXT`/`MTEXT`.
    위·아래 줄 간격이 글자 높이의 1.8배 안이고 가로로 겹치면 위 글자부터 이어 한 실명으로 찾는다. 예: `투시영상` 과 `검사실7` → `투시영상검사실7`.
-2. **면적** — 라벨이 있는 쪽의 **벽 안쪽 면**까지. `WALL`·`WINDOW`·`COLUMN`·`DOOR` 선을 모두 경계로 읽는다.
-   문 레이어의 선도 벽과 같이 실을 닫는다. 문 스윙 호는 경계가 아니다.
-   같은 벽선의 문 개구(2.4 m 이하)는
-   그 벽선으로 이어 실에 포함한다. 벽 두께 한가운데나 바깥면이 아니다.
+2. **면적** — 라벨이 있는 쪽의 **벽 안쪽 면**까지. `WALL`·`WINDOW`·`COLUMN` 선을 경계로 읽는다.
+   `--door` 기본값은 `close`다. 요청에 열림·오픈이 없으면 `close`로 실행한다.
+   먼저 문을 모두 닫아 실의 벽 테두리를 잡는다. 그 테두리 위에 놓인 `DOOR` 직선과, 테두리에서 450 mm 안에 문선이 있는 여닫이만 이 실의 문이다.
+   `close`는 그 문도 벽과 같이 닫는다. 문 스윙 호는 경계가 아니다.
+   같은 벽선의 문 개구(2.4 m 이하)는 그 벽선으로 이어 실에 포함한다. 벽 두께 한가운데나 바깥면이 아니다.
    여닫이 문이 있는 개구는 그 문선에서 멈춘다. 문 밖 공간은 면적에 넣지 않는다.
+   `open`은 그 테두리 문만 연다. 그 문의 `DOOR` 선과 여닫이 문선 막기를 빼고, 그 틈은 잇지 않는다.
+   테두리에 닿지 않는 `DOOR`는 `open`이어도 닫힌 경계로 둔다.
+   기둥이 끊은 벽은 `close`와 `open` 모두 다시 잇는다. 이미 개구를 가로지르는 `WALL` 선은 그대로 둔다.
 3. **기둥 돌출부는 항상 뺀다.** H-Beam(변 0.45–1.5 m 정사각, 이중 사각 또는 중심 `_`)이
    벽 안쪽 면보다 실 안으로 들어온 면적은 예외 없이 `area_m2`에서 제외한다.
    기둥이 끊은 벽선은 다시 이어 안쪽 면을 잡고, 그 면 안의 기둥만 뺀다.
@@ -63,8 +67,11 @@ python3.13 "$SCRIPTS/evaluate_room.py" \
   --dxf "$ART/sk_yongin_jiwon/floors/5F/floor_wall_validated.dxf" \
   --meta "$ART/sk_yongin_jiwon/floors/5F/floor_wall_validated_meta.json" \
   --png "$ART/sk_yongin_jiwon/floors/5F/floor_wall_validated.png" \
-  --room "회의실#1"
+  --room "회의실#1" \
+  --door close
 ```
+
+`--door`를 생략하면 `close`다. 사용자가 그 실의 문을 열어서 계산하라고 하면 `--door open`을 붙인다. 열리는 문은 닫힌 벽 테두리에 닿는 여닫이뿐이다.
 
 | 인자 | 의미 |
 | --- | --- |
@@ -72,6 +79,7 @@ python3.13 "$SCRIPTS/evaluate_room.py" \
 | `--meta` | `floor_wall_validated_meta.json` (PNG 좌표 변환) |
 | `--png` | `floor_wall_validated.png` (오버레이 배경) |
 | `--room` | 실명. 공백은 무시하고 맞춘다. 위·아래로 붙은 글자는 이어서 찾는다 |
+| `--door` | `close`(기본) 또는 `open`. 대상은 닫힌 실의 벽 테두리에 놓인 `DOOR` 직선과, 그 테두리 450 mm 안의 여닫이만. 나머지는 항상 닫는다 |
 | `--x`, `--y` | 선택. 같은 실명이 여러 곳일 때 고를 라벨 좌표 (mm) |
 | `--out` | 지정하지 않는다. 항상 DXF 옆 `room_eval/` 에 덮어쓴다 |
 
@@ -84,9 +92,9 @@ floor_wall_validated.dxf / .png / _meta.json
   ↓
 ① 실명 TEXT 위치. 붙은 두 줄은 한 실명
   ↓
-② WALL·WINDOW·COLUMN·DOOR 선분. H-Beam 정사각은 벽선 연결용으로만 쓰고 실 경계로 두지 않는다
+② 문을 모두 닫아 실의 벽 테두리를 잡는다. 그 테두리 위의 `DOOR` 직선과, 테두리 450 mm 안의 여닫이가 이 실의 문이다. H-Beam 정사각은 벽선 연결용으로만 쓰고 실 경계로 두지 않는다
   ↓
-③ 같은 벽선의 2.4 m 이하 틈(문·기둥)을 잇고, 벽 끝의 300 mm 이하 틈은 벽 두께로 막는다. 여닫이 문 개구는 문선으로 막아 문 밖으로 넘어가지 않는다
+③ `--door close`(기본)는 그 문을 문선으로 막는다. `--door open`은 그 문만 연다. 테두리 밖 DOOR와, 기둥이 끊은 벽, 벽 끝 300 mm 이하 틈은 어느 쪽이든 닫는다
   ↓
 ④ 벽선을 polygonize 해서 라벨이 들어 있는 닫힌 면
   ↓
@@ -100,6 +108,8 @@ room_eval/<실명>.json           # 있으면 덮어씀
 
 ## 출력
 
+- `rules.door` — 이번 계산의 `close` 또는 `open`
+- `boundary_doors` — 벽 테두리에 닿는 문. `kind`는 `leaf` 또는 `swing`. `x`,`y`는 문 가운데 또는 힌지(mm), `state`는 `close` 또는 `open`
 - `area_m2` — 벽 안쪽 면에서 기둥 돌출부를 뺀 면적 (m²)
 - `column_protrusion_m2` — 뺀 기둥 돌출부 합계. 없으면 0
 - `width_m`, `height_m` — 벽 안쪽 면의 가로·세로 (돌출을 빼기 전 외곽)

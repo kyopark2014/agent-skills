@@ -22,18 +22,11 @@ ART=/path/to/user/artifacts/sk_yongin_jiwon
 ## 1) 샘플 2장으로 도면별 조건 (wall_samples/wall_conditions.json 이 없을 때만)
 
 ```bash
-python3 "$SCRIPTS/sample_wall_conditions.py" \
+if command -v python3.13 >/dev/null 2>&1; then PY=python3.13; else PY=python3; fi
+"$PY" "$SCRIPTS/sample_wall_conditions.py" \
   --artifacts "$ART" \
   --floor 12F \
-  --prepare-only
-```
-
-`sample_01.png`, `sample_02.png` 를 `view_image` 로 보고 `floors/12F/wall_samples/observations.json` 을 쓴 다음:
-
-```bash
-python3 "$SCRIPTS/sample_wall_conditions.py" \
-  --artifacts "$ART" \
-  --floor 12F
+  --vision
 ```
 
 이미 `wall_samples/wall_conditions.json` 이 있으면 이 단계를 건너뛴다.

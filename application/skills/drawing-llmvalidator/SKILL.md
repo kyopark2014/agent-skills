@@ -10,7 +10,7 @@ description: >-
 
 # drawing-llmvalidator (Vision 벽 검증·보정)
 
-`drawing-walldetector`가 만든 **빨간 WALL** 결과를 Vision(에이전트)이 타일·줌 크롭으로
+`drawing-walldetector`가 만든 **빨간 WALL** 결과를 `scripts/view_image.py`가 타일 크롭으로
 검수한 뒤, 가구 오검출 demote / 구조 벽 미검출 promote 를 적용해
 **`floor_wall_validated.dxf`(+`.png`)** 로 저장한다.
 입력 `floor_wall_original.*` 은 덮어쓰지 않는다.
@@ -34,10 +34,13 @@ description: >-
 ## Critical Rules
 
 1. **선행** — 위 절차로 고른 `floors/<F>/floor_wall_original.dxf` (walldetector)가 있어야 한다.
-2. **입력 미리보기** — Vision에는 `prepare_review.py`가 만든 `llm_review/` 조각만 쓴다.
-   한 변이 5000px를 넘는 이미지는 겹침 격자로 나뉘고, 5000×5000 이하는 한 장이다.
-   `floor_wall_original.png` 원본과 `floor_wall_full.png`는 Vision에 넣지 않는다.
-   조각 PNG는 `view_image(filepath, prompt)`로 본다. `filepath`는 그 환경의 `ARTIFACTS_DIR` 절대 경로다. 로컬은 `.session_storage/...`, 서버는 `/mnt/workspace/...`로 시작한다. `read_file`은 픽셀을 돌려주지 않는다. 조각을 보려고 `upload_file_to_s3`를 호출하지 않는다.
+2. **Vision은 스크립트** — `view_image` 도구는 없다. 호출하지 않는다.
+   `prepare_review.py` 다음에 `scripts/view_image.py`를 층당 1회 실행한다.
+   그 스크립트가 `llm_review/` PNG를 본다. 한 변이 5000px 이하면 타일은 한 장이다.
+   한 변이 5000px를 넘을 때만 겹침 격자로 나뉘고, 나뉜 파일마다 스크립트 안에서 1회 본다.
+   `floor_wall_original.png`, `floor_wall_full.png`, overlay, `room_eval`은 보지 않는다.
+   `read_file`은 픽셀을 돌려주지 않는다. 이미지를 보려고 `upload_file_to_s3`를 호출하지 않는다.
+   판정 문장을 채팅에 쓰지 않는다. 스크립트가 `review.json`을 쓴다.
 3. **출력** — `floors/<F>/floor_wall_validated.{dxf,png,_meta.json}` 만 생성·갱신.
    `floor_wall_original.*` 은 읽기 전용(덮어쓰기 금지).
 4. **범위** — 사용자가 층을 지정하면 그 층만 처리한다. 층을 말하지 않으면 `floor_wall_original.dxf`가 있는 층을 이번 실행에서 모두 처리한다.
@@ -57,11 +60,20 @@ ART="$ARTIFACTS_DIR/<drawing_id>"
 
 # 사용자가 층을 지정하면 그 층만. 아니면 floor_wall_original.dxf 가 있는 층 전부.
 # 층마다 ①→②→③ 을 끝내고, 확인 없이 다음 층으로 간다.
-# 쉘 한 번에 correct 까지 넣지 않는다. Vision이 review.json 을 쓴 뒤에 보정한다.
+# 쉘 한 번에 correct 까지 넣지 않는다. view_image.py 로그에 review.json 이 나온 뒤에 보정한다.
+# bash 는 300초가 지나면 자식을 죽인다. Vision 은 nohup 으로 로그에 남긴다.
 
 python3 "$SCRIPTS/prepare_review.py" --artifacts "$ART" --floor "$FLOOR"
-# ② 각 llm_review/*.png 를 view_image 로 본 뒤 review.json 을 새로 작성
-#    view_image(filepath="$ART/floors/$FLOOR/llm_review/R0C0.png", prompt="...")
+if command -v python3.13 >/dev/null 2>&1; then PY=python3.13; else PY=python3; fi
+LOG="$ART/floors/$FLOOR/llm_review/view_image.log"
+nohup "$PY" "$SCRIPTS/view_image.py" --artifacts "$ART" --floor "$FLOOR" > "$LOG" 2>&1 &
+echo "started $!"
+tail -n 20 "$LOG"
+```
+
+로그에 `→ .../review.json` 이 보이기 전에는 아래를 실행하지 않는다. `sleep`으로 300초에 가깝게 기다리지 않고, 짧은 `tail`로 다시 확인한다.
+
+```bash
 python3 "$SCRIPTS/correct_walls_floor.py" --artifacts "$ART" --floor "$FLOOR"
 python3 "$SCRIPTS/render_wall_diff.py" --artifacts "$ART" --floor "$FLOOR"
 ```
@@ -69,6 +81,7 @@ python3 "$SCRIPTS/render_wall_diff.py" --artifacts "$ART" --floor "$FLOOR"
 | 스크립트 | 역할 |
 | --- | --- |
 | `prepare_review.py` | `floor_wall_original.png` → `llm_review/` 조각 (한 변 5000px 이하) + `tiles.json` |
+| `view_image.py` | 타일 PNG를 Vision으로 보고 `llm_review/review.json` 작성. 도구가 아니다 |
 | `correct_walls_floor.py` | demote/promote → `floor_wall_validated.*` + `llm_review/corrections.json` |
 | `render_wall_diff.py` | original vs validated → `diff_original_vs_validated.png` (초록=promote, 파랑=demote) |
 | `lib_llm_correct.py` | 갭 승격·가구 강등·WALL DXF PNG 재렌더 |
@@ -84,9 +97,10 @@ drawing_list.json 에서 건물(source_filename) · 층(floor) 결정
 ① prepare_review.py → llm_review/R*C*.png (5000×5000 이하) + tiles.json
      이전 크롭 PNG와 review.json 은 지우고 다시 쓴다
   ↓
-② view_image: 조각마다 demote / promote 판정 → review.json 새로 작성
-     prompt에는 아래 Vision 판정 기준을 넣고, 조각 정규화 좌표 JSON을 받는다
-     tiles.json 의 bbox_mm 로 층 전체 mm 를 계산해 review.json 에 쓴다
+② view_image.py 를 층당 1회. 도구 view_image 는 호출하지 않는다
+     스크립트가 tiles.json 의 PNG를 보고 review.json 을 쓴다
+     5000px 이하면 타일 한 장. 한 변이 5000px를 넘을 때만 나뉜 파일마다 스크립트 안에서 1회
+     채팅에 판정·공간 분석을 쓰지 않는다. 로그의 review.json 경로가 나온 뒤에 ③으로 간다
   ↓
 ③ correct_walls_floor.py
      - 기하: WALL 런 사이 진짜 갭 + 이중선 promote
@@ -282,7 +296,7 @@ $ARTIFACTS_DIR/<drawing_id>/floors/<F>/
 - [ ] 지정한 층, 또는 층 미지정 시 `floor_wall_original.dxf`가 있는 층을 이번 실행에서 처리했는가
 - [ ] 출력이 `floor_wall_validated.*` 인가 (original 덮어쓰기 금지)
 - [ ] 기존 validated·diff·llm_review 가 있어도 덮어썼는가
-- [ ] `prepare_review` 크롭을 `view_image`로 검수했는가
+- [ ] `view_image.py`를 층당 1회 실행해 `review.json`을 썼는가 (`view_image` 도구 호출 없음)
 - [ ] 층 사이에 사용자 컨펌을 기다리지 않았는가
 
 ## Related
