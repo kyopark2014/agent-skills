@@ -961,6 +961,7 @@ def read_file(filepath: str) -> str:
 
     Returns:
         The file contents as text, or an error message.
+        PNG and other images are not returned. Use view_image to look at them.
     """
     logger.info(f"###### read_file: {filepath} ######")
     try:
@@ -1020,13 +1021,106 @@ def bash(command: str) -> str:
         parts.append(f"Return code: {result.returncode}")
     return "\n".join(parts) if parts else "(no output)"
 
+_VIEW_IMAGE_EXTS = frozenset({".png", ".jpg", ".jpeg", ".webp", ".gif"})
+_VIEW_MAX_SIDE = 8000
+_VIEW_MAX_PNG_BYTES = int(3.75 * 1024 * 1024)
+_VIEW_MAX_PATCHES = 30_000
+
+
+def _encode_view_png(raw: bytes) -> str:
+    """Base64 PNG for one vision call. Shrinks only past 8000px, 3.75MB, or 30k patches."""
+    import base64
+    import math
+    from io import BytesIO
+
+    from PIL import Image
+
+    img = Image.open(BytesIO(raw))
+    img.load()
+    if img.mode not in ("RGB", "RGBA"):
+        img = img.convert("RGBA" if "A" in img.getbands() else "RGB")
+
+    def _over_limits(width: int, height: int) -> bool:
+        patches = math.ceil(width / 32) * math.ceil(height / 32)
+        return (
+            width > _VIEW_MAX_SIDE
+            or height > _VIEW_MAX_SIDE
+            or patches > _VIEW_MAX_PATCHES
+        )
+
+    width, height = img.size
+    while width > 1 and height > 1 and _over_limits(width, height):
+        width = max(1, int(width * 0.8))
+        height = max(1, int(height * 0.8))
+        img = img.resize((width, height), Image.Resampling.LANCZOS)
+
+    for _ in range(6):
+        buffer = BytesIO()
+        img.save(buffer, format="PNG", optimize=True)
+        png = buffer.getvalue()
+        if len(png) <= _VIEW_MAX_PNG_BYTES and not _over_limits(width, height):
+            return base64.b64encode(png).decode("utf-8")
+        width = max(1, int(width * 0.8))
+        height = max(1, int(height * 0.8))
+        img = img.resize((width, height), Image.Resampling.LANCZOS)
+
+    raise RuntimeError("이미지가 3.75MB 이하로 줄지 않습니다.")
+
+
+@tool
+def view_image(filepath: str, prompt: str) -> str:
+    """Look at a local image and return the vision model's text.
+
+    Sends the file as a base64 PNG plus prompt, the same shape as image analysis.
+    read_file cannot see pixels. Do not upload the file to S3 in order to view it.
+    The image is not added to the conversation. Only this tool's text comes back.
+
+    Args:
+        filepath: Absolute path, or a path under artifacts/. Use ARTIFACTS_DIR on
+            this machine. A server mount path starts with /mnt/workspace/.
+        prompt: What to look for. The prompt is sent with the image unchanged.
+
+    Returns:
+        The model's text answer, or an error message.
+    """
+    logger.info("###### view_image: %s ######", filepath)
+    try:
+        full_path = _resolve_workdir_path(filepath)
+        if not os.path.isfile(full_path):
+            return f"File not found: {filepath}"
+        ext = os.path.splitext(full_path)[1].lower()
+        if ext not in _VIEW_IMAGE_EXTS:
+            return f"Not an image file: {filepath}"
+        with open(full_path, "rb") as handle:
+            raw = handle.read()
+        img_base64 = _encode_view_png(raw)
+        query = (prompt or "").strip() or "이 이미지에 무엇이 보이는지 설명하세요."
+        messages = [
+            HumanMessage(
+                content=[
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": f"data:image/png;base64,{img_base64}"},
+                    },
+                    {"type": "text", "text": query},
+                ]
+            )
+        ]
+        result = chat.get_chat().invoke(messages)
+        text = chat._content_to_text(result.content).strip()
+        return text or "이미지에서 텍스트 답변을 받지 못했습니다."
+    except Exception as exc:
+        logger.error("view_image failed: %s", traceback.format_exc())
+        return f"Failed to view image: {exc}"
+
+
 def get_builtin_tools() -> list:
     """Return the list of built-in tools for the skill-aware agent."""
 
     if sharing_url:
-        return [execute_code, write_file, read_file, grep, bash, upload_file_to_s3, get_current_time]
+        return [execute_code, write_file, read_file, view_image, grep, bash, upload_file_to_s3, get_current_time]
     else:
-        return [execute_code, write_file, read_file, grep, bash, get_current_time]
+        return [execute_code, write_file, read_file, view_image, grep, bash, get_current_time]
 
 def _assistant_text_content(msg: AIMessage) -> str:
     content = msg.content

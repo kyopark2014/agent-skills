@@ -13,6 +13,7 @@ import argparse
 import colorsys
 import json
 import math
+import re
 import sys
 import time
 from pathlib import Path
@@ -35,11 +36,33 @@ Image.MAX_IMAGE_PIXELS = None
 
 _LAYER_BAD = set('<>/\\":;?*=`')
 OUT_STEM = "floor_label_detected"
+# 객실 안 집기 표기. 실이 아니므로 면적을 잡지 않는다.
+_FIXTURE_NAMES = (
+    "미니바",
+    "미비바",
+    "옷장",
+    "신발장",
+    "화분",
+    "화장대",
+    "월풀욕조",
+    "욕조",
+    "(장애인)",
+)
+_FIXTURE_TAIL = re.compile(r"^(?:[#＃]?\d+|[（(]\d+[）)])?$")
+
+
+def is_fixture_label(text: str) -> bool:
+    """집기 이름, 또는 그 뒤에 번호만 붙은 표기."""
+    name = room.norm_name(text)
+    return any(
+        name == fixture or (name.startswith(fixture) and _FIXTURE_TAIL.fullmatch(name[len(fixture) :]))
+        for fixture in _FIXTURE_NAMES
+    )
 
 
 def collect_labels(msp) -> list[tuple[float, float, str]]:
-    """drawing-roomevaluator 와 같은 실명. 붙은 두 줄은 위에서부터 잇는다."""
-    return room.collect_room_labels(msp)
+    """drawing-roomevaluator 와 같은 실명. 집기 표기는 뺀다."""
+    return [item for item in room.collect_room_labels(msp) if not is_fixture_label(item[2])]
 
 
 def layer_name(label: str, used: set[str]) -> str:
@@ -213,6 +236,23 @@ def _paint_face(base: Image.Image, to_px, pts, holes, rgb: tuple[int, int, int],
     base.paste(chip, (left, top), chip)
 
 
+def label_font_px(image_height: int, px_per_m: float, shorts_m: list[float]) -> int:
+    """실이 여러 곳이면 가운데 실의 짧은 변에 맞춘다.
+
+    그렇게 맞춘 크기가 성북동·원광대 도면에서 읽기 좋은 크기였다.
+    짧은 변이 1.5 m 이상인 실이 없으면, 시트 전체에서 읽히도록 이미지 높이에 맞춘다.
+    """
+    substantial = sorted(side for side in shorts_m if side >= 1.5)
+    if substantial:
+        median = substantial[len(substantial) // 2]
+        size = median * px_per_m * 0.115
+        size = min(max(size, px_per_m * 0.32), px_per_m * 0.55)
+    else:
+        size = max(px_per_m * 0.42, image_height * 0.011)
+        size = min(size, max(px_per_m * 1.1, 22.0))
+    return max(22, int(size))
+
+
 def _tag(draw: ImageDraw.ImageDraw, x: float, y: float, lines: list[str], font, rgb) -> None:
     widths = []
     heights = []
@@ -257,7 +297,13 @@ def write_png(png_path: Path, meta: dict, labels: list[dict], out_path: Path) ->
                 if len(mapped) >= 2:
                     draw.line(mapped + [mapped[0]], fill=(*rgb, 255), width=2)
     sample = abs(to_px(1000.0, 0.0)[0] - to_px(0.0, 0.0)[0])
-    font = room._font(max(22, int(sample * 0.42)))
+    shorts = [
+        min(inst["width_m"], inst["height_m"])
+        for item in labels
+        for inst in item["instances"]
+    ]
+    font_px = label_font_px(base.height, sample, shorts)
+    font = room._font(font_px)
     for item in labels:
         for inst in item["instances"]:
             c, r = to_px(inst["x"], inst["y"])
@@ -270,40 +316,7 @@ def write_png(png_path: Path, meta: dict, labels: list[dict], out_path: Path) ->
                 tuple(item["color"]),
             )
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    _with_legend(base, labels).convert("RGB").save(out_path)
-
-
-def _with_legend(base: Image.Image, labels: list[dict]) -> Image.Image:
-    """도면 오른쪽에 라벨별 합계 면적을 붙인다."""
-    if not labels:
-        return base
-    legend_w = max(2800, int(base.width * 0.18))
-    canvas = Image.new("RGBA", (base.width + legend_w, base.height), (255, 255, 255, 255))
-    canvas.paste(base, (0, 0))
-    draw = ImageDraw.Draw(canvas)
-    margin = 64
-    row_h = min(340, max(80, (base.height - margin * 2) // (len(labels) + 1)))
-    title_font = room._font(int(row_h * 0.52))
-    row_font = room._font(int(row_h * 0.40))
-    x0 = base.width + margin
-    y = margin
-    draw.text((x0, y), "라벨별 면적", font=title_font, fill=(20, 20, 20, 255))
-    y += int(row_h * 0.95)
-    swatch = max(36, int(row_h * 0.46))
-    for item in labels:
-        rgb = tuple(item["color"])
-        area = sum(inst["area_m2"] for inst in item["instances"])
-        count = len(item["instances"])
-        suffix = f"  ×{count}" if count > 1 else ""
-        draw.rounded_rectangle((x0, y + 8, x0 + swatch, y + 8 + swatch), radius=8, fill=(*rgb, 255))
-        draw.text(
-            (x0 + swatch + 28, y),
-            f"{item['instances'][0]['text']}{suffix}   {area:.2f} ㎡",
-            font=row_font,
-            fill=(20, 20, 20, 255),
-        )
-        y += row_h
-    return canvas
+    base.convert("RGB").save(out_path)
 
 
 def _public_instance(inst: dict, shared_with: list[str]) -> dict:
@@ -408,7 +421,8 @@ def detect(dxf_path: Path, meta_path: Path, png_path: Path) -> dict:
         "labels": public_labels,
         "skipped": skipped,
         "rules": {
-            "labels": "Korean room names, or Latin names with 2+ letters and a digit; stacked lines within 1.8 text heights are joined top to bottom",
+            "labels": "Korean room names, or Latin names with 2+ letters and a digit; stacked lines within 1.8 text heights are joined top to bottom; fixture callouts such as 미니바, 옷장, 신발장, 화분, 화장대, 월풀욕조, 욕조, (장애인) are excluded",
+            "font": "tag text tracks the median room short side; with no room at least 1.5 m across, it tracks 1.1% of the sheet height",
             "boundary": "inner face of WALL, WINDOW, COLUMN, and DOOR lines",
             "layer": "validated drawing plus one layer per label; HATCH area is that label; name and area text sit on the layer",
             "shared_face": "each label keeps the whole face; do not sum shared faces",

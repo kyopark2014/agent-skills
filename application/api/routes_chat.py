@@ -138,6 +138,13 @@ def _set_final_text_in_timeline(
     timeline.append({"type": "text", "data": stripped})
 
 
+def _is_placeholder_tool_id(tool_use_id: Any, tool_name: Any) -> bool:
+    """True when the id is missing or still the tool name from an early chunk."""
+    if not isinstance(tool_use_id, str) or not tool_use_id:
+        return True
+    return bool(tool_name) and tool_use_id == tool_name
+
+
 def _upsert_tool_event(tool_events: list[dict[str, Any]], mapped: dict[str, Any]) -> None:
     if mapped["type"] == "info":
         data = str(mapped.get("data", ""))
@@ -148,21 +155,32 @@ def _upsert_tool_event(tool_events: list[dict[str, Any]], mapped: dict[str, Any]
 
     if mapped["type"] in ("tool", "tool_result"):
         tool_use_id = mapped.get("toolUseId")
-        for i, existing in enumerate(tool_events):
-            if existing.get("type") == mapped["type"] and existing.get("toolUseId") == tool_use_id:
-                tool_events[i] = mapped
-                return
-        if mapped["type"] == "tool":
-            tool_name = mapped.get("tool")
-            if tool_name:
-                for i in range(len(tool_events) - 1, -1, -1):
-                    existing = tool_events[i]
-                    if existing.get("type") == "tool" and existing.get("tool") == tool_name:
-                        if mapped.get("toolUseId") and mapped["toolUseId"] != tool_name:
-                            tool_events[i] = mapped
-                        else:
-                            tool_events[i] = {**existing, **mapped}
-                        return
+        tool_name = mapped.get("tool")
+        # Same call streaming in: update that card. A later call of the same
+        # tool has a different id and must stay as its own card.
+        if tool_use_id and not (
+            mapped["type"] == "tool" and _is_placeholder_tool_id(tool_use_id, tool_name)
+        ):
+            for i, existing in enumerate(tool_events):
+                if (
+                    existing.get("type") == mapped["type"]
+                    and existing.get("toolUseId") == tool_use_id
+                ):
+                    tool_events[i] = mapped
+                    return
+        if mapped["type"] == "tool" and tool_name:
+            incoming_placeholder = _is_placeholder_tool_id(tool_use_id, tool_name)
+            for i in range(len(tool_events) - 1, -1, -1):
+                existing = tool_events[i]
+                if existing.get("type") != "tool" or existing.get("tool") != tool_name:
+                    continue
+                if _is_placeholder_tool_id(existing.get("toolUseId"), tool_name):
+                    if incoming_placeholder:
+                        tool_events[i] = {**existing, **mapped}
+                    else:
+                        tool_events[i] = mapped
+                    return
+                break
     tool_events.append(mapped)
 
 

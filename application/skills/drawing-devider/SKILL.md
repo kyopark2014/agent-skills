@@ -370,3 +370,4 @@ $ARTIFACTS_DIR/
 - `scripts/lib_render.py` — 치수·고해상도 렌더
 - `scripts/plan_split.py` / `split_floor.py` — 레거시 타일 분할 (선택)
 - `drawing-walldetector` — `floor_original.dxf`에서 층 전체 벽 검출
+- `drawing-areasizing` — 추출 → 벽 → LLM 검증 → 실명 면적을 이어서 수행

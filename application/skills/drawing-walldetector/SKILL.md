@@ -11,7 +11,7 @@ description: >-
 
 `drawing-devider`가 만든 **층 단위** `floor_original.dxf`에서 벽을 찾아 **빨간색**으로
 표시한 DXF(및 검수용 PNG)를 생성한다. 기본 산출은 **`floor_wall_original.*`** 이고,
-프로젝트 조건을 빼면 **`floor_wall_common.png`** 다.
+프로젝트 조건과 샘플에서 모은 도면별 조건을 빼면 **`floor_wall_common.png`** 다.
 
 ## When to Use
 
@@ -36,10 +36,11 @@ description: >-
 4. **범위** — 사용자가 층을 지정하면 그 층만 검출한다. 층을 말하지 않으면 `discovered_floors`를 순서대로 끝까지 검출한다. 파일럿 확인은 받지 않는다.
 5. **층별 1개씩, 확인 없이** — 한 bash에 `for FLOOR in …` 일괄·`detect_walls_all`로 전층 한 번에 돌리는 것을 기본 **금지**한다 (대용량에서 Timeout). 한 층이 끝나면 **사용자에게 묻지 말고** 바로 다음 층을 같은 방식으로 실행한다. 사용자가 일괄을 명시할 때만 `detect_walls_all` 허용.
 6. **벽은 빨간색** — 출력 DXF의 `WALL` 레이어(ACI 1). 베이스 기하는 `BASE`(회색).
-7. **산출 경로** — `$ARTIFACTS_DIR/<drawing_id>/floors/<F>/floor_wall_original.*` (프로젝트 조건 포함). 같은 폴더의 `floor_wall_common.png`는 `common`만 적용한 검수용이다. 레거시 타일은 `walls/` (선택).
-8. **스크립트 사용** — `$WORKING_DIR/skills/drawing-walldetector/scripts/` 로만 수행. ad-hoc 대용량 파싱 금지.
-9. 응답은 **한국어**. 경로·JSON 키는 영문/숫자 유지.
-10. **타일 검출(레거시)** — `parts/`가 있고 사용자가 명시한 때만 `--with-tiles`.
+7. **산출 경로** — `$ARTIFACTS_DIR/<drawing_id>/floors/<F>/floor_wall_original.*` (프로젝트 조건과 샘플 조건 포함). 같은 폴더의 `floor_wall_common.png`는 `common`만 적용한 검수용이다. 레거시 타일은 `walls/` (선택).
+8. **도면별 벽 치수** — 벽 두께·길이는 도면마다 다르다. `wall_conditions.json` 의 `common` 은 공통값이고, 그 도면에서 빠진 벽은 샘플 2장을 읽어 모은다. `floors/<F>/wall_samples/wall_conditions.json` 이 없으면 검출 전에 만들고, 이미 있으면 묻지 않고 그 파일을 쓴다. 사용자가 다시 뽑으라고 할 때만 샘플부터 다시 한다.
+9. **스크립트 사용** — `$WORKING_DIR/skills/drawing-walldetector/scripts/` 로만 수행. ad-hoc 대용량 파싱 금지.
+10. 응답은 **한국어**. 경로·JSON 키는 영문/숫자 유지.
+11. **타일 검출(레거시)** — `parts/`가 있고 사용자가 명시한 때만 `--with-tiles`.
 
 ## Script Location
 
@@ -48,7 +49,8 @@ description: >-
 
 | 스크립트 | 용도 |
 | --- | --- |
-| `$WORKING_DIR/skills/drawing-walldetector/scripts/detect_walls_floor.py` | **한 층** `floor_wall_original` (기본) |
+| `$WORKING_DIR/skills/drawing-walldetector/scripts/sample_wall_conditions.py` | 가운데 샘플 2장 → 도면별 벽 두께·길이 조건 |
+| `$WORKING_DIR/skills/drawing-walldetector/scripts/detect_walls_floor.py` | **한 층** `floor_wall_original` (기본). `wall_samples/wall_conditions.json` 이 있으면 붙인다 |
 | `$WORKING_DIR/skills/drawing-walldetector/scripts/detect_walls_tile.py` | 단일 DXF (레거시·선택) |
 | `$WORKING_DIR/skills/drawing-walldetector/scripts/detect_walls_all.py` | 다층 일괄 (사용자 명시 시에만) |
 | `$WORKING_DIR/skills/drawing-walldetector/scripts/lib_walls.py` | 평행 이중선 기반 벽 분류·DXF/PNG |
@@ -83,16 +85,55 @@ drawing-devider 산출물
   ↓
 ⓪ floor_original.dxf 확인 (없으면 devider 먼저. 목록의 sheet_XX 포함)
   ↓ (floor_wall_original.* 가 있어도 묻지 않고 덮어쓰기)
-① detect_walls_floor.py --floor <각 층>   ← 층당 bash 1회, 확인 없이 전 층
-     → floors/<F>/floor_wall_original.*
-     → floors/<F>/floor_wall_common.png   ← common 조건만, project 미적용
+① 샘플 2장으로 도면별 벽 조건   ← wall_samples/wall_conditions.json 이 없을 때만
+     sample_wall_conditions.py --prepare-only
+     view_image 로 sample_01.png, sample_02.png
+     observations.json 을 쓴 뒤 sample_wall_conditions.py 를 다시 실행
+     → floors/<F>/wall_samples/wall_conditions.json
   ↓
-② walls_all_index.json / work_log 갱신 (선택)
+② detect_walls_floor.py --floor <각 층>   ← 층당 bash 1회, 확인 없이 전 층
+     → floors/<F>/floor_wall_original.*   ← common + project + 샘플 조건
+     → floors/<F>/floor_wall_common.png   ← common 조건만, project·샘플 미적용
+  ↓
+③ walls_all_index.json / work_log 갱신 (선택)
 ```
 
 ### ⓪ 기존 산출
 
 `floor_wall_original.dxf` / `.png` / `_meta.json` / `floor_wall_index.json`이 이미 있어도 **묻지 않고 덮어쓴다**. 폴더 전체를 삭제하지 않는다.
+
+### ① 샘플에서 벽 두께·길이 모으기
+
+`common` 숫자만으로는 도면마다 다른 짧은 벽·얇은 벽이 빠진다. 검출 전에 그 층의 한가운데 샘플 **2장**을 읽고, LLM이 벽이라고 한 이중선의 간격·길이를 DXF에서 재서 `wall_conditions.json` 과 같은 조건으로 저장한다. `common`이 이미 잡는 쌍은 조건에 넣지 않는다.
+
+`floors/<F>/wall_samples/wall_conditions.json` 이 **이미 있으면 이 단계를 건너뛴다**. 사용자가 다시 뽑으라고 하면 `wall_samples/` 를 지우고 처음부터 한다.
+
+```bash
+python3 "$SCRIPTS/sample_wall_conditions.py" \
+  --artifacts "$ART" --floor "$FLOOR" --prepare-only
+```
+
+`floors/<F>/wall_samples/sample_01.png`, `sample_02.png`, `samples.json` 이 생긴다. 두 PNG를 `view_image(filepath, prompt)` 로 본다. `prompt` 는 `samples.json` 의 `prompt` 다. `filepath` 는 그 환경의 `ARTIFACTS_DIR` 절대 경로다. `read_file` 은 픽셀을 돌려주지 않는다. 샘플을 보려고 `upload_file_to_s3` 를 호출하지 않는다. `floor_original.png` 원본은 넣지 않는다.
+
+답은 `floors/<F>/wall_samples/observations.json` 으로 쓴다. 샘플마다 벽 bbox 를 나눈다. 벽이 없으면 `walls` 는 `[]` 다.
+
+```json
+{
+  "samples": [
+    {"id": "sample_01", "walls": [{"bbox": [0.10, 0.20, 0.14, 0.80]}]},
+    {"id": "sample_02", "walls": []}
+  ]
+}
+```
+
+bbox 는 그 샘플 이미지 기준이다. 왼쪽 위가 `(0, 0)`, 오른쪽 아래가 `(1, 1)` 이다.
+
+```bash
+python3 "$SCRIPTS/sample_wall_conditions.py" \
+  --artifacts "$ART" --floor "$FLOOR"
+```
+
+`wall_samples/wall_conditions.json` 의 `conditions` 가 검출에 붙는다. `measurements` 는 잰 간격·길이고, `covered_by_common` 이 true 인 쌍은 조건으로 만들지 않는다. 벽이 하나도 없어도 파일은 만든다. 그 경우 검출은 `common` 만 쓴다.
 
 ### 검출 개요
 
@@ -122,9 +163,14 @@ drawing-devider 산출물
 $ARTIFACTS_DIR/<drawing_id>/
 ├── floors/<FLOOR>/
 │   ├── floor_original.dxf / .png          # (devider) 입력 · 미리보기
-│   ├── floor_wall_original.dxf / .png / _meta.json  # 층 전체 벽 (프로젝트 조건 포함)
+│   ├── floor_wall_original.dxf / .png / _meta.json  # 층 전체 벽 (프로젝트·샘플 조건 포함)
 │   ├── floor_wall_common.png / _meta.json           # common 조건만
-│   └── floor_wall_index.json              # 층 요약
+│   ├── floor_wall_index.json              # 층 요약
+│   └── wall_samples/
+│       ├── sample_01.png / sample_02.png  # 가운데 샘플
+│       ├── samples.json                   # 샘플 mm 창 · prompt
+│       ├── observations.json              # LLM 벽 bbox
+│       └── wall_conditions.json           # 모은 두께·길이 조건
 └── walls_all_index.json                   # (선택) 다층 요약
 ```
 
@@ -136,6 +182,7 @@ $ARTIFACTS_DIR/<drawing_id>/
 
 - [ ] 건물·층은 `drawing_list.json`의 `source_filename`·`floor`로 골랐는가
 - [ ] `$ARTIFACTS_DIR/<folder>/floors/<F>/floor_original.dxf`가 있는가
+- [ ] `wall_samples/wall_conditions.json` 이 없으면 샘플 2장을 `view_image` 로 보고 조건을 모았는가
 - [ ] `floor_wall_original.*`가 이미 있어도 묻지 않고 덮어썼는가
 - [ ] 스크립트를 `$WORKING_DIR/skills/drawing-walldetector/scripts/...`로 호출하는가
 - [ ] 다층이면 확인 없이 전 층을 이어서 검출했는가
@@ -152,7 +199,8 @@ $ARTIFACTS_DIR/<drawing_id>/
 | `skills/...` / `cde-pilot/...` 경로 실패 | `$WORKING_DIR/skills/drawing-walldetector/scripts/...` 사용 |
 | `floor_wall_original.*` 이미 존재 | 묻지 않고 덮어쓴다. 폴더는 삭제하지 않는다 |
 | Timeout / 전층 일괄 실패 | `detect_walls_all` 금지 → `detect_walls_floor --floor <F>` 층당 1회, 확인 없이 다음 층 |
-| 과검출·미검출 | `min_len_mm` / `thick_min_mm` / `thick_max_mm` 조정 (reference.md) |
+| 과검출·미검출 | 샘플 조건이 오래됐으면 `wall_samples/` 를 지우고 다시 모은다. 그래도 남으면 `min_len_mm` / `thick_min_mm` / `thick_max_mm` 조정 (reference.md) |
+| 샘플에서 벽을 못 찾음 | `observations.json` 의 `walls` 를 `[]` 로 두고 조건 파일을 만든다. 검출은 common 만 쓴다 |
 
 ---
 
@@ -167,4 +215,5 @@ $ARTIFACTS_DIR/<drawing_id>/
 ## Related
 
 - `drawing-devider` — `floor_original` 층 추출 선행 스킬
+- `drawing-areasizing` — 추출부터 실명 면적까지 이 스킬을 포함해 순서대로 수행
 - `scripts/lib_walls.py` — 벽 분류·렌더 구현

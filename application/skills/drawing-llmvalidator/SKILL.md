@@ -37,6 +37,7 @@ description: >-
 2. **입력 미리보기** — Vision에는 `prepare_review.py`가 만든 `llm_review/` 조각만 쓴다.
    한 변이 5000px를 넘는 이미지는 겹침 격자로 나뉘고, 5000×5000 이하는 한 장이다.
    `floor_wall_original.png` 원본과 `floor_wall_full.png`는 Vision에 넣지 않는다.
+   조각 PNG는 `view_image(filepath, prompt)`로 본다. `filepath`는 그 환경의 `ARTIFACTS_DIR` 절대 경로다. 로컬은 `.session_storage/...`, 서버는 `/mnt/workspace/...`로 시작한다. `read_file`은 픽셀을 돌려주지 않는다. 조각을 보려고 `upload_file_to_s3`를 호출하지 않는다.
 3. **출력** — `floors/<F>/floor_wall_validated.{dxf,png,_meta.json}` 만 생성·갱신.
    `floor_wall_original.*` 은 읽기 전용(덮어쓰기 금지).
 4. **범위** — 사용자가 층을 지정하면 그 층만 처리한다. 층을 말하지 않으면 `floor_wall_original.dxf`가 있는 층을 이번 실행에서 모두 처리한다.
@@ -59,7 +60,8 @@ ART="$ARTIFACTS_DIR/<drawing_id>"
 # 쉘 한 번에 correct 까지 넣지 않는다. Vision이 review.json 을 쓴 뒤에 보정한다.
 
 python3 "$SCRIPTS/prepare_review.py" --artifacts "$ART" --floor "$FLOOR"
-# ② 이 층 llm_review 조각을 보고 review.json 을 새로 작성
+# ② 각 llm_review/*.png 를 view_image 로 본 뒤 review.json 을 새로 작성
+#    view_image(filepath="$ART/floors/$FLOOR/llm_review/R0C0.png", prompt="...")
 python3 "$SCRIPTS/correct_walls_floor.py" --artifacts "$ART" --floor "$FLOOR"
 python3 "$SCRIPTS/render_wall_diff.py" --artifacts "$ART" --floor "$FLOOR"
 ```
@@ -82,7 +84,9 @@ drawing_list.json 에서 건물(source_filename) · 층(floor) 결정
 ① prepare_review.py → llm_review/R*C*.png (5000×5000 이하) + tiles.json
      이전 크롭 PNG와 review.json 은 지우고 다시 쓴다
   ↓
-② Vision: demote / promote 판정 → review.json 새로 작성
+② view_image: 조각마다 demote / promote 판정 → review.json 새로 작성
+     prompt에는 아래 Vision 판정 기준을 넣고, 조각 정규화 좌표 JSON을 받는다
+     tiles.json 의 bbox_mm 로 층 전체 mm 를 계산해 review.json 에 쓴다
   ↓
 ③ correct_walls_floor.py
      - 기하: WALL 런 사이 진짜 갭 + 이중선 promote
@@ -278,10 +282,11 @@ $ARTIFACTS_DIR/<drawing_id>/floors/<F>/
 - [ ] 지정한 층, 또는 층 미지정 시 `floor_wall_original.dxf`가 있는 층을 이번 실행에서 처리했는가
 - [ ] 출력이 `floor_wall_validated.*` 인가 (original 덮어쓰기 금지)
 - [ ] 기존 validated·diff·llm_review 가 있어도 덮어썼는가
-- [ ] `prepare_review` 크롭으로 Vision 검수했는가
+- [ ] `prepare_review` 크롭을 `view_image`로 검수했는가
 - [ ] 층 사이에 사용자 컨펌을 기다리지 않았는가
 
 ## Related
 
 - `drawing-walldetector` — 이중선 휴리스틱 1차 검출
 - `drawing-devider` — 타일·`floor_original` 선행
+- `drawing-areasizing` — 추출 → 벽 검출 다음 단계로 이 스킬을 호출하고, 이어서 실명 면적으로 간다

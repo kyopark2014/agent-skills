@@ -7,6 +7,11 @@ import { appDataService } from "../services/appDataService";
 const TOOL_INPUT_INFO_RE = /^Tool: .+?, Input:/s;
 const TOOL_RESULT_INFO_RE = /^Tool Result: /s;
 
+function isPlaceholderToolId(toolUseId: string | undefined, tool: string | undefined): boolean {
+  if (!toolUseId) return true;
+  return !!tool && toolUseId === tool;
+}
+
 function upsertToolEvent(prev: ToolEvent[], event: ToolEvent): ToolEvent[] {
   if (event.type === "info") {
     const data = event.data ?? "";
@@ -15,25 +20,30 @@ function upsertToolEvent(prev: ToolEvent[], event: ToolEvent): ToolEvent[] {
     }
   }
   if (event.type === "tool" || event.type === "tool_result") {
-    const idx = prev.findIndex(
-      (e) => e.type === event.type && e.toolUseId === event.toolUseId,
-    );
-    if (idx >= 0) {
-      const next = [...prev];
-      next[idx] = event;
-      return next;
-    }
-    if (event.type === "tool" && event.tool) {
-      const byName = prev.findIndex(
-        (e) => e.type === "tool" && e.tool === event.tool,
+    const placeholder =
+      event.type === "tool" && isPlaceholderToolId(event.toolUseId, event.tool);
+    if (event.toolUseId && !placeholder) {
+      const idx = prev.findIndex(
+        (e) => e.type === event.type && e.toolUseId === event.toolUseId,
       );
-      if (byName >= 0) {
+      if (idx >= 0) {
         const next = [...prev];
-        next[byName] =
-          event.toolUseId && event.toolUseId !== event.tool
-            ? event
-            : { ...next[byName], ...event };
+        next[idx] = event;
         return next;
+      }
+    }
+    // Only fold into a card that still has no real id. A finished call of the
+    // same tool keeps its own card.
+    if (event.type === "tool" && event.tool) {
+      for (let i = prev.length - 1; i >= 0; i -= 1) {
+        const existing = prev[i];
+        if (existing.type !== "tool" || existing.tool !== event.tool) continue;
+        if (isPlaceholderToolId(existing.toolUseId, existing.tool)) {
+          const next = [...prev];
+          next[i] = placeholder ? { ...existing, ...event } : event;
+          return next;
+        }
+        break;
       }
     }
   }

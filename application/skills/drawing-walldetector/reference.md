@@ -18,6 +18,7 @@ $ARTIFACTS_DIR/<drawing_id>/
   walls_all_index.json                                # 선택(다층 요약)
 ```
 
+- `floors/<F>/wall_samples/wall_conditions.json` 이 있으면 `floor_wall_original` 에만 붙인다. `floor_wall_common` 에는 넣지 않는다. 없는 층은 검출 전에 `sample_wall_conditions.py` 로 샘플 2장을 만들어 모은다. 절차는 SKILL.md [샘플에서 벽 두께·길이 모으기]를 따른다.
 - `floor_walls_overview.*` / `walls/floor_wall_original.*` 는 **생성·사용하지 않음**.
 - `parts/` · `walls/R*C*_walls.*` 는 **기본 미생성** (`--with-tiles` 레거시만).
 

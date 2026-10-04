@@ -135,6 +135,31 @@ def load_wall_conditions(project: str | None = None, path: Path | None = None) -
     return conditions
 
 
+_OVERRIDE_SKIP = frozenset({"match", "note", "_project"})
+
+
+def append_condition_overrides(profiles: list[dict], overrides: list[dict]) -> list[dict]:
+    """샘플에서 모은 조건 차이를 각 프로파일 뒤에 붙인다.
+
+    override에 없는 키는 기존 프로파일 값을 유지한다. note·match는 검출에 쓰지 않는다.
+    """
+    if not overrides:
+        return [copy.deepcopy(item) for item in profiles]
+    bases = [copy.deepcopy(item) for item in profiles]
+    out = list(bases)
+    for extra in overrides:
+        if not isinstance(extra, dict):
+            continue
+        cleaned = {key: value for key, value in extra.items() if key not in _OVERRIDE_SKIP}
+        if not cleaned:
+            continue
+        for base in bases:
+            merged = _deep_merge(base, cleaned)
+            merged["_project"] = base.get("_project")
+            out.append(merged)
+    return out
+
+
 def _wall_condition_profiles(
     conditions: dict | list[dict] | None,
     project: str | None,

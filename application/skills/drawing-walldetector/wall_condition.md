@@ -102,3 +102,9 @@
 - 그 두 면과 좌표가 8 mm 이내이고 짧은 쪽이 2.5 m 이상이면 그 조각도 `WALL`이다. 동·서의 2.8 m가 여기 들어간다.
 
 간벽 조건(간격 120–180 mm, 런 2.2 m 이상)과 X문 개구 조건은 간격 200 mm라 이 테두리에 해당하지 않는다. 1.7 m 이상이고 간격 250 mm 이하인 개구 조각은 이 조건에 넣지 않는다.
+
+## 샘플에서 모은 조건
+
+도면마다 두께와 길이가 다르다. `sample_wall_conditions.py` 는 층 도면 한가운데 샘플 2장을 만들고, LLM이 벽으로 표시한 bbox 안의 평행 이중선을 DXF에서 잰다. `common` 이 이미 벽으로 둔 쌍은 빼고, 빠진 쌍만 `floors/<F>/wall_samples/wall_conditions.json` 의 `conditions` 에 넣는다.
+
+조건 모양은 주택 항목과 같다. 간격은 측정값 ±5 mm, 짧은 쪽 길이는 측정값 ±1.5%(최소 10 mm)다. `candidate.max_length_mm` 이 있어 그 길이보다 긴 선은 그 조건의 후보가 아니다. `detect_walls_floor` 는 이 배열을 common·프로젝트 조건 뒤에 붙여 `floor_wall_original` 에만 쓴다. `floor_wall_common` 에는 넣지 않는다.

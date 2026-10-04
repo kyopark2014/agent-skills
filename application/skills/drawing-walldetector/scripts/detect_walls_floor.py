@@ -22,9 +22,12 @@ _SCRIPTS = Path(__file__).resolve().parent
 if str(_SCRIPTS) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS))
 
+from lib_wall_samples import load_sampled_overrides, sampled_conditions_path  # noqa: E402
 from lib_walls import (  # noqa: E402
+    append_condition_overrides,
     classify_entities,
     load_tile_entities,
+    load_wall_conditions,
     render_walls_png,
     resolve_project_name,
     write_walls_dxf,
@@ -38,6 +41,7 @@ def _detect_one(
     src: Path,
     walls_dir: Path,
     project: str | None,
+    conditions: list | None,
     min_len_mm: float | None,
     thick_min_mm: float | None,
     thick_max_mm: float | None,
@@ -56,10 +60,11 @@ def _detect_one(
     print(f"\n== {floor} {tile_id} ==", flush=True)
     print(f"  source={src}")
     _, entities = load_tile_entities(src)
-    print(f"  project={project or 'common'}")
+    print(f"  project={project or 'common'}  sampled={'yes' if conditions else 'no'}")
     clf = classify_entities(
         entities,
-        project=project,
+        project=None if conditions is not None else project,
+        conditions=conditions,
         min_len_mm=min_len_mm,
         thick_min_mm=thick_min_mm,
         thick_max_mm=thick_max_mm,
@@ -175,6 +180,17 @@ def main() -> int:
         help="(레거시) 층 전체만 — 기본 동작과 동일",
     )
     p.add_argument("--original-only", action="store_true", help="층 전체만 (= 기본)")
+    p.add_argument(
+        "--sampled-conditions",
+        type=Path,
+        default=None,
+        help="샘플로 모은 wall_conditions.json. 생략 시 floors/<F>/wall_samples/wall_conditions.json",
+    )
+    p.add_argument(
+        "--no-sampled",
+        action="store_true",
+        help="샘플로 모은 조건을 붙이지 않는다",
+    )
     p.add_argument("--min-len-mm", type=float, default=None)
     p.add_argument("--thick-min-mm", type=float, default=None)
     p.add_argument("--thick-max-mm", type=float, default=None)
@@ -239,8 +255,22 @@ def main() -> int:
     else:
         project = resolve_project_name(str(drawing_id))
 
+    sampled_path = None if args.no_sampled else (args.sampled_conditions or sampled_conditions_path(floor_dir))
+    sampled_overrides: list = []
+    if sampled_path is not None and sampled_path.is_file():
+        try:
+            sampled_overrides = load_sampled_overrides(sampled_path)
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            raise SystemExit(f"샘플 벽 조건을 읽지 못했습니다: {sampled_path} ({exc})") from exc
+    floor_conditions = (
+        append_condition_overrides(load_wall_conditions(project), sampled_overrides)
+        if sampled_overrides
+        else None
+    )
+
     print(f"floor={args.floor}")
     print(f"project={project or 'common'}")
+    print(f"sampled_conditions={len(sampled_overrides)} path={sampled_path if sampled_overrides else None}")
     print(f"floor_original_dxf={original_dxf}")
     print(f"floor_original_png={original_png if original_png.is_file() else None}")
     mode = "floor+tiles" if (run_floor and do_tiles) else ("tiles" if do_tiles else "floor")
@@ -275,6 +305,7 @@ def main() -> int:
                     src=src,
                     walls_dir=walls_dir,
                     project=project,
+                    conditions=floor_conditions,
                     min_len_mm=args.min_len_mm,
                     thick_min_mm=args.thick_min_mm,
                     thick_max_mm=args.thick_max_mm,
@@ -317,6 +348,7 @@ def main() -> int:
             src=original_dxf,
             walls_dir=floor_dir,
             project=project,
+            conditions=floor_conditions,
             min_len_mm=args.min_len_mm,
             thick_min_mm=args.thick_min_mm,
             thick_max_mm=args.thick_max_mm,
@@ -339,6 +371,7 @@ def main() -> int:
             src=original_dxf,
             walls_dir=floor_dir,
             project=None,
+            conditions=None,
             min_len_mm=args.min_len_mm,
             thick_min_mm=args.thick_min_mm,
             thick_max_mm=args.thick_max_mm,
@@ -396,6 +429,8 @@ def main() -> int:
         "n_tiles": len(results),
         "params": {
             "project": project,
+            "sampled_conditions": str(sampled_path) if sampled_overrides else None,
+            "n_sampled_conditions": len(sampled_overrides),
             "min_len_mm": args.min_len_mm,
             "thick_min_mm": args.thick_min_mm,
             "thick_max_mm": args.thick_max_mm,
