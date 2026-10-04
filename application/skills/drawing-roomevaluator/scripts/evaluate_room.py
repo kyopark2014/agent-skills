@@ -13,6 +13,7 @@ from pathlib import Path
 import ezdxf
 import shapely
 from PIL import Image, ImageDraw, ImageFont
+from shapely.errors import GEOSException
 from shapely.geometry import GeometryCollection, LineString, Point, Polygon, box
 from shapely.ops import polygonize, unary_union
 from shapely.strtree import STRtree
@@ -22,7 +23,8 @@ Image.MAX_IMAGE_PIXELS = None
 WALL_LAYER = "WALL"
 WINDOW_LAYER = "WINDOW"
 COLUMN_LAYER = "COLUMN"
-BOUNDARY_LAYERS = (WALL_LAYER, WINDOW_LAYER, COLUMN_LAYER)
+DOOR_LAYER = "DOOR"
+BOUNDARY_LAYERS = (WALL_LAYER, WINDOW_LAYER, COLUMN_LAYER, DOOR_LAYER)
 AXIS_TOL_MM = 20.0
 CLUSTER_TOL_MM = 15.0
 JOIN_MM = 80.0
@@ -68,11 +70,124 @@ def iter_labels(msp):
             yield x, y, s
 
 
+_AXIS_LABEL = re.compile(r"^[A-Za-z]\d+$")
+_NUMBER_LABEL = re.compile(r"^[\d,.\s]+$")
+
+
+def _roomish(text: str) -> bool:
+    if any(token in text for token in ("면적", "천장", ":", "：")):
+        return False
+    name = norm_name(text)
+    if not name or len(name) > 24:
+        return False
+    return re.search(r"[가-힣]", name) is not None
+
+
+def is_room_label(text: str) -> bool:
+    """한글 실명, 또는 영문 2자 이상에 숫자가 붙은 이름. 축선·치수는 제외."""
+    if _roomish(text):
+        return True
+    if any(token in text for token in ("면적", "천장", ":", "：", "=", "/")):
+        return False
+    name = norm_name(text)
+    if not name or len(name) > 24:
+        return False
+    if _NUMBER_LABEL.fullmatch(name) or _AXIS_LABEL.fullmatch(name):
+        return False
+    if not re.fullmatch(r"[A-Za-z][A-Za-z0-9#()·.+-]*", name):
+        return False
+    letters = re.findall(r"[A-Za-z]", name)
+    return len(letters) >= 2 and re.search(r"\d", name) is not None
+
+
+def _label_record(entity) -> tuple[float, float, str, float] | None:
+    kind = entity.dxftype()
+    try:
+        if kind == "TEXT":
+            text = str(entity.dxf.text or "").strip()
+            height = float(entity.dxf.height or 0)
+        elif kind == "MTEXT":
+            text = plain_mtext(entity.text or "")
+            height = float(entity.dxf.char_height or 0)
+        else:
+            return None
+        x, y = float(entity.dxf.insert.x), float(entity.dxf.insert.y)
+    except Exception:
+        return None
+    if not text or not is_room_label(text):
+        return None
+    return x, y, text, height or 375.0
+
+
+def _label_width(text: str, height: float) -> float:
+    return max(len(norm_name(text)), 1) * max(height, 1.0)
+
+
+def _stacked(a: tuple[float, float, str, float], b: tuple[float, float, str, float]) -> bool:
+    """위·아래 줄 간격이 글자 높이의 1.8배 안이고 가로로 겹치면 한 실명이다."""
+    dy = abs(a[1] - b[1])
+    height = max(a[3], b[3], 1.0)
+    if dy <= height * 0.6 or dy > height * 1.8:
+        return False
+    aw, bw = _label_width(a[2], a[3]), _label_width(b[2], b[3])
+    overlap = min(a[0] + aw, b[0] + bw) - max(a[0], b[0])
+    return overlap >= min(aw, bw) * 0.4
+
+
+def collect_room_labels(msp) -> list[tuple[float, float, str]]:
+    """실명 라벨. 50 mm 안 중복은 하나로, 붙은 두 줄은 위에서부터 잇는다."""
+    raw: list[tuple[float, float, str, float]] = []
+    for entity in msp:
+        rec = _label_record(entity)
+        if rec is None:
+            continue
+        x, y, text, _height = rec
+        name = norm_name(text)
+        if any(
+            norm_name(prev) == name and abs(x - px) <= 50 and abs(y - py) <= 50
+            for px, py, prev, _h in raw
+        ):
+            continue
+        raw.append(rec)
+
+    parent = list(range(len(raw)))
+
+    def find(i: int) -> int:
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    for i, a in enumerate(raw):
+        for j in range(i + 1, len(raw)):
+            if _stacked(a, raw[j]):
+                ri, rj = find(i), find(j)
+                if ri != rj:
+                    parent[rj] = ri
+
+    groups: dict[int, list[tuple[float, float, str, float]]] = {}
+    for i, rec in enumerate(raw):
+        groups.setdefault(find(i), []).append(rec)
+
+    found: list[tuple[float, float, str]] = []
+    for group in groups.values():
+        group.sort(key=lambda item: -item[1])
+        if len(group) == 1:
+            found.append((group[0][0], group[0][1], group[0][2]))
+            continue
+        text = norm_name("".join(part[2] for part in group))
+        x = sum(part[0] for part in group) / len(group)
+        y = sum(part[1] for part in group) / len(group)
+        found.append((x, y, text))
+    found.sort(key=lambda item: (norm_name(item[2]), item[1], item[0]))
+    return found
+
+
 def find_room_label(
     msp, room: str, at: tuple[float, float] | None = None
 ) -> tuple[float, float, str]:
     want = norm_name(room)
-    hits = [(x, y, s) for x, y, s in iter_labels(msp) if norm_name(s) == want]
+    hits = [(x, y, s) for x, y, s in collect_room_labels(msp) if norm_name(s) == want]
     unique: list[tuple[float, float, str]] = []
     for x, y, s in hits:
         if any(abs(x - ux) <= 50 and abs(y - uy) <= 50 for ux, uy, _ in unique):
@@ -191,7 +306,7 @@ def _inside_box(x: float, y: float, boxes) -> bool:
 def wall_segments(msp, boxes) -> list[tuple[float, float, float, float]]:
     segs: list[tuple[float, float, float, float]] = []
     for e in msp:
-        # WALL·WINDOW·COLUMN 은 모두 면적 경계다. 레이어는 구분용이다.
+        # WALL·WINDOW·COLUMN·DOOR 선은 모두 면적 경계다. 레이어는 구분용이다.
         if e.dxf.layer not in BOUNDARY_LAYERS:
             continue
         t = e.dxftype()
@@ -416,14 +531,61 @@ def _cap_wall_ends(lines: list[LineString], tol: float) -> list[LineString]:
     return lines + extra
 
 
+def _sanitize_lines(lines: list[LineString], grid: float) -> list[LineString]:
+    """끝점을 grid에 맞추고, 길이 0인 선과 같은 선의 중복을 뺀다.
+
+    문 선과 벽 선이 거의 같은 좌표에 겹치면 GEOS noding이 수렴하지 않는다.
+    """
+    seen: set[tuple] = set()
+    out: list[LineString] = []
+    for ln in lines:
+        coords = list(ln.coords)
+        if len(coords) < 2:
+            continue
+        a = (
+            round(float(coords[0][0]) / grid) * grid,
+            round(float(coords[0][1]) / grid) * grid,
+        )
+        b = (
+            round(float(coords[-1][0]) / grid) * grid,
+            round(float(coords[-1][1]) / grid) * grid,
+        )
+        if abs(a[0] - b[0]) <= grid * 0.5 and abs(a[1] - b[1]) <= grid * 0.5:
+            continue
+        key = tuple(sorted((a, b)))
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(LineString([a, b]))
+    return out
+
+
+def _node_lines(lines: list[LineString]):
+    """1 mm에서 안 되면 5 mm, 10 mm로 다시 맞춘다."""
+    for grid in (1.0, 5.0, 10.0):
+        cleaned = _sanitize_lines(lines, grid)
+        if len(cleaned) < 3:
+            continue
+        try:
+            noded = shapely.node(GeometryCollection(cleaned))
+        except GEOSException:
+            continue
+        if not noded.is_empty:
+            return noded
+    return None
+
+
 def _face_at(lines: list[LineString], x: float, y: float) -> Polygon | None:
     lines = [ln for ln in lines if ln.length > 0.5]
     if len(lines) < 3:
         return None
-    noded = shapely.node(GeometryCollection(lines))
-    if noded.is_empty:
+    noded = _node_lines(lines)
+    if noded is None:
         return None
-    faces = [g for g in polygonize(noded) if g.geom_type == "Polygon" and g.area > 1.0]
+    try:
+        faces = [g for g in polygonize(noded) if g.geom_type == "Polygon" and g.area > 1.0]
+    except GEOSException:
+        return None
     pt = Point(x, y)
     interior = [g for g in faces if g.contains(pt)]
     if interior:
@@ -652,15 +814,6 @@ def safe_stem(room: str) -> str:
     return s or "room"
 
 
-def _roomish(text: str) -> bool:
-    if any(token in text for token in ("면적", "천장", ":", "：")):
-        return False
-    name = norm_name(text)
-    if not name or len(name) > 24:
-        return False
-    return re.search(r"[가-힣]", name) is not None
-
-
 def _door_thresholds(msp, lines: list[LineString], origin: tuple[float, float], pad: float) -> list[LineString]:
     """여닫이 문 개구를 문선으로 막는다.
 
@@ -670,7 +823,18 @@ def _door_thresholds(msp, lines: list[LineString], origin: tuple[float, float], 
     if not lines:
         return []
     ox, oy = origin
-    walls = unary_union(lines)
+    walls = None
+    for grid in (1.0, 5.0, 10.0):
+        cleaned = _sanitize_lines(lines, grid)
+        if not cleaned:
+            continue
+        try:
+            walls = unary_union(cleaned)
+            break
+        except GEOSException:
+            walls = None
+    if walls is None or walls.is_empty:
+        return []
     extra: list[LineString] = []
     for entity in msp:
         if entity.dxftype() != "ARC" or getattr(entity.dxf, "layer", None) != "DOOR":
@@ -774,8 +938,8 @@ def evaluate(
     rectangular = abs(area - width_m * height_m) / area < 0.01 if area else False
     seen: set[tuple[str, int, int]] = set()
     enclosed = []
-    for x, y, text in iter_labels(msp):
-        if not _roomish(text) or not net.covers(Point(x, y)):
+    for x, y, text in collect_room_labels(msp):
+        if not net.covers(Point(x, y)):
             continue
         key = (norm_name(text), round(x), round(y))
         if key in seen:
@@ -798,7 +962,7 @@ def evaluate(
         "enclosed_labels": enclosed,
         "drawing_area_m2": drawn,
         "rules": {
-            "boundary": "inner wall face",
+            "boundary": "inner face of WALL, WINDOW, COLUMN, and DOOR lines",
             "door_gap_mm": DOOR_GAP_MM,
             "hbeam": "column protrusion inside the inner face is always subtracted",
             "method": "polygonize",

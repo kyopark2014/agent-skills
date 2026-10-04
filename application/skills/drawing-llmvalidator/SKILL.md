@@ -95,7 +95,7 @@ drawing_list.json 에서 건물(source_filename) · 층(floor) 결정
      - 벽이 닫히지 않아 면적이 밖으로 새면, 그 벽의 마지막을 따라 close
   ↓
 ④ floor_wall_validated.dxf / .png / _meta.json 저장 (있으면 덮어씀)
-   저장 레이어는 나눈다. 벽은 빨강 `WALL`. 여닫이·미닫이 문짝과 스윙은 연두 `DOOR`. 같은 개구에 나란히 겹친 창틀과 관찰창 유리는 청록 `WINDOW`. 기둥은 파랑 `COLUMN`. 닫힌 폴리선이 아니라 선 네 개로 그린 정사각 기둥도 `COLUMN`이다. 면적 계산은 `WALL`·`WINDOW`·`COLUMN`을 경계로 읽는다. `_meta.json`의 `doors`·`windows`·`columns`에 범위가 있다.
+   저장 레이어는 나눈다. 벽은 빨강 `WALL`. 여닫이·미닫이 문짝과 스윙은 연두 `DOOR`. 같은 개구에 나란히 겹친 창틀과 관찰창 유리는 청록 `WINDOW`. 기둥은 파랑 `COLUMN`. 닫힌 폴리선이 아니라 선 네 개로 그린 정사각 기둥도 `COLUMN`이다. 면적 계산은 `WALL`·`WINDOW`·`COLUMN`·`DOOR` 선을 경계로 읽는다. `_meta.json`의 `doors`·`windows`·`columns`에 범위가 있다.
    diff_original_vs_validated.png 저장 (있으면 덮어씀)
   ↓
 ⑤ 남은 층이 있으면 바로 ①부터 반복. 전 층이 끝난 뒤에만 결과를 보고한다.

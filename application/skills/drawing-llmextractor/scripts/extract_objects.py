@@ -50,7 +50,7 @@ def _reexec_supported_python() -> None:
 
 _reexec_supported_python()
 
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw
 
 from prepare_image import encode_vision_png
 
@@ -366,22 +366,6 @@ def merge_objects(objects: list[dict], iou_thresh: float = 0.45) -> list[dict]:
     return kept
 
 
-def _font(size: int) -> ImageFont.ImageFont:
-    candidates = [
-        "/System/Library/Fonts/Supplemental/AppleGothic.ttf",
-        "/System/Library/Fonts/AppleSDGothicNeo.ttc",
-        "/usr/share/fonts/truetype/nanum/NanumGothic.ttf",
-        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
-    ]
-    for path in candidates:
-        if os.path.isfile(path):
-            try:
-                return ImageFont.truetype(path, size=size)
-            except OSError:
-                continue
-    return ImageFont.load_default()
-
-
 def parse_mark_color(value: str | None) -> tuple[tuple[int, int, int, int], tuple[int, int, int, int]]:
     """표시 색. 생략하면 빨강. `#RRGGBB` 또는 연두·빨강 이름을 받는다."""
     text = (value or "").strip()
@@ -404,24 +388,19 @@ def mark_objects(
     objects: list[dict],
     color: tuple[tuple[int, int, int, int], tuple[int, int, int, int]] | None = None,
 ) -> Image.Image:
-    """Draw boxes on a copy of the original image. Default color is red."""
+    """Draw boxes on a copy of the original image. Default color is red.
+
+    객체 이름(door 등)은 이미지에 적지 않는다. 이름은 JSON에만 남긴다.
+    """
     outline, fill = color or (RED, RED_FILL)
     base = image.convert("RGBA")
     overlay = Image.new("RGBA", base.size, (0, 0, 0, 0))
     draw = ImageDraw.Draw(overlay)
     width, height = base.size
     stroke = max(3, min(width, height) // 500)
-    font = _font(max(16, min(42, min(width, height) // 180)))
     for obj in objects:
         x0, y0, x1, y1 = obj["bbox_px"]
         draw.rectangle([x0, y0, x1, y1], fill=fill, outline=outline, width=stroke)
-        label = (obj.get("label") or "").strip()
-        if not label:
-            continue
-        text_y = y0 - stroke - 4
-        if text_y < 4:
-            text_y = y0 + stroke + 2
-        draw.text((x0 + stroke, text_y), label, fill=outline, font=font)
     return Image.alpha_composite(base, overlay)
 
 
