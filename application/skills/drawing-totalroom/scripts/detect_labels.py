@@ -252,10 +252,9 @@ def _paint_face(base: Image.Image, to_px, pts, holes, rgb: tuple[int, int, int],
     base.paste(chip, (left, top), chip)
 
 
-def label_font_px(image_height: int, px_per_m: float, shorts_m: list[float]) -> int:
+def _readable_font_px(image_height: int, px_per_m: float, shorts_m: list[float]) -> int:
     """실이 여러 곳이면 가운데 실의 짧은 변에 맞춘다.
 
-    그렇게 맞춘 크기가 성북동·원광대 도면에서 읽기 좋은 크기였다.
     짧은 변이 1.5 m 이상인 실이 없으면, 시트 전체에서 읽히도록 이미지 높이에 맞춘다.
     """
     substantial = sorted(side for side in shorts_m if side >= 1.5)
@@ -267,6 +266,29 @@ def label_font_px(image_height: int, px_per_m: float, shorts_m: list[float]) -> 
         size = max(px_per_m * 0.42, image_height * 0.011)
         size = min(size, max(px_per_m * 1.1, 22.0))
     return max(22, int(size))
+
+
+def label_font_px(
+    image_height: int,
+    px_per_m: float,
+    shorts_m: list[float],
+    text_height_mm: float = 375.0,
+) -> int:
+    """도면에 이미 있는 실명과 같은 높이. 그보다 작아지지 않는다."""
+    matched = room.sheet_label_px(px_per_m / 1000.0, text_height_mm)
+    return max(_readable_font_px(image_height, px_per_m, shorts_m), matched)
+
+
+def _median_text_height(msp) -> float:
+    heights = []
+    for entity in msp:
+        rec = room._label_record(entity)
+        if rec is not None and rec[3] > 0:
+            heights.append(rec[3])
+    if not heights:
+        return 375.0
+    heights.sort()
+    return float(heights[len(heights) // 2])
 
 
 def _tag(draw: ImageDraw.ImageDraw, x: float, y: float, lines: list[str], font, rgb) -> None:
@@ -293,7 +315,13 @@ def _tag(draw: ImageDraw.ImageDraw, x: float, y: float, lines: list[str], font, 
         cursor += heights[i] + 6
 
 
-def write_png(png_path: Path, meta: dict, labels: list[dict], out_path: Path) -> None:
+def write_png(
+    png_path: Path,
+    meta: dict,
+    labels: list[dict],
+    out_path: Path,
+    text_height_mm: float = 375.0,
+) -> None:
     base = Image.open(png_path).convert("RGBA")
     to_px = room.png_transform(meta, base.size)
     for item in labels:
@@ -318,7 +346,8 @@ def write_png(png_path: Path, meta: dict, labels: list[dict], out_path: Path) ->
         for item in labels
         for inst in item["instances"]
     ]
-    font_px = label_font_px(base.height, sample, shorts)
+    font_px = label_font_px(base.height, sample, shorts, text_height_mm)
+    print(f"label font: {font_px}px text {text_height_mm:.0f}mm", flush=True)
     font = room._font(font_px)
     for item in labels:
         for inst in item["instances"]:
@@ -403,7 +432,14 @@ def detect(dxf_path: Path, meta_path: Path, png_path: Path, door: str = "close")
     json_out = out_dir / f"{OUT_STEM}.json"
     write_dxf(doc, dxf_out, [{**item, "instances": [pair[0] for pair in item["instances"]]} for item in labels])
     meta = json.loads(meta_path.read_text(encoding="utf-8"))
-    write_png(png_path, meta, [{**item, "instances": [pair[0] for pair in item["instances"]]} for item in labels], png_out)
+    text_height_mm = _median_text_height(msp)
+    write_png(
+        png_path,
+        meta,
+        [{**item, "instances": [pair[0] for pair in item["instances"]]} for item in labels],
+        png_out,
+        text_height_mm,
+    )
 
     public_labels = []
     unique_area = 0.0
@@ -439,7 +475,7 @@ def detect(dxf_path: Path, meta_path: Path, png_path: Path, door: str = "close")
         "skipped": skipped,
         "rules": {
             "labels": "Korean room names, or Latin names with 2+ letters and a digit; stacked lines within 1.8 text heights are joined top to bottom; fixture callouts such as 미니바, 옷장, 신발장, 화분, 화장대, 월풀욕조, 욕조, (장애인) are excluded",
-            "font": "tag text tracks the median room short side; with no room at least 1.5 m across, it tracks 1.1% of the sheet height",
+            "font": "tag text matches the room names already drawn on the sheet, and is never smaller than the median-room size",
             "door": door,
             "boundary": "inner face of WALL, WINDOW, COLUMN, and DOOR lines; open affects only doors on that room's closed boundary",
             "layer": "validated drawing plus one layer per label; HATCH area is that label; name and area text sit on the layer",

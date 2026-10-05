@@ -804,10 +804,23 @@ def png_transform(meta: dict, png_size: tuple[int, int]):
     return to_px
 
 
+# floor PNG 실명과 같은 픽셀 높이. render_wall_dxf_png (dpi 200):
+# fs = clamp(char_height / mm_per_inch * 72 * 1.6, 5, 7) * 2
+_SHEET_DPI = 200.0
+
+
+def sheet_label_px(px_per_mm: float, text_height_mm: float) -> int:
+    """검증 도면 PNG에 이미 그려진 실명과 같은 글자 높이."""
+    mm_per_inch = _SHEET_DPI / max(px_per_mm, 1e-6)
+    fs = (max(text_height_mm, 1.0) / mm_per_inch) * 72.0 * 1.6
+    fs = min(max(fs, 5.0), 7.0) * 2.0
+    return max(22, int(round(fs * _SHEET_DPI / 72.0)))
+
+
 def _font(size: int) -> ImageFont.ImageFont:
     for path, index in (
-        ("/System/Library/Fonts/AppleSDGothicNeo.ttc", 0),
         ("/System/Library/Fonts/Supplemental/AppleGothic.ttf", 0),
+        ("/System/Library/Fonts/AppleSDGothicNeo.ttc", 0),
         ("/Library/Fonts/Arial Unicode.ttf", 0),
     ):
         if Path(path).is_file():
@@ -846,8 +859,10 @@ def render_overlay(png_path: Path, meta: dict, pts, info: dict, out_path: Path) 
     poly_s = [(p[0] * scale, p[1] * scale) for p in poly]
     draw.line(poly_s + [poly_s[0]], fill=(0, 70, 190, 255), width=3)
 
-    font = _font(32)
-    font_s = _font(22)
+    px_per_mm = abs(to_px(1.0, 0.0)[0] - to_px(0.0, 0.0)[0])
+    title_px = sheet_label_px(px_per_mm, float(info.get("text_height_mm") or 375.0)) * scale
+    font = _font(title_px)
+    font_s = _font(max(22, int(round(title_px * 0.72))))
     lines = [
         info["room"],
         f"벽 안쪽 면적  {info['area_m2']:.2f} m²",
@@ -1122,8 +1137,19 @@ def evaluate(
         seen.add(key)
         enclosed.append({"text": text, "x": round(x, 1), "y": round(y, 1)})
     enclosed.sort(key=lambda item: (norm_name(item["text"]), item["x"], item["y"]))
+    text_height_mm = 375.0
+    nearest = 1e18
+    for entity in msp:
+        rec = _label_record(entity)
+        if rec is None:
+            continue
+        dist = abs(rec[0] - lx) + abs(rec[1] - ly)
+        if dist < nearest:
+            nearest = dist
+            text_height_mm = rec[3]
     info = {
         "room": label,
+        "text_height_mm": text_height_mm,
         "floor_dxf": str(dxf_path),
         "label_mm": {"x": lx, "y": ly},
         "area_m2": round(area, 4),
