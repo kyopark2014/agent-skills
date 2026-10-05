@@ -6,7 +6,7 @@ description: >-
   같은 폴더에 floor_label_detected.dxf, floor_label_detected.png,
   floor_label_detected.json을 씁니다. DXF는 검증 도면에 라벨별 레이어를
   더한 것이고, 각 레이어에 면적 HATCH와 이름·면적 문자가 있습니다.
-  PNG는 그 층의 라벨 면적을 한 장에 보여 줍니다.
+  PNG는 floor_label_detected.dxf를 검증 도면과 같은 렌더러로 그린 것입니다.
   각 실의 벽 테두리에 닿는 문은 `--door close`(기본) 또는 `--door open`으로 고릅니다.
   한 층의 전체 실 면적, 라벨별 면적, floor_label_detected 요청 시 사용합니다.
   대상 파일은 artifacts/drawing_list.json으로 찾습니다.
@@ -15,7 +15,7 @@ description: >-
 # drawing-totalroom (층 전체 실명 면적)
 
 `floor_wall_validated.dxf` 의 실명 라벨마다, 그 글자가 들어 있는 **벽 안쪽 면**을 계산한다.
-면적 규칙과 문 열림은 `drawing-roomevaluator` 와 같다. 입력 DXF·PNG 는 수정하지 않는다.
+면적 규칙과 문 열림은 `drawing-roomevaluator` 와 같다. 입력 DXF 는 수정하지 않는다. 결과 PNG 는 결과 DXF 를 렌더한 것이다.
 
 ## When to Use
 
@@ -30,7 +30,7 @@ description: >-
 1. `$ARTIFACTS_DIR/drawing_list.json`이 있으면 그 파일. 없으면 `/Users/ksdyb/Documents/src/agent-skills/application/.session_storage/lge/artifacts/drawing_list.json`.
 2. 사용자가 말한 건물·프로젝트 이름을 `drawings[].source_filename`에 맞춘다. 공백·대소문자는 무시하고, 그 말이 파일명에 들어 있으면 그 도면이다. `source_filename`에 없으면 `drawing_id`, `folder`를 같은 방식으로 본다. 없거나 둘 이상이면 `source_filename`을 보여주고 고르게 한다.
 3. 그 도면의 `floors[].floor`가 요청 층과 같으면 그 항목이다. `1층`은 `1F`, `지하1층`은 `B1F`, `옥상`은 `RF`로 본다. `floor`가 없고 `name_confirmed`가 false이면 `title`에 그 층 표기가 있는 항목이 후보다. 후보가 둘 이상이면 `floor`와 `title`을 보여주고 고르게 한다. 없으면 `discovered_floors`를 알리고 없는 층 폴더는 만들지 않는다.
-4. 입력은 `$ARTIFACTS_DIR/<folder>/floors/<floor>/floor_wall_validated.dxf`, 같은 폴더의 `floor_wall_validated_meta.json`, `floor_wall_validated.png`이다. validated 파일이 없으면 그 층은 벽 검증 전이라고 알린다.
+4. 입력은 `$ARTIFACTS_DIR/<folder>/floors/<floor>/floor_wall_validated.dxf`와 같은 폴더의 `floor_wall_validated_meta.json`이다. validated 파일이 없으면 그 층은 벽 검증 전이라고 알린다. PNG 배경으로 `floor_wall_validated.png`를 쓰지 않는다.
 
 ## Critical Rules
 
@@ -42,7 +42,7 @@ description: >-
 3. **기둥 돌출부는 항상 뺀다.** H-Beam이 벽 안쪽 면보다 실 안으로 들어온 면적은 `area_m2`에서 제외한다. 벽 두께 안에만 있는 부분은 빼지 않는다.
 4. **레이어** — `floor_label_detected.dxf` 는 `floor_wall_validated.dxf` 를 복사한 뒤 라벨 레이어를 더한 도면이다. 라벨 하나당 레이어 하나다. 같은 실명이 여러 곳이면 그 레이어에 HATCH 가 여러 개다. 레이어의 HATCH 면적 합이 그 라벨의 `area_m2`다. 각 자리에는 PNG 와 같이 실명과 `면적 ㎡` 문자를 흰 판 위에 둔다. 좌표는 입력 DXF 와 같은 mm 이다.
 5. **같은 면** — 서로 다른 실명이 한 면에 있으면 각 레이어에 그 면 전체가 들어간다. `shared_with` 가 있으면 `area_m2`를 서로 더하지 않는다. 같은 실명이 서로 다른 면에 있으면 각 면의 `area_m2`를 더한다.
-6. **원본 보존** — validated DXF/PNG 는 읽기 전용이다. 결과 DXF 는 그 도면의 사본에 라벨 레이어를 더한 것이고, 검증 파일을 덮어쓰지 않는다. 결과는 그 DXF 와 같은 폴더의 `floor_label_detected.dxf`, `floor_label_detected.png`, `floor_label_detected.json` 만 덮어쓴다. 번호 붙은 파일은 만들지 않는다.
+6. **원본 보존** — validated DXF 는 읽기 전용이다. 결과 DXF 는 그 도면의 사본에 라벨 레이어를 더한 것이고, 검증 파일을 덮어쓰지 않는다. `floor_label_detected.png` 는 그 결과 DXF 를 `render_wall_dxf_png` 로 그린 것이다. HATCH, 흰 판, 실명·면적 문자는 DXF 엔티티에서 온다. 결과는 그 DXF 와 같은 폴더의 `floor_label_detected.dxf`, `floor_label_detected.png`, `floor_label_detected.json` 만 덮어쓴다. 번호 붙은 파일은 만들지 않는다.
 7. **스크립트 절대경로** — 이 SKILL.md 옆 `scripts/detect_labels.py`.
 8. 응답은 **한국어**. 경로·JSON 키·레이어 이름은 산출 그대로 쓴다.
 
@@ -56,7 +56,6 @@ ART="${ARTIFACTS_DIR:-/Users/ksdyb/Documents/src/agent-skills/application/.sessi
 python3.13 "$SCRIPTS/detect_labels.py" \
   --dxf "$ART/<folder>/floors/<floor>/floor_wall_validated.dxf" \
   --meta "$ART/<folder>/floors/<floor>/floor_wall_validated_meta.json" \
-  --png "$ART/<folder>/floors/<floor>/floor_wall_validated.png" \
   --door close
 ```
 
@@ -65,8 +64,7 @@ python3.13 "$SCRIPTS/detect_labels.py" \
 | 인자 | 의미 |
 | --- | --- |
 | `--dxf` | `floor_wall_validated.dxf` |
-| `--meta` | `floor_wall_validated_meta.json` (PNG 좌표 변환) |
-| `--png` | `floor_wall_validated.png` (면적 색의 배경) |
+| `--meta` | `floor_wall_validated_meta.json` (렌더 범위·폭) |
 | `--door` | `close`(기본) 또는 `open`. 실마다 그 실의 벽 테두리에 닿는 문만 연다 |
 
 ## Workflow
@@ -80,7 +78,7 @@ floor_wall_validated.dxf 의 TEXT/MTEXT 실명 목록
   `--door open` 이면 그 실의 벽 테두리 문만 연다. 생략하면 close
   ↓
 floor_label_detected.dxf    # 검증 도면 + 라벨별 레이어, HATCH, 이름·면적 문자
-floor_label_detected.png    # 층 전체, 라벨별 색과 면적
+floor_label_detected.png    # 위 DXF 를 렌더한 층 전체
 floor_label_detected.json   # 라벨·인스턴스·빠진 라벨
 ```
 
@@ -94,7 +92,7 @@ floor_label_detected.json   # 라벨·인스턴스·빠진 라벨
 - `instances[].shared_with` — 같은 면을 가리키는 다른 실명. 있으면 그 면은 한 번만 말한다.
 - `unique_face_area_m2` — 서로 다른 면을 한 번씩만 더한 값.
 - `skipped` — 실명으로 봤으나 벽이 닫히지 않은 글자.
-- `png` — 배경 평면도 위에 라벨별 색면과 그 자리의 면적만 그린다. 오른쪽 범례는 붙이지 않는다. 자리 글자는 그 시트에 이미 있는 실명과 같은 높이로 그린다. 그 높이보다 작아지지 않는다. 짧은 변이 1.5 m 이상인 실이 없으면 시트 높이의 1.1%를 바닥으로 둔다.
+- `png` — `floor_label_detected.dxf` 를 검증 도면과 같은 렌더러로 그린다. 색면은 라벨 레이어 HATCH, 자리 글자는 그 레이어의 TEXT 다. 오른쪽 범례는 붙이지 않는다.
 
 벽이 닫히지 않은 라벨은 레이어를 만들지 않는다. 도면의 `면적` 문구는 `drawing_area_m2` 참고값이다. 계산값과 다르면 계산값을 기준으로 설명한다.
 

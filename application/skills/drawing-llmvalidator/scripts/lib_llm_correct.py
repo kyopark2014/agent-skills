@@ -21389,6 +21389,86 @@ def mark_doors_and_columns(msp) -> dict[str, Any]:
     }
 
 
+def _true_rgb(entity) -> tuple[int, int, int] | None:
+    try:
+        rgb = entity.rgb
+    except Exception:  # noqa: BLE001
+        return None
+    if not rgb:
+        return None
+    return int(rgb[0]), int(rgb[1]), int(rgb[2])
+
+
+def _layer_rgb(doc, layer_name: str) -> tuple[int, int, int] | None:
+    try:
+        rgb = doc.layers.get(layer_name).rgb
+    except Exception:  # noqa: BLE001
+        return None
+    if not rgb:
+        return None
+    return int(rgb[0]), int(rgb[1]), int(rgb[2])
+
+
+def _entity_rgb(doc, entity, fallback: tuple[int, int, int] = (180, 180, 180)) -> tuple[int, int, int]:
+    return _true_rgb(entity) or _layer_rgb(doc, entity.dxf.layer) or fallback
+
+
+def _signed_area(pts: list[tuple[float, float]]) -> float:
+    acc = 0.0
+    count = len(pts)
+    for index in range(count):
+        x0, y0 = pts[index]
+        x1, y1 = pts[(index + 1) % count]
+        acc += x0 * y1 - x1 * y0
+    return acc
+
+
+def _hatch_rings(hatch) -> list[list[tuple[float, float]]]:
+    rings: list[list[tuple[float, float]]] = []
+    for path in hatch.paths:
+        vertices = getattr(path, "vertices", None)
+        if vertices:
+            pts = [(float(v[0]), float(v[1])) for v in vertices]
+        else:
+            pts = []
+            for edge in getattr(path, "edges", ()):
+                if getattr(edge, "EDGE_TYPE", "") != "LineEdge":
+                    continue
+                pts.append((float(edge.start[0]), float(edge.start[1])))
+                pts.append((float(edge.end[0]), float(edge.end[1])))
+        if len(pts) >= 3:
+            rings.append(pts)
+    if len(rings) >= 2:
+        outer_sign = _signed_area(rings[0])
+        oriented = [rings[0]]
+        for hole in rings[1:]:
+            if outer_sign and _signed_area(hole) * outer_sign > 0:
+                oriented.append(list(reversed(hole)))
+            else:
+                oriented.append(hole)
+        rings = oriented
+    return rings
+
+
+def _rings_path(rings: list[list[tuple[float, float]]]):
+    from matplotlib.path import Path as MPath
+
+    verts: list[tuple[float, float]] = []
+    codes: list[int] = []
+    for ring in rings:
+        pts = list(ring)
+        if pts[0] != pts[-1]:
+            pts.append(pts[0])
+        verts.append(pts[0])
+        codes.append(MPath.MOVETO)
+        for point in pts[1:-1]:
+            verts.append(point)
+            codes.append(MPath.LINETO)
+        verts.append(pts[-1])
+        codes.append(MPath.CLOSEPOLY)
+    return MPath(verts, codes)
+
+
 def render_wall_dxf_png(
     dxf_path: Path,
     png_path: Path,
@@ -21406,7 +21486,7 @@ def render_wall_dxf_png(
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
     from matplotlib.collections import LineCollection
-    from matplotlib.patches import Arc, Circle
+    from matplotlib.patches import Arc, Circle, PathPatch
 
     doc = ezdxf.readfile(str(dxf_path))
     msp = doc.modelspace()
@@ -21415,7 +21495,10 @@ def render_wall_dxf_png(
     door_segs: list[list[tuple[float, float]]] = []
     window_segs: list[list[tuple[float, float]]] = []
     column_segs: list[list[tuple[float, float]]] = []
-    texts: list[tuple[float, float, str, float, float]] = []
+    texts: list[tuple[float, float, str, float, float, str, tuple[int, int, int] | None]] = []
+    hatches: list = []
+    wipeouts: list = []
+    extra_segs: list[tuple[list[tuple[float, float]], str, object]] = []
     arcs: list[tuple[float, float, float, float, float, bool]] = []
     circles: list[tuple[float, float, float]] = []
     xs: list[float] = []
@@ -21459,6 +21542,8 @@ def render_wall_dxf_png(
                         str(e.dxf.text or ""),
                         float(e.dxf.height or 2.5),
                         float(getattr(e.dxf, "rotation", 0) or 0),
+                        layer,
+                        _true_rgb(e),
                     )
                 )
                 continue
@@ -21475,8 +21560,26 @@ def render_wall_dxf_png(
                         plain.strip(),
                         h,
                         float(getattr(e.dxf, "rotation", 0) or 0),
+                        layer,
+                        _true_rgb(e),
                     )
                 )
+                continue
+            elif t == "HATCH":
+                hatches.append(e)
+                for ring in _hatch_rings(e):
+                    for px, py in ring:
+                        xs.append(px)
+                        ys.append(py)
+                continue
+            elif t == "WIPEOUT":
+                wipeouts.append(e)
+                try:
+                    for vertex in e.boundary_path_wcs():
+                        xs.append(float(vertex.x))
+                        ys.append(float(vertex.y))
+                except Exception:  # noqa: BLE001
+                    pass
                 continue
             else:
                 continue
@@ -21498,6 +21601,8 @@ def render_wall_dxf_png(
             wall_segs.append(pts)
         elif layer == BASE_LAYER:
             base_segs.append(pts)
+        else:
+            extra_segs.append((pts, layer, e))
 
     if bbox_mm:
         cx0 = float(bbox_mm["xmin"])
@@ -21572,7 +21677,62 @@ def render_wall_dxf_png(
             )
         )
 
+    # 라벨 레이어의 HATCH·wipeout·테두리. 검증 도면에 이 엔티티가 없으면 그리지 않는다.
+    area_layers = {entity.dxf.layer for entity in hatches}
+    if hatches or wipeouts:
+        from ezdxf.colors import transparency2float
+
+        for hatch in hatches:
+            rings = _hatch_rings(hatch)
+            if not rings:
+                continue
+            red, green, blue = _entity_rgb(doc, hatch)
+            try:
+                alpha = 1.0 - float(transparency2float(int(hatch.dxf.transparency)))
+            except Exception:  # noqa: BLE001
+                alpha = 1.0
+            alpha = min(1.0, max(0.0, alpha))
+            ax.add_patch(
+                PathPatch(
+                    _rings_path(rings),
+                    facecolor=(red / 255.0, green / 255.0, blue / 255.0, alpha),
+                    edgecolor="none",
+                    lw=0,
+                    zorder=2.4,
+                )
+            )
+        for wipe in wipeouts:
+            try:
+                pts = [(float(vertex.x), float(vertex.y)) for vertex in wipe.boundary_path_wcs()]
+            except Exception:  # noqa: BLE001
+                continue
+            if len(pts) < 3:
+                continue
+            ax.add_patch(
+                PathPatch(
+                    _rings_path([pts]),
+                    facecolor=(1, 1, 1, 1),
+                    edgecolor="none",
+                    lw=0,
+                    zorder=4,
+                )
+            )
+        frame_colors = []
+        kept_frames = []
+        for pts, layer, entity in extra_segs:
+            if layer not in area_layers:
+                continue
+            red, green, blue = _entity_rgb(doc, entity)
+            kept_frames.append(pts)
+            frame_colors.append((red / 255.0, green / 255.0, blue / 255.0, 1))
+        if kept_frames:
+            ax.add_collection(
+                LineCollection(kept_frames, colors=frame_colors, linewidths=1.0, antialiased=True, zorder=4.5)
+            )
+
     # floor_original / walldetector 와 동일: 실명·면적 라벨 (#1a5fb4)
+    # 라벨 레이어 문자는 DXF에 넣은 색을 쓰고, 흰 판 위에 둔다.
+    area_draw = bool(hatches or wipeouts)
     if texts:
         import matplotlib.font_manager as fm
 
@@ -21590,24 +21750,34 @@ def render_wall_dxf_png(
                 font_name = matches[0].name
                 break
         mm_per_inch = span_x / max(fig_w, 0.01)
-        for tx, ty, s, th, rot in texts:
+        for tx, ty, s, th, rot, text_layer, rgb in texts:
             if not s or not s.strip():
                 continue
             fs = (max(th, 1.0) / mm_per_inch) * 72.0 * 1.6
             fs = max(5.0, min(7.0, fs))
             fs *= 2.0
+            on_label = area_draw and text_layer in area_layers and rgb
+            if on_label:
+                color = f"#{rgb[0]:02x}{rgb[1]:02x}{rgb[2]:02x}"
+                zorder = 6
+            elif area_draw:
+                color = "#1a5fb4"
+                zorder = 3
+            else:
+                color = "#1a5fb4"
+                zorder = 5
             ax.text(
                 tx,
                 ty,
                 s,
-                color="#1a5fb4",
+                color=color,
                 fontsize=fs,
                 rotation=rot,
                 ha="left",
                 va="bottom",
                 fontname=font_name if font_name else None,
                 clip_on=True,
-                zorder=5,
+                zorder=zorder,
             )
 
     ax.set_xlim(xmin - pad, xmax + pad)

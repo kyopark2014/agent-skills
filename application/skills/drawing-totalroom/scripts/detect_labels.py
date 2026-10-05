@@ -5,6 +5,7 @@ floor_label_detected.dxf / .png / .json 으로 쓴다.
 면적 계산은 drawing-roomevaluator 와 같다.
 DXF 는 검증 도면을 복사한 뒤 라벨마다 레이어를 더한다.
 그 레이어의 HATCH 면적이 그 라벨의 면적이고, 이름과 면적 문자가 같이 있다.
+PNG 는 그 DXF 를 검증 도면과 같은 렌더러로 그린 것이다.
 """
 
 from __future__ import annotations
@@ -12,7 +13,6 @@ from __future__ import annotations
 import argparse
 import colorsys
 import json
-import math
 import re
 import sys
 import time
@@ -20,7 +20,6 @@ from pathlib import Path
 
 import ezdxf
 from ezdxf.colors import float2transparency
-from PIL import Image, ImageDraw
 
 _SKILLS_DIR = Path(__file__).resolve().parents[2]
 if str(_SKILLS_DIR) not in sys.path:
@@ -32,7 +31,10 @@ ROOM_SCRIPTS = Path(__file__).resolve().parents[2] / "drawing-roomevaluator" / "
 sys.path.insert(0, str(ROOM_SCRIPTS))
 import evaluate_room as room  # noqa: E402
 
-Image.MAX_IMAGE_PIXELS = None
+_VALIDATOR_SCRIPTS = Path(__file__).resolve().parents[2] / "drawing-llmvalidator" / "scripts"
+if str(_VALIDATOR_SCRIPTS) not in sys.path:
+    sys.path.insert(0, str(_VALIDATOR_SCRIPTS))
+from lib_llm_correct import render_wall_dxf_png  # noqa: E402
 
 _LAYER_BAD = set('<>/\\":;?*=`')
 OUT_STEM = "floor_label_detected"
@@ -215,153 +217,23 @@ def write_dxf(doc, path: Path, labels: list[dict]) -> None:
     doc.saveas(str(path))
 
 
-def _map_px(pts, to_px, left: float, top: float) -> list[tuple[float, float]]:
-    out = []
-    for x, y in pts:
-        c, r = to_px(x, y)
-        out.append((c - left, r - top))
-    return out
+def _px_width(meta: dict) -> int:
+    """검증 PNG 와 같은 도면 폭. 저장 크기는 렌더 뒤 오른쪽 여백이 더해진 값이다."""
+    stored = meta.get("png_size")
+    width = 14200
+    if isinstance(stored, (list, tuple)) and stored and meta.get("bbox_mm"):
+        width = int(stored[0]) - room.PNG_PAD_RIGHT
+    return max(width, 100)
 
 
-def _paint_face(base: Image.Image, to_px, pts, holes, rgb: tuple[int, int, int], alpha: int = 110) -> None:
-    xs: list[float] = []
-    ys: list[float] = []
-    for x, y in list(pts) + [p for hole in holes for p in hole]:
-        c, r = to_px(x, y)
-        xs.append(c)
-        ys.append(r)
-    if not xs:
-        return
-    left = max(0, int(math.floor(min(xs))) - 2)
-    top = max(0, int(math.floor(min(ys))) - 2)
-    right = min(base.width, int(math.ceil(max(xs))) + 3)
-    bottom = min(base.height, int(math.ceil(max(ys))) + 3)
-    if right - left < 2 or bottom - top < 2:
-        return
-    mask = Image.new("L", (right - left, bottom - top), 0)
-    mask_draw = ImageDraw.Draw(mask)
-    outer = _map_px(pts, to_px, left, top)
-    if len(outer) >= 3:
-        mask_draw.polygon(outer, fill=alpha)
-    for hole in holes:
-        mapped = _map_px(hole, to_px, left, top)
-        if len(mapped) >= 3:
-            mask_draw.polygon(mapped, fill=0)
-    chip = Image.new("RGBA", mask.size, (*rgb, 0))
-    chip.putalpha(mask)
-    base.paste(chip, (left, top), chip)
-
-
-def _readable_font_px(image_height: int, px_per_m: float, shorts_m: list[float]) -> int:
-    """실이 여러 곳이면 가운데 실의 짧은 변에 맞춘다.
-
-    짧은 변이 1.5 m 이상인 실이 없으면, 시트 전체에서 읽히도록 이미지 높이에 맞춘다.
-    """
-    substantial = sorted(side for side in shorts_m if side >= 1.5)
-    if substantial:
-        median = substantial[len(substantial) // 2]
-        size = median * px_per_m * 0.115
-        size = min(max(size, px_per_m * 0.32), px_per_m * 0.55)
-    else:
-        size = max(px_per_m * 0.42, image_height * 0.011)
-        size = min(size, max(px_per_m * 1.1, 22.0))
-    return max(22, int(size))
-
-
-def label_font_px(
-    image_height: int,
-    px_per_m: float,
-    shorts_m: list[float],
-    text_height_mm: float = 375.0,
-) -> int:
-    """도면에 이미 있는 실명과 같은 높이. 그보다 작아지지 않는다."""
-    matched = room.sheet_label_px(px_per_m / 1000.0, text_height_mm)
-    return max(_readable_font_px(image_height, px_per_m, shorts_m), matched)
-
-
-def _median_text_height(msp) -> float:
-    heights = []
-    for entity in msp:
-        rec = room._label_record(entity)
-        if rec is not None and rec[3] > 0:
-            heights.append(rec[3])
-    if not heights:
-        return 375.0
-    heights.sort()
-    return float(heights[len(heights) // 2])
-
-
-def _tag(draw: ImageDraw.ImageDraw, x: float, y: float, lines: list[str], font, rgb) -> None:
-    widths = []
-    heights = []
-    for line in lines:
-        box = draw.textbbox((0, 0), line, font=font)
-        widths.append(box[2] - box[0])
-        heights.append(box[3] - box[1])
-    box_w = max(widths) + 16
-    box_h = sum(heights) + 8 * len(lines) + 10
-    left = x
-    top = y - box_h - 6
-    draw.rounded_rectangle(
-        (left, top, left + box_w, top + box_h),
-        radius=6,
-        fill=(255, 255, 255, 220),
-        outline=(*rgb, 255),
-        width=2,
+def render_label_png(dxf_path: Path, meta: dict, png_path: Path) -> None:
+    """floor_label_detected.dxf 의 HATCH·문자·흰 판을 PNG 로 그린다."""
+    render_wall_dxf_png(
+        dxf_path,
+        png_path,
+        bbox_mm=meta.get("bbox_mm"),
+        px_width=_px_width(meta),
     )
-    cursor = top + 6
-    for i, line in enumerate(lines):
-        draw.text((left + 8, cursor), line, font=font, fill=(20, 20, 20, 255))
-        cursor += heights[i] + 6
-
-
-def write_png(
-    png_path: Path,
-    meta: dict,
-    labels: list[dict],
-    out_path: Path,
-    text_height_mm: float = 375.0,
-) -> None:
-    base = Image.open(png_path).convert("RGBA")
-    to_px = room.png_transform(meta, base.size)
-    for item in labels:
-        for inst in item["instances"]:
-            _paint_face(base, to_px, inst["pts"], inst["holes"], tuple(item["color"]))
-    draw = ImageDraw.Draw(base)
-    for item in labels:
-        rgb = tuple(item["color"])
-        for inst in item["instances"]:
-            outer = []
-            for x, y in inst["pts"]:
-                outer.append(to_px(x, y))
-            if len(outer) >= 2:
-                draw.line(outer + [outer[0]], fill=(*rgb, 255), width=3)
-            for hole in inst["holes"]:
-                mapped = [to_px(x, y) for x, y in hole]
-                if len(mapped) >= 2:
-                    draw.line(mapped + [mapped[0]], fill=(*rgb, 255), width=2)
-    sample = abs(to_px(1000.0, 0.0)[0] - to_px(0.0, 0.0)[0])
-    shorts = [
-        min(inst["width_m"], inst["height_m"])
-        for item in labels
-        for inst in item["instances"]
-    ]
-    font_px = label_font_px(base.height, sample, shorts, text_height_mm)
-    print(f"label font: {font_px}px text {text_height_mm:.0f}mm", flush=True)
-    font = room._font(font_px)
-    for item in labels:
-        for inst in item["instances"]:
-            c, r = to_px(inst["x"], inst["y"])
-            _tag(
-                draw,
-                c,
-                r,
-                [inst["text"], f"{inst['area_m2']:.2f} ㎡"],
-                font,
-                tuple(item["color"]),
-            )
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    base.convert("RGB").save(out_path)
 
 
 def _public_instance(inst: dict, shared_with: list[str]) -> dict:
@@ -382,7 +254,7 @@ def _public_instance(inst: dict, shared_with: list[str]) -> dict:
     return row
 
 
-def detect(dxf_path: Path, meta_path: Path, png_path: Path, door: str = "close") -> dict:
+def detect(dxf_path: Path, meta_path: Path, door: str = "close") -> dict:
     started = time.time()
     doc = ezdxf.readfile(str(dxf_path))
     msp = doc.modelspace()
@@ -432,14 +304,8 @@ def detect(dxf_path: Path, meta_path: Path, png_path: Path, door: str = "close")
     json_out = out_dir / f"{OUT_STEM}.json"
     write_dxf(doc, dxf_out, [{**item, "instances": [pair[0] for pair in item["instances"]]} for item in labels])
     meta = json.loads(meta_path.read_text(encoding="utf-8"))
-    text_height_mm = _median_text_height(msp)
-    write_png(
-        png_path,
-        meta,
-        [{**item, "instances": [pair[0] for pair in item["instances"]]} for item in labels],
-        png_out,
-        text_height_mm,
-    )
+    print("render png from dxf", flush=True)
+    render_label_png(dxf_out, meta, png_out)
 
     public_labels = []
     unique_area = 0.0
@@ -475,7 +341,8 @@ def detect(dxf_path: Path, meta_path: Path, png_path: Path, door: str = "close")
         "skipped": skipped,
         "rules": {
             "labels": "Korean room names, or Latin names with 2+ letters and a digit; stacked lines within 1.8 text heights are joined top to bottom; fixture callouts such as 미니바, 옷장, 신발장, 화분, 화장대, 월풀욕조, 욕조, (장애인) are excluded",
-            "font": "tag text matches the room names already drawn on the sheet, and is never smaller than the median-room size",
+            "font": "PNG text is the TEXT stored on each label layer, drawn by the floor sheet renderer",
+            "png": "rendered from floor_label_detected.dxf",
             "door": door,
             "boundary": "inner face of WALL, WINDOW, COLUMN, and DOOR lines; open affects only doors on that room's closed boundary",
             "layer": "validated drawing plus one layer per label; HATCH area is that label; name and area text sit on the layer",
@@ -492,7 +359,12 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="실명 라벨별 벽 안쪽 면적")
     parser.add_argument("--dxf", type=Path, required=True)
     parser.add_argument("--meta", type=Path, required=True)
-    parser.add_argument("--png", type=Path, required=True)
+    parser.add_argument(
+        "--png",
+        type=Path,
+        default=None,
+        help="쓰지 않는다. PNG는 floor_label_detected.dxf 를 렌더해서 만든다.",
+    )
     parser.add_argument(
         "--door",
         choices=("close", "open"),
@@ -500,10 +372,10 @@ def main() -> None:
         help="각 실마다, 닫힌 벽 테두리에 닿는 문만 연다. close(기본)는 그 문도 막는다. 테두리 밖 DOOR는 어느 쪽이든 닫힌 경계로 둔다.",
     )
     args = parser.parse_args()
-    for path in (args.dxf, args.meta, args.png):
+    for path in (args.dxf, args.meta):
         if not path.is_file():
             raise SystemExit(f"파일이 없습니다: {path}")
-    info = detect(args.dxf, args.meta, args.png, door=args.door)
+    info = detect(args.dxf, args.meta, door=args.door)
     print(f"door: {info['rules']['door']}")
     print(f"label_count: {info['label_count']}")
     print(f"instance_count: {info['instance_count']}")

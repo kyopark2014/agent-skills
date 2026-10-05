@@ -171,7 +171,7 @@ python3 "$SKILLS/drawing-llmvalidator/scripts/render_wall_diff.py" \
   --floor <F>
 ```
 
-다음 단계 입력: `floor_wall_validated.dxf`, `floor_wall_validated_meta.json`, `floor_wall_validated.png`.
+다음 단계 입력: `floor_wall_validated.dxf`, `floor_wall_validated_meta.json`.
 
 ### ②-c drawing-totalroom
 
@@ -181,7 +181,6 @@ python3 "$SKILLS/drawing-llmvalidator/scripts/render_wall_diff.py" \
 python3.13 "$SKILLS/drawing-totalroom/scripts/detect_labels.py" \
   --dxf "$ARTIFACTS_DIR/<drawing_id>/floors/<F>/floor_wall_validated.dxf" \
   --meta "$ARTIFACTS_DIR/<drawing_id>/floors/<F>/floor_wall_validated_meta.json" \
-  --png "$ARTIFACTS_DIR/<drawing_id>/floors/<F>/floor_wall_validated.png" \
   --door close
 ```
 
@@ -223,7 +222,7 @@ python3.13 "$SKILLS/drawing-totalroom/scripts/detect_labels.py" \
 | 추출 | `drawing-devider` | 원본 DXF | `floors/<F>/floor_original.dxf` `.png` |
 | 벽 | `drawing-walldetector` | `floor_original.dxf` | `floor_wall_original.dxf` `.png` |
 | 검증 | `drawing-llmvalidator` | `floor_wall_original.*` | `floor_wall_validated.dxf` `.png` `_meta.json` |
-| 실면적 | `drawing-totalroom` | `floor_wall_validated.dxf` `.png` `_meta.json` | `floor_label_detected.dxf` `.png` `.json` |
+| 실면적 | `drawing-totalroom` | `floor_wall_validated.dxf` `_meta.json` | `floor_label_detected.dxf` `.png` `.json` |
 
 ## Decision Checklist
 
