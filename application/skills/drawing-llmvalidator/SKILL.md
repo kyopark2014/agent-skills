@@ -81,7 +81,7 @@ python3 "$SCRIPTS/render_wall_diff.py" --artifacts "$ART" --floor "$FLOOR"
 | 스크립트 | 역할 |
 | --- | --- |
 | `prepare_review.py` | `floor_wall_original.png` → `llm_review/` 조각 (한 변 5000px 이하) + `tiles.json` |
-| `view_image.py` | 타일 PNG를 Vision으로 보고 `llm_review/review.json` 작성. 도구가 아니다 |
+| `view_image.py` | 타일 PNG를 Vision으로 보고 `llm_review/review.json` 작성시 활용  |
 | `correct_walls_floor.py` | demote/promote → `floor_wall_validated.*` + `llm_review/corrections.json` |
 | `render_wall_diff.py` | original vs validated → `diff_original_vs_validated.png` (초록=promote, 파랑=demote) |
 | `lib_llm_correct.py` | 갭 승격·가구 강등·WALL DXF PNG 재렌더 |

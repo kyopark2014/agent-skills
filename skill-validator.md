@@ -15,10 +15,10 @@
 |------|------|
 | 스킬 경로 | `agent-skills/application/skills/drawing-llmvalidator/` |
 | 선행 | `drawing-walldetector` → `floors/<F>/floor_wall_original.{dxf,png}` |
-| Vision 입력 | `floor_wall_original.png` (또는 `prepare_review.py` 크롭) |
-| 보정 입력 | 동일 DXF + (선택) `llm_review/review.json` |
-| 기본 출력 | `floors/<F>/floor_wall_validated.{dxf,png,_meta.json}` |
-| 진입 스크립트 | `correct_walls_floor.py` (층 1개) |
+| Vision 입력 | `prepare_review.py`가 만든 `llm_review/R*C*.png` (한 변 5000px 이하) |
+| 보정 입력 | `floor_wall_original.dxf` + `llm_review/review.json` |
+| 기본 출력 | `floor_wall_validated.{dxf,png,_meta.json}` + `diff_original_vs_validated.png` |
+| 진입 | `prepare_review.py` → `view_image.py` → `correct_walls_floor.py` → `render_wall_diff.py` |
 | 핵심 API | `lib_llm_correct.apply_corrections(doc, review=…)` |
 
 ### 산출 경로
@@ -27,21 +27,24 @@
 $ARTIFACTS_DIR/<drawing_id>/floors/<FLOOR>/
 ├── floor_wall_original.dxf / .png / _meta.json   # walldetector (불변)
 ├── floor_wall_validated.dxf / .png / _meta.json  # llmvalidator 출력
-├── diff_original_vs_validated.png                # (선택) promote/demote 시각화
+├── diff_original_vs_validated.png / .json        # 어두운 빨강=kept, 초록=promote, 파랑=demote
 └── llm_review/
-    ├── floor_wall_full.png 또는 R0C0_wall_crop.png …
-    ├── review.json          # Vision이 쓴 demote/promote bbox
-    └── corrections.json     # 적용 통계
+    ├── R0C0.png …           # 5000×5000 이하. 범위는 tiles.json
+    ├── tiles.json
+    ├── review.json          # view_image.py가 쓴 demote/promote bbox
+    ├── corrections.json
+    └── view_image.log
 ```
 
 ### 스크립트 역할
 
 | 스크립트 | 역할 |
 |----------|------|
-| `prepare_review.py` | Vision용 PNG 준비 (층 전체 복사 또는 레거시 타일 크롭) |
-| `correct_walls_floor.py` | DXF 로드 → `apply_corrections` → validated 저장·PNG 렌더 |
-| `render_wall_diff.py` | original vs validated 세그먼트 diff PNG |
-| `lib_llm_correct.py` | 세그먼트 인덱싱·promote/demote·보호·PNG 렌더 |
+| `prepare_review.py` | `floor_wall_original.png` → 한 변 5000px 이하 타일 + `tiles.json`. 층 전체 한 장 복사는 하지 않음 |
+| `view_image.py` | 타일 PNG를 base64로 `chat.get_chat().invoke`에 보내고 `review.json` 작성 |
+| `correct_walls_floor.py` | DXF 로드 → `apply_corrections` → validated 저장 |
+| `render_wall_diff.py` | original vs validated diff PNG/JSON |
+| `lib_llm_correct.py` | 세그먼트·promote/demote·문·창·기둥 레이어 |
 
 ---
 
@@ -57,7 +60,23 @@ Vision 모델은 DXF 좌표를 직접 파싱하지 않습니다.
 | 파란 텍스트 | TEXT/MTEXT | 실명·UP/DN·강당 등 맥락 |
 | ARC(문 스윙) 등 | BASE에 남음 | 개구 힌트 (갭을 메우지 말 것) |
 
-판정 결과는 코드가 아니라 **`llm_review/review.json`** 으로 넘깁니다.
+채팅 에이전트는 타일을 열지 않습니다. `view_image.py`가 PNG를 base64로 넣고, UI에서 고른 모델에 판정 기준과 함께 보냅니다. 답은 상자 JSON이고, 스크립트가 타일 0~1 좌표를 층 mm로 바꿔 `review.json`에 모읍니다.
+
+```python
+encoded = _encode_png(review_dir / tile["file"])
+result = client.invoke(
+    [
+        chat.HumanMessage(
+            content=[
+                {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{encoded}"}},
+                {"type": "text", "text": prompt},  # SKILL.md 「Vision 판정 기준」
+            ]
+        )
+    ]
+)
+```
+
+`prompt`의 모델 출력에는 `layer` 필드가 없습니다. `DOOR` / `WINDOW` / `COLUMN`은 보정 마지막에 기하 코드 `mark_doors_and_columns`가 나눕니다.
 
 ```json
 {
@@ -81,11 +100,13 @@ Vision 모델은 DXF 좌표를 직접 파싱하지 않습니다.
 
 ```text
 floor_wall_original.png
-  ├─ floor_parts_index.json 없음 → llm_review/floor_wall_full.png 복사
-  └─ parts 있음 → 타일 bbox → mm→px 변환 → R0C0_wall_crop.png …
+  → 한 변 ≤ 5000px 이면 타일 1장
+  → 한 변이 5000px를 넘으면 겹침 12% 격자 (R0C0.png …)
+  → tiles.json 에 bbox_px / bbox_mm
 ```
 
-타일 크롭 시 PNG의 렌더 창은 walldetector와 같은 패딩(`_render_window`)을 씁니다.  
+층 전체 PNG와 `floor_wall_full.png`는 Vision에 넣지 않습니다.  
+타일 크롭의 렌더 창은 walldetector와 같은 패딩(`_render_window`)입니다.  
 Y는 CAD→이미지에서 뒤집힙니다 (`py = (ymax - y) / …`).
 
 ```67:70:agent-skills/application/skills/drawing-llmvalidator/scripts/prepare_review.py
@@ -97,7 +118,7 @@ Y는 CAD→이미지에서 뒤집힙니다 (`py = (ymax - y) / …`).
 
 ### 2.2 Vision이 따르는 최우선 규칙 (SKILL.md 요약)
 
-에이전트/Vision이 크롭을 볼 때 쓰는 도메인 규칙입니다. 코드 기하와 맞춰 두었습니다.
+`view_image.py`가 프롬프트로 넣는 도메인 규칙입니다. 같은 주제의 실행은 `lib_llm_correct.py`가 하고, 모델은 그 규칙에 안 들어가는 자리만 작은 상자로 짚습니다.
 
 | 대상 | 인지 기준 | demote / promote |
 |------|-----------|-------------------|
@@ -105,7 +126,7 @@ Y는 CAD→이미지에서 뒤집힙니다 (`py = (ymax - y) / …`).
 | **복도 문** | 개구 양옆 짧은 벽 | 한쪽만 빨강이면 반대쪽 promote |
 | **계단실** | UP/DN 라벨 + 외곽 이중선 | 외곽 promote·protect, 트레드 다발 demote |
 | **엘리베이터** | 샤프트 뱅크·문면 | 잼/어깨/외곽 promote, 전고 문·후면 demote |
-| **H-Beam 기둥** | 정사각(0.45–1.5 m) + 중앙 `_` | WALL 유지·승격, 밀집 격자 제외 |
+| **H-Beam 기둥** | 정사각(0.45–1.5 m) + 중앙 `_` | 기하가 `COLUMN`으로 저장. 밀집 격자·휠체어 표식은 제외 |
 | **가구·객석** | 짧은 사각·평행 다발 | demote (작은 bbox만) |
 | **강당/오픈홀** | “강당” 라벨 | **중앙** 장축 demote, 외곽은 유지 |
 
@@ -118,7 +139,7 @@ Y는 CAD→이미지에서 뒤집힙니다 (`py = (ymax - y) / …`).
 
 보정 파이프라인은 Vision bbox와 별도로 DXF modelspace를 **축정렬 세그먼트**로 재인덱싱합니다.
 
-```127:148:agent-skills/application/skills/drawing-llmvalidator/scripts/lib_llm_correct.py
+```133:156:agent-skills/application/skills/drawing-llmvalidator/scripts/lib_llm_correct.py
 class AxisSeg:
     x0: float
     y0: float
@@ -152,9 +173,9 @@ class AxisSeg:
 
 ### 3.1 이중선 = 구조 벽 후보
 
-walldetector와 같은 관례입니다. 두께 대역(기본 50–420 mm) 안에 평행·overlap이 있으면 벽으로 봅니다.
+보정 쪽 `_has_parallel_pair`의 기본 간격은 50–420 mm이고, overlap은 400 mm 또는 짧은 쪽의 25%입니다. 1차 검출(`wall_conditions.json`)의 후보 간격은 30–420 mm입니다.
 
-```266:285:agent-skills/application/skills/drawing-llmvalidator/scripts/lib_llm_correct.py
+```272:290:agent-skills/application/skills/drawing-llmvalidator/scripts/lib_llm_correct.py
 def _has_parallel_pair(
     cand: AxisSeg,
     base: list[AxisSeg],
@@ -201,7 +222,31 @@ correct_walls_floor.py
 6) WALL 엔티티 삭제 (demote)
 7) BASE→WALL 또는 add_line (promote)
 8) post-pass: 승격으로 다시 올라온 홀중앙/문후면/가구 제거
-9) H-Beam 기둥 최종 BASE→WALL
+9) H-Beam·슬리브 승격, 픽토그램 재제거
+10) 문 개구를 끊고 양옆을 올린 뒤 mark_doors_and_columns
+      문짝·스윙=DOOR, 창=WINDOW, 기둥=COLUMN, 벽=WALL
+```
+
+세그먼트는 70 mm부터 읽고, 승격 후보를 삭제보다 먼저 모읍니다.
+
+```19768:19783:agent-skills/application/skills/drawing-llmvalidator/scripts/lib_llm_correct.py
+    segs = iter_axis_segs(msp, min_len_mm=70.0)
+    ...
+    # promote 후보를 demote 전에 확정
+    promote: list[AxisSeg] = []
+    if do_gap_promote:
+        promote.extend(find_promote_segments(segs))
+```
+
+문·창·기둥 레이어는 보정 끝에서 호 반지름과 스윕으로 나눕니다. Vision JSON에는 이 이름이 없습니다.
+
+```21102:21129:agent-skills/application/skills/drawing-llmvalidator/scripts/lib_llm_correct.py
+def mark_doors_and_columns(msp) -> dict[str, Any]:
+    """문짝·스윙은 DOOR, 창은 WINDOW, 기둥은 COLUMN이다."""
+    ...
+        sweep = (end_angle - start_angle) % 360.0
+        if not (400.0 <= radius <= 1400.0 and 50.0 <= sweep <= 130.0):
+            continue
 ```
 
 promote를 demote보다 먼저 고르는 이유:  
@@ -215,7 +260,7 @@ promote를 demote보다 먼저 고르는 이유:
 
 이미 빨간 WALL 런이 같은 축에 두 덩어리 있고, 그 **사이 갭(≲ 4.5 m)** 을 메우는 회색 이중선만 승격합니다.
 
-```235:263:agent-skills/application/skills/drawing-llmvalidator/scripts/lib_llm_correct.py
+```241:263:agent-skills/application/skills/drawing-llmvalidator/scripts/lib_llm_correct.py
 def _fills_true_gap(...):
     """True only if segment overlaps a gap *between* two existing WALL runs."""
     ...
@@ -262,6 +307,11 @@ def _fills_true_gap(...):
 
 bbox만으로 아무 회색선이나 올리지 않습니다. **이중선 + 구조 맥락**이 있어야 합니다.
 
+```2773:2780:agent-skills/application/skills/drawing-llmvalidator/scripts/lib_llm_correct.py
+def promote_in_bboxes(segs, bboxes, *, min_len_mm: float = 1000.0, gap_max_mm: float = 6000.0):
+    """Vision bbox 안에서도 'WALL 런 사이 갭' + 이중선만 승격."""
+```
+
 ### 5.6 계단 / 엘리베이터 / 기둥
 
 | 함수 | Vision·텍스트 힌트 | 승격 대상 |
@@ -274,7 +324,7 @@ bbox만으로 아무 회색선이나 올리지 않습니다. **이중선 + 구�
 
 ### 5.7 실제 승격 적용
 
-```3271:3288:agent-skills/application/skills/drawing-llmvalidator/scripts/lib_llm_correct.py
+```19891:19908:agent-skills/application/skills/drawing-llmvalidator/scripts/lib_llm_correct.py
         # BASE LINE 은 레이어를 바꿔 회색이 남지 않게 한다
         if (... LINE ... BASE_LAYER):
             e.dxf.layer = WALL_LAYER
@@ -297,7 +347,12 @@ bbox만으로 아무 회색선이나 올리지 않습니다. **이중선 + 구�
 
 WALL 엔티티 **중심점**이 bbox 안이면 삭제 후보.
 
-```1203:1208:agent-skills/application/skills/drawing-llmvalidator/scripts/lib_llm_correct.py
+```2741:2768:agent-skills/application/skills/drawing-llmvalidator/scripts/lib_llm_correct.py
+def demote_in_bboxes(msp, bboxes) -> set[int]:
+    """review.json demote_bboxes 안의 WALL 엔티티."""
+    ...
+        if e.dxf.layer != WALL_LAYER:
+            continue
         mx = sum(p[0] for p in pts) / len(pts)
         my = sum(p[1] for p in pts) / len(pts)
         for b in boxes:
@@ -320,37 +375,37 @@ WALL 엔티티 **중심점**이 bbox 안이면 삭제 후보.
 
 ### 6.3 Protect — demote에서 빼는 벽
 
-```1273:1298:agent-skills/application/skills/drawing-llmvalidator/scripts/lib_llm_correct.py
-def protect_corridor_wall_entities(...):
+```2834:2858:agent-skills/application/skills/drawing-llmvalidator/scripts/lib_llm_correct.py
+def protect_corridor_wall_entities(..., long_min_mm: float = 6000.0, mid_min_mm: float = 2500.0):
     """복도·긴 이중선 벽 WALL 엔티티는 demote 금지."""
     ...
-        if s.length >= long_min_mm:          # ≥ 6 m
+        if s.length >= long_min_mm:
             protect.add(eid)
-        if s.length >= mid_min_mm and _has_parallel_pair(...):  # ≥ 2.5 m + 이중선
+        if s.length >= mid_min_mm and _has_parallel_pair(s, wall):
             protect.add(eid)
 ```
 
 추가로 계단 외곽·엘리베이터 측벽·H-Beam id를 protect에 합칩니다.  
 그 뒤:
 
-```3247:3255:agent-skills/application/skills/drawing-llmvalidator/scripts/lib_llm_correct.py
+```19857:19875:agent-skills/application/skills/drawing-llmvalidator/scripts/lib_llm_correct.py
+    review_demote = demote_in_bboxes(msp, review.get("demote_bboxes") or [])
     demote_ids -= protect_ids
-    demote_ids |= review_demote   # Vision bbox 는 protect보다 우선
-    # 오픈홀 중앙·엘리베이터 문/후면·가구·… 는 protect보다 우선 demote
+    demote_ids |= review_demote
     demote_ids |= open_hall_demote
     demote_ids |= elev_door_demote
     demote_ids |= furniture_box_demote
-    ...
 ```
 
 → 자동 demote만 복도 보호에 걸린다. Vision `demote_bboxes`·강당 중앙 오검출·엘리베이터 문면·가구는 **보호를 뚫고** 제거한다.
 
 삭제:
 
-```3257:3261:agent-skills/application/skills/drawing-llmvalidator/scripts/lib_llm_correct.py
+```19877:19881:agent-skills/application/skills/drawing-llmvalidator/scripts/lib_llm_correct.py
     for e in list(msp):
         if e.dxf.layer == WALL_LAYER and id(e) in demote_ids:
             msp.delete_entity(e)
+            n_demoted += 1
 ```
 
 BASE로 “되돌리는” 것이 아니라 WALL 복사본을 지웁니다. 원본 회색 기하(BASE)는 그대로 남습니다.
@@ -360,20 +415,19 @@ BASE로 “되돌리는” 것이 아니라 WALL 복사본을 지웁니다. 원�
 ## 7. Vision과 기하의 역할 분담
 
 ```text
-┌─────────────────────┐     ┌──────────────────────────────┐
-│ Vision (에이전트)    │     │ lib_llm_correct (결정적)      │
-│ PNG 빨강/회색 관찰   │────▶│ AxisSeg·이중선·갭·protect     │
-│ 도메인 규칙으로      │     │ review bbox는 "관심 구역"     │
-│ demote/promote bbox  │     │ 실제 엔티티 선택·삭제·승격     │
-└─────────────────────┘     └──────────────────────────────┘
+view_image.py                         lib_llm_correct.apply_corrections
+  타일 PNG → chat.get_chat().invoke     review.json 이 없어도 기하 규칙은 실행
+  demote_bboxes / promote_bboxes   ──▶  상자는 관심 구역
+                                        선 삭제·추가·레이어는 여기만
 ```
 
-| 구분 | Vision | 코드 |
-|------|--------|------|
-| 벽을 “본다” | 색·실명·문 스윙·연속성 | `layer` + `AxisSeg` + 이중선 |
-| 문제를 찾는다 | 가구 빨강, 회의실 한 칸 회색 등 | 갭·pack·홀 중앙·문 플랭크 … |
-| 수정한다 | bbox JSON만 씀 | DXF in-place demote/promote |
-| review 없음 | — | 기하만으로도 상당 부분 자동 보정 |
+| 구분 | Vision (`view_image.py`) | 기하 (`apply_corrections`) |
+|------|---------------------------|----------------------------|
+| 입력 | 타일 PNG의 빨강·회색 | DXF의 `WALL` / `BASE` 세그먼트 |
+| 출력 | 상자 JSON. 레이어 필드 없음 | 엔티티 삭제·승격, 마지막에 `DOOR`·`WINDOW`·`COLUMN` |
+| 쓰는 경우 | 수치 규칙에 안 들어가는 국소 오검출·미검출 | 복도·문·계단·엘리베이터·기둥·강당·정형 가구 |
+| demote 상자 | 빨강인데 벽이 아닌 한 덩어리 | 중심이 상자 안인 `WALL`만 삭제. protect보다 우선. 한 변 25 m 또는 200 m² 초과는 버림 |
+| promote 상자 | 회색인데 벽인 한 덩어리 | 상자 안 회색을 전부 올리지 않음. WALL 사이 갭 이중선과 세로 칸막이만 |
 
 `review.json`이 없어도 `correct_walls_floor.py`는 동작합니다.  
 Vision은 **휴리스틱이 애매한 구역**을 bbox로 보강하는 층입니다.
@@ -386,15 +440,9 @@ Vision은 **휴리스틱이 애매한 구역**을 bbox로 보강하는 층입니
 SCRIPTS=.../drawing-llmvalidator/scripts
 ART=$ARTIFACTS_DIR/<drawing_id>
 
-# 1) Vision용 PNG
 python3 "$SCRIPTS/prepare_review.py" --artifacts "$ART" --floor 5F
-
-# 2) (에이전트) llm_review/*.png 검수 → llm_review/review.json 작성
-
-# 3) 보정 → floor_wall_validated.*
+python3.13 "$SCRIPTS/view_image.py" --artifacts "$ART" --floor 5F
 python3 "$SCRIPTS/correct_walls_floor.py" --artifacts "$ART" --floor 5F
-
-# 4) (선택) 개선 diff — 초록=promote, 파랑=demote
 python3 "$SCRIPTS/render_wall_diff.py" --artifacts "$ART" --floor 5F
 ```
 
@@ -415,16 +463,17 @@ python3 "$SCRIPTS/render_wall_diff.py" --artifacts "$ART" --floor 5F
 
 ## 9. Decision Checklist
 
-- [ ] `floor_wall_original.dxf`가 있는가 (walldetector 선행)
-- [ ] 출력이 `floor_wall_validated.*`인가 (original 덮어쓰기 금지)
-- [ ] Vision은 PNG로 봤고, bbox는 mm·가구 단위인가
-- [ ] 복도·계단·엘리베이터·H-Beam을 demote_bboxes에 넣지 않았는가
-- [ ] 층당 1회 보정 후 컨펌했는가
+- [ ] `floor_wall_original.dxf`가 있는가
+- [ ] `view_image.py`가 `review.json`을 쓴 뒤에 `correct_walls_floor.py`를 실행했는가
+- [ ] 출력이 `floor_wall_validated.*`이고 original은 그대로인가
+- [ ] 문·창·기둥이 `DOOR` / `WINDOW` / `COLUMN`으로 나뉘었는가
 
 ---
 
 ## Related
 
-- `drawing-walldetector` — 이중선 휴리스틱 1차 검출 (`skill-walldetector.md`)
-- `drawing-devider` — `floor_original` 선행
+- `drawing-walldetector` — 이중선 1차 검출 (`skill-walldetector.md`)
+- `drawing-devider` — `floor_original` 선행 (`skill-devider.md`)
+- `drawing-totalroom` — 검증 DXF의 실명 면적 (`skill-totalroom.md`)
+- `drawing-areasizing` — 추출부터 실명 면적까지 (`skill-areasizing.md`)
 - 스킬 요약·에이전트 규칙: `application/skills/drawing-llmvalidator/SKILL.md`

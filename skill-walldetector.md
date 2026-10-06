@@ -12,8 +12,9 @@
 | 스킬 경로 | `agent-skills/application/skills/drawing-walldetector/` |
 | 선행 | `drawing-devider` → `floors/<F>/floor_original.dxf` |
 | 기본 입력 | `$ARTIFACTS_DIR/<drawing_id>/floors/<F>/floor_original.dxf` |
-| 기본 출력 | `floors/<F>/floor_wall_original.{dxf,png,_meta.json}` + `floor_wall_index.json` |
-| 진입 스크립트 | `detect_walls_floor.py` (층 1개) |
+| 기본 출력 | `floor_wall_original.*` (common + 프로젝트 + 샘플)와 `floor_wall_common.png` (common만) |
+| 도면별 조건 | `wall_conditions.json` + `floors/<F>/wall_samples/wall_conditions.json` |
+| 진입 스크립트 | `detect_walls_floor.py` (층 1개). 샘플 파일이 없으면 그 전에 `sample_wall_conditions.py --vision` |
 | 분류·저장 | `lib_walls.classify_entities` → `write_walls_dxf` / `render_walls_png` |
 
 원본 277MB DXF를 직접 돌리지 않습니다. `parts/` 타일 분할은 기본 워크플로에서 쓰지 않습니다 (`--with-tiles`는 레거시·선택).
@@ -24,10 +25,10 @@
 $ARTIFACTS_DIR/<drawing_id>/
 ├── floors/<FLOOR>/
 │   ├── floor_original.dxf / .png          # (devider) 입력
-│   ├── floor_wall_original.dxf            # 벽 검출 DXF (BASE+WALL)
-│   ├── floor_wall_original.png            # 검수용 (벽=빨강)
-│   ├── floor_wall_original_meta.json      # 통계·경로
-│   └── floor_wall_index.json              # 층 요약
+│   ├── floor_wall_original.dxf / .png / _meta.json  # common+프로젝트+샘플
+│   ├── floor_wall_common.png / _meta.json           # common만
+│   ├── floor_wall_index.json
+│   └── wall_samples/                      # 샘플 2장·observations·wall_conditions.json
 └── walls_all_index.json                   # (선택) 다층 요약
 ```
 
@@ -57,12 +58,11 @@ $ARTIFACTS_DIR/<drawing_id>/
 |------|--------|------|
 | 축정렬 허용각 | ±8° | H/V만 후보 (사선 벽 약함) |
 | `min_len_mm` | 500 | 후보 세그먼트 최소 길이 |
-| `thick_min_mm` / `thick_max_mm` | 50 / 420 | 이중선 = 벽 두께 대역 (mm) |
-| `min_overlap_mm` | 400 | 평행 쌍의 길이 방향 overlap 하한 (또는 짧은 쪽의 25%) |
-| `stair_count` | 4 | 두께 대역 내 평행 이웃이 많으면 계단/해칭 제외 |
-| `short_pair_max_mm` | 2800 | 양쪽 모두 짧으면 가구 변으로 제외 |
-| `entity_wall_ratio` | 0.75 | 폴리라인 변의 ≥75%가 벽일 때만 통째 WALL |
-| `furniture_box_max_mm` | 3500 | 닫힌 사각 max변 ≤ 이 값 → 가구/기둥 윤곽 제외 |
+| `thick_min_mm` / `thick_max_mm` | 30 / 420 | 후보 간격. 외벽 마감선 30–45 mm 포함. 대역에 들어갔다고 벽이 되지는 않음 |
+| 후보 겹침 | 400 mm, 그리고 짧은 쪽의 25% | `wall_conditions.json` `common[0]` |
+| `wall_pack_gap_mm` | 200 | 이웃 ≥3이고 인접 간격 중앙값이 이보다 크면 계단 해칭 |
+| `entity_wall_ratio` | 0.75 | 폴리라인 변의 ≥75%가 벽일 때만 통째 승격 |
+| `furniture_box_max_mm` | 3500 | 닫힌 사각 max변 ≤ 이 값 → 가구. H-Beam 정사각은 예외로 `COLUMN` |
 
 레이어명(`0arch` 등)·색상·선종은 **벽 선택에 사용하지 않습니다**.
 
@@ -93,20 +93,46 @@ detect_walls_floor.py
 CAD 평면도에서 벽은 **양면 이중선**으로 그려진다는 관례를 이용합니다.
 
 ```text
-축정렬(H/V) · 길이 ≥ min_len_mm 후보만
-  ├─ 수평선: Y 간격이 50–420 mm 인 평행 쌍 + X overlap 충분
-  └─ 수직선: X 간격이 50–420 mm 인 평행 쌍 + Y overlap 충분
-       → 양쪽 세그먼트 키 (entity_idx, seg_idx) 를 wall_keys 에 추가
+축정렬(H/V) · 길이 ≥ 500 mm · 간격 30–420 mm · 겹침 충분
+  → 아래 셋 중 하나일 때만 WALL
+     1. 간벽: 간격 120–180 mm, 같은 직선 런 2.2 m 이상
+     2. X문 개구에 맞닿은 간벽 (X 획 자체는 벽 아님)
+     3. 연속 실 테두리: 짧은 쪽 ≥ 2.2 m, 겹침 ≥ 80%
+        (같은 조건의 평행선이 8개 이상이면 이 조건으로 올리지 않음)
 ```
 
-세부:
+숫자의 원본은 `wall_conditions.json`의 `common[0]`입니다. `projects.hynix`·`hotel`·`hospital`·`house`는 그 도면에서 common과 다른 키만 뒤에 붙입니다. `floors/<F>/wall_samples/wall_conditions.json`이 있으면 `floor_wall_original`에만 더합니다. `floor_wall_common`에는 넣지 않습니다.
 
-1. 후보를 직교 좌표(H→Y, V→X)로 정렬합니다.
-2. 각 선에 대해 두께 대역 안의 **이웃**을 수집합니다.
-3. 이웃 수 ≥ `stair_count - 1`(기본 이웃 ≥3)이면 **계단/해칭 클러스터**로 보고 스킵합니다.
-4. 가장 가까운 이웃 1개만 벽 쌍으로 채택합니다.
-5. 양쪽 길이 모두 `< short_pair_max_mm`(2.8 m)이면 **가구·설비 변**으로 제외합니다.
-6. 통과한 쌍의 두 세그먼트 키를 `wall_keys`에 넣습니다.
+```4:20:agent-skills/application/skills/drawing-walldetector/wall_conditions.json
+      "candidate": {
+        "angle_tolerance_deg": 8,
+        "min_length_mm": 500,
+        "gap_mm": { "min": 30, "max": 420 },
+        "overlap_mm_min": 400,
+        "overlap_ratio_of_shorter": 0.25
+      },
+      "broken_partition": {
+        "enabled": true,
+        "gap_mm": { "min": 120, "max": 180 },
+        "run_min_length_mm": 2200
+      },
+```
+
+후보로 고른 뒤, 간격이 두께 대역 안이고 겹침이 충분할 때만 이웃으로 둡니다.
+
+```812:819:agent-skills/application/skills/drawing-walldetector/scripts/lib_walls.py
+                d = mb - ma
+                if d > thick_max:
+                    break
+                if d < thick_min:
+                    continue
+                ov = _pair_overlap(a, b, along_x=along_x)
+                need = max(min_overlap, overlap_ratio * min(a.length, b.length))
+                if ov >= need:
+                    neighbors.append((d, b))
+```
+
+여러 겹은 이웃이 3개 이상일 때 인접 간격 중앙값을 봅니다. 200 mm보다 크면 계단 해칭으로 빼고, 200 mm 이하면 2.5 m 미만인 짧은 겹만 뺍니다. 촘촘하고 2.8 m 이상이라는 이유만으로 외벽으로 두지 않습니다.
 
 ### 3.3 엔티티 단위 분류 (`classify_entities`)
 
@@ -114,7 +140,7 @@ CAD 평면도에서 벽은 **양면 이중선**으로 그려진다는 관례를 
 
 | 순서 | 조건 | 결과 |
 |------|------|------|
-| ① | H-Beam 기둥 (`find_hbeam_column_idxs`) | **강제 WALL** |
+| ① | H-Beam 기둥 (`find_hbeam_column_idxs`) | **`COLUMN`** (파랑, ACI 5) |
 | ② | 닫힌 사각 `is_non_wall_closed_box` (max변 ≤ 3.5 m, min변 ≥ 150) | skip (가구·일반 기둥 윤곽) |
 | ③ | 짧은 다변 폴리 (`변 ≥10` · 평균 길이 `< 1.5 m`) | skip (조경·해칭) |
 | ④ | `ARC` / `CIRCLE` / `TEXT` / `MTEXT` / `DIMENSION` | 벽 승격 안 함 |
@@ -127,7 +153,7 @@ CAD 평면도에서 벽은 **양면 이중선**으로 그려진다는 관례를 
 - 닫힌 대략 정사각(변 450–1500 mm, 가로·세로 차이 22% 이내) + 중심 근처 짧은 H/V dash LINE
 - 밀집 격자(반경 내 후보 ≥4)는 제외 → 외부 연결·슬리브 오인 완화
 - 사각 안에 ARC가 둘 이상이거나 `_` 후보가 6개 이상이면 장애인 표식 등으로 보고 제외
-- 가구 박스로 빠지지 않도록 **WALL로 유지**합니다.
+- 가구 박스로 빠지지 않도록 **`COLUMN`으로 저장**합니다. 창틀은 `WINDOW`, 여닫이 문짝·X자 문은 `DOOR`입니다.
 
 분류 결과 dict (요지):
 
@@ -149,21 +175,37 @@ CAD 평면도에서 벽은 **양면 이중선**으로 그려진다는 관례를 
 
 | 레이어 | ACI 색 | 의미 |
 |--------|--------|------|
-| `BASE` | 8 (회색) | 원본 기하 전체 사본 (컨텍스트) |
-| `WALL` | 1 (빨강) | 벽으로 판정된 기하 |
+| `BASE` | 8 (회색) | 벽·문·창·기둥으로 올라가지 않은 기하 |
+| `WALL` | 1 (빨강) | 벽 |
+| `DOOR` | 3 (초록) | 문짝·X자 문 |
+| `WINDOW` | 4 (청록) | 같은 개구의 얇은 창틀 |
+| `COLUMN` | 5 (파랑) | H-Beam 등 기둥 |
+
+```1291:1300:agent-skills/application/skills/drawing-walldetector/scripts/lib_walls.py
+    def _stored_layer(ei: int) -> tuple[str, int] | None:
+        if ei in column_idxs:
+            return COLUMN_LAYER, COLUMN_COLOR
+        if ei in window_idxs:
+            return WINDOW_LAYER, WINDOW_COLOR
+        if ei in door_idxs:
+            return DOOR_LAYER, DOOR_COLOR
+        if ei in wall_idxs and ei not in skip:
+            return WALL_LAYER, WALL_COLOR
+        return None
+```
+
+기둥·창·문·벽 순으로 보고, 어디에도 없으면 BASE입니다.
 
 ### 4.2 저장 순서
 
 ```text
-1) 새 Drawing (R2010) + BASE / WALL 레이어 생성
-2) include_base=True (기본)
-     → modelspace 기하(GEOM_TYPES + TEXT/MTEXT)를
-       전부 BASE·회색으로 _copy_entity 복제
-3) wall_entity_idxs 의 엔티티를 WALL·빨강으로 한 번 더 복제
-     (skip_column_idxs 는 제외)
-4) 통째 승격되지 않은 wall_segs 만
-     → 빨간 LINE 으로 WALL 레이어에 추가 (부분 벽 보강)
+1) 새 Drawing (R2010) + BASE / WALL / DOOR / WINDOW / COLUMN
+2) 문·창·기둥·벽으로 분류되지 않은 기하와 TEXT 는 BASE
+3) column → window → door → wall 순으로 레이어를 나눠 복사
+     (skip_column_idxs 는 WALL에서 제외)
+4) 통째 승격되지 않은 wall_segs 만 빨간 LINE 으로 보강
 5) doc.saveas(floor_wall_original.dxf)
+   같은 분류를 common 조건만으로 다시 돌려 floor_wall_common.png
 ```
 
 ### 4.3 엔티티 복사 (`_copy_entity`)
@@ -216,16 +258,14 @@ DXF의 레이어 구조와 시각적으로 대응합니다.
 
 | 스크립트 | 역할 |
 |----------|------|
-| `detect_walls_floor.py` | **기본** — 한 층 `floor_wall_original` |
-| `detect_walls_tile.py` | 단일 DXF (레거시·타일) |
-| `detect_walls_all.py` | 다층 일괄 (**사용자 명시 시에만**) |
-| `lib_walls.py` | 분류·DXF/PNG |
+| `sample_wall_conditions.py` | 가운데 샘플 2장 → `wall_samples/wall_conditions.json`. 파일이 있으면 다시 만들지 않음 |
+| `detect_walls_floor.py` | 한 층 `floor_wall_original` + `floor_wall_common` |
+| `lib_walls.py` | 분류·DXF/PNG. 조건은 `wall_conditions.json` |
+| `lib_wall_samples.py` | 샘플 창·측정 |
+| `detect_walls_tile.py` | 단일 DXF. 사용자가 타일을 명시할 때 |
+| `detect_walls_all.py` | 다층 일괄. 사용자가 일괄을 명시할 때 |
 
-### 게이트
-
-1. `floor_wall_original.*`가 이미 있으면 경로를 보여 주고 **계속/중단**을 확인합니다 (허락 전 실행 금지).
-2. 다층이면 **파일럿 1층** → PNG 검수 → 컨펌 → 나머지 **층당 bash 1회**로 진행합니다.
-3. 기본 금지: `for FLOOR in …` 일괄, `detect_walls_all` 한 방 (Timeout)
+이미 `floor_wall_original.*`가 있어도 같은 경로에 덮어씁니다. 호출은 층당 bash 1회입니다. `for` 일괄과 `detect_walls_all`은 대용량에서 `TimeoutExpired`가 납니다.
 
 ### 호출 예
 
@@ -252,7 +292,7 @@ ART=/Users/ksdyb/Documents/src/agent-skills/application/.session_storage/lge/art
 | 인자 | 기본 | 조정 방향 |
 |------|------|-----------|
 | `--min-len-mm` | 500 | 올리기 → 짧은 가구 변↓ / 내리기 → 짧은 벽↑ |
-| `--thick-min-mm` | 50 | 얇은 칸막이·두꺼운 코어에 맞춤 |
+| `--thick-min-mm` | 30 | 얇은 칸막이·마감선에 맞춤 |
 | `--thick-max-mm` | 420 | 두꺼운 코어 벽이 빠지면 올리기 |
 | `--no-png` | off | DXF만 빠르게 |
 | `--floor-px-width` | 4000 | PNG 가로 (meta에 png_size 있으면 자동 맞춤) |
@@ -262,7 +302,7 @@ ART=/Users/ksdyb/Documents/src/agent-skills/application/.session_storage/lge/art
 ## 7. 한계
 
 - **단일선**으로만 그린 벽, **비스듬한(사선) 벽**은 거의 잡지 못합니다.
-- 이중선 간격이 50–420 mm 밖이면 미검출됩니다.
+- 이중선이 확정 조건(간벽 120–180 mm, 연속 면 2.2 m·겹침 80% 등) 밖이면 미검출됩니다.
 - ≤3.5 m 닫힌 박스로 그린 **작은 실**(화장실 칸 등)이 가구와 함께 제외될 수 있습니다.
 - 레이어/블록이 표준화된 DXF면 휴리스틱보다 레이어 규칙이 낫습니다.
 
@@ -270,4 +310,4 @@ ART=/Users/ksdyb/Documents/src/agent-skills/application/.session_storage/lge/art
 
 ## 8. 한 줄 요약
 
-**DXF의 `LINE`/`LWPOLYLINE` 좌표만으로 축정렬 이중선(두께 50–420 mm)을 찾아 벽을 고르고, 원본은 건드리지 않은 채 새 DXF에 `BASE`(회색 전체) + `WALL`(빨간 벽 엔티티·부분 LINE)로 저장합니다.**
+**`LINE`/`LWPOLYLINE`의 축정렬 이중선을 `wall_conditions.json` 조건으로 확정하고, 원본은 그대로 둔 채 `WALL`·`DOOR`·`WINDOW`·`COLUMN`·`BASE`로 나눈 `floor_wall_original`을 저장합니다. common만 적용한 검수용이 `floor_wall_common.png`입니다.**

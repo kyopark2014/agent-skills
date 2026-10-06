@@ -14,9 +14,11 @@
 | 기본 입력 | `$ARTIFACTS_DIR/<input>.dxf` (또는 `--dxf`) |
 | 기본 출력 | `$ARTIFACTS_DIR/<drawing_id>/floors/<F>/floor_original.{dxf,png,_meta.json}` |
 | 구조 분석 | `structure.md` / `structure.json` (`analyze_drawing.py`) |
+| 도면 목록 | `$ARTIFACTS_DIR/drawing_list.json` (해당 도면만 갱신, `source_filename`을 `floors`보다 앞) |
+| 추출 요약 | `$ARTIFACTS_DIR/<drawing_id>/extract_summary.json` |
 | 작업 로그 | `work_log.md` |
-| 진입 스크립트 | `extract_2d.py` (층 1개) |
-| 공통 유틸 | `lib_split.py` (primary bbox), `lib_render.py` (치수·PNG) |
+| 진입 스크립트 | `extract_2d.py` (층 1개, 기본 `--variant original`) |
+| 공통 유틸 | `lib_split.py`, `lib_render.py`, `lib_sheet.py`, `lib_structure.py` |
 
 **기본 워크플로에서 만들지 않는 것:** `parts/` 타일, `floor_*_clean.dxf`, `floor_overview.*`, `floor_*_2d.png`.  
 타일 분할은 사용자가 명시한 경우에만 `plan_split.py` / `split_floor.py`(레거시).
@@ -79,6 +81,27 @@ XA-S-12F 평면 → 12F
 기본 `--variant original`은 **extra 포함 + 가구 유지**입니다.  
 `--variant clean`은 평면/코어/기둥만·가구 제외(비권장·레거시).
 
+```122:133:agent-skills/application/skills/drawing-devider/scripts/extract_2d.py
+    n = floor[:-1]  # '5F' → '5'
+    core_patterns = [
+        re.compile(rf"^XA-S-{n}F\s*평면$"),
+        re.compile(rf"^XA-S-{n}F\s*코어$"),
+        re.compile(rf"^XS-S-{n}F\s*기둥$"),
+    ]
+    extra_patterns = [
+        re.compile(rf"^XA-P-{n}F\s*코어$"),
+        re.compile(rf"^XA-C-{n}F\s*평면$"),
+        re.compile(rf"^XA-G-조경\s*\({n}F\)$"),
+    ]
+```
+
+```755:758:agent-skills/application/skills/drawing-devider/scripts/extract_2d.py
+    if skip_furniture is None:
+        skip_furniture = variant == "clean"
+    if include_extra is None:
+        include_extra = variant == "original"
+```
+
 ### 3.3 도곽·층 제목 (블록 이름이 없을 때)
 
 `XA-S-{N}F 평면`이 없으면 추출을 멈추지 않습니다. `lib_sheet.py`가 다음을 사용합니다.
@@ -89,7 +112,32 @@ XA-S-12F 평면 → 12F
 | 층 제목 | `1층 평면도`, `1층 냉난방 평면도`, `지하1층`, `B1F`, `12F PLAN`, `옥상 평면도` |
 
 `--layout auto`가 블록 이름을 먼저 보고, 없을 때만 도곽으로 넘깁니다.  
-목록은 `--list-floors`. 그다음 **파일럿 1층만** 추출해 확인받습니다.
+목록은 `--list-floors`로 확인하고, 나온 이름을 층마다 추출합니다.
+
+같은 제목이 떨어진 도곽에 반복되면 왼쪽부터 `1F`, `1F_2`입니다. 한 도곽 안에서 층을 나누지 못하면 `sheet_01`, `sheet_02`로 두고 층 이름만 미확정입니다. `sheet_XX`도 그 이름으로 추출합니다.
+
+도곽 방식이고 `--variant original`이며 도곽 안에 건축 레이어(`ARCH`, `*_BG`·`*_CEN` 제외)가 있으면 `lib_structure.collect_structural_sheet`가 벽·창·실명·문 스윙만 남깁니다. 창선은 벽과 같이 둡니다. 파일명은 그대로 `floor_original.*`입니다. 건축 레이어가 없으면 도곽 안 기하를 그대로 둡니다. 지원동처럼 `XA-S` 블록 도면은 이 필터를 타지 않고, 가구 INSERT를 유지합니다.
+
+```25:34:agent-skills/application/skills/drawing-devider/scripts/lib_structure.py
+def is_arch_layer(name: str) -> bool:
+    """벽·실명에 쓰는 건축 레이어. 등고(BG)·중심선(CEN)은 제외."""
+    upper = name.upper()
+    if "ARCH" not in upper:
+        return False
+    if "ARCH_BG" in upper or upper.endswith("_BG"):
+        return False
+    if "ARCH_CEN" in upper or upper.endswith("_CEN"):
+        return False
+    return True
+```
+
+```946:950:agent-skills/application/skills/drawing-devider/scripts/extract_2d.py
+    if variant == "original":
+        packed = collect_structural_sheet(doc, clip)
+        if packed is not None:
+            entities, info = packed
+            structural_mode = True
+```
 
 ---
 
@@ -117,6 +165,16 @@ extract_2d.py --dxf … --floor 12F --drawing-id …
 
 원본 INSERT는 그대로 두고, **좌표를 읽어 새 R2010 DXF에 복사**합니다 (`write_clean_dxf`).
 
+```160:166:agent-skills/application/skills/drawing-devider/scripts/extract_2d.py
+            if e.dxftype() == "INSERT":
+                name = e.dxf.name
+                if skip_furniture and is_furniture(name):
+                    continue
+                walk(e, depth + 1)
+            else:
+                out.append(e)
+```
+
 ### 4.2 Primary bbox (좌·우 이중 복사본 대응)
 
 일부 층은 동일 평면이 **좌·우에 두 벌** 있습니다. PNG에 도면이 둘 다 보이면 이 때문입니다.
@@ -128,6 +186,18 @@ extract_2d.py --dxf … --floor 12F --drawing-id …
 
 `original`은 `find_primary_floor_bbox(entities, core_bbox=fresh_core)`를 씁니다.  
 필터된 엔티티만 DXF에 들어갑니다.
+
+```164:171:agent-skills/application/skills/drawing-devider/scripts/lib_split.py
+    gap, idx = gaps[0]
+    if gap < 20_000:
+        return min(cxs), max(cxs)
+    split = (xs[idx] + xs[idx + 1]) / 2
+    left = [x for x in cxs if x < split]
+    right = [x for x in cxs if x >= split]
+    use = right if len(right) >= len(left) else left
+```
+
+간격이 20 m 미만이면 한 도면으로 보고, 그 이상이면 LINE이 많은 쪽만 남깁니다. `find_primary_floor_bbox`는 그 핵에서 같은 대역의 기하를 기본 80 m까지 넓힙니다.
 
 ### 4.3 실명 라벨
 
@@ -146,6 +216,16 @@ extract_2d.py --dxf … --floor 12F --drawing-id …
 - 복사 타입: `LINE`, `LWPOLYLINE`, `CIRCLE`, `ARC`, (+ `TEXT`/`MTEXT`)
 - 레이어명은 원본 유지 (`0arch` 등)
 - 경로: `$ARTIFACTS_DIR/<drawing_id>/floors/<F>/floor_original.dxf`
+
+```334:350:agent-skills/application/skills/drawing-devider/scripts/extract_2d.py
+    doc = ezdxf.new("R2010")
+    msp = doc.modelspace()
+    ...
+        if t == "LINE":
+            msp.add_line(sh(e.dxf.start), sh(e.dxf.end), dxfattribs={"layer": e.dxf.layer})
+```
+
+`sh`는 `origin_shift`가 있으면 좌표를 빼고, 없으면 `(0, 0)`이라 절대 좌표 그대로입니다.
 
 ### 4.6 PNG 미리보기 (`render_floor_original_preview`)
 
@@ -206,32 +286,25 @@ ART="$ARTIFACTS_DIR/sk_yongin_jiwon"
 | 리스크 | `0arch` 단일 레이어 → 벽/가구 레이어 분리 불가 |
 | 리스크 | 좌·우 이중 클러스터 → primary bbox |
 
-### 5.4 호출 예 (파일럿 1층)
+### 5.4 호출 예
 
-```bash
-# ⓪ 기존 폴더 확인 — 있으면 계속/중단을 사용자에게 물은 뒤 진행
-ART="$ARTIFACTS_DIR/sk_yongin_jiwon"
-ls -la "$ART" 2>/dev/null | head
-
-# ① 파일럿 층만
-python3 "$SCRIPTS/extract_2d.py" \
-  --dxf "$ARTIFACTS_DIR/../upload/SK용인하이닉스_지원동_평면도_241014.dxf" \
-  --floor 12F \
-  --out "$ARTIFACTS_DIR" \
-  --drawing-id sk_yongin_jiwon
-
-# 미리보기: $ART/floors/12F/floor_original.png
-# → 여기서 멈추고 승인 후, 다음 층도 bash 1회씩
-```
-
-승인 후 다른 층:
+기존 `floor_original.*`가 있어도 같은 경로에 덮어씁니다. 층마다 bash 한 번입니다.
 
 ```bash
 python3 "$SCRIPTS/extract_2d.py" \
-  --dxf "…/SK용인하이닉스_지원동_평면도_241014.dxf" \
+  --dxf "$ARTIFACTS_DIR/SK용인하이닉스_지원동 평면도_241014.dxf" \
   --floor 5F \
   --out "$ARTIFACTS_DIR" \
   --drawing-id sk_yongin_jiwon
+```
+
+도곽 도면은 먼저 목록만 봅니다.
+
+```bash
+python3 "$SCRIPTS/extract_2d.py" \
+  --dxf "$ARTIFACTS_DIR/<input>.dxf" \
+  --drawing-id <drawing_id> \
+  --list-floors
 ```
 
 ### 5.5 구조 분석
@@ -251,28 +324,21 @@ python3 "$SCRIPTS/analyze_drawing.py" \
 ```text
 DXF 입력
   ↓
-⓪ drawing_id 폴더 존재? → 있으면 계속/중단 확인 (허락 전 실행 금지)
-  ↓
-① extract_2d --floor <파일럿>
+① extract_2d --floor <각 층>     층당 bash 1회, 있으면 덮어씀
      → floors/<F>/floor_original.{dxf,png,_meta.json}
+     → drawing_list.json / extract_summary.json 갱신
   ↓
-② PNG·크기 보고 → 나머지 층 허락
+② analyze_drawing → structure.md / .json
   ↓
-③ 허락 시 다음 층만 extract  (층당 bash 1회)
-  ↓
-④ analyze_drawing → structure.md / .json
-  ↓
-⑤ work_log.md 작성·전달
+③ work_log.md
 ```
 
-### 금지
+층을 지정하면 그 층만, 아니면 발견 층(`discovered_floors`, 도곽이면 `sheet_XX` 포함) 전체를 순서대로 처리합니다.
 
-| 금지 | 이유 |
+| 호출 | 이유 |
 |------|------|
-| `for FLOOR in 5F 6F …` 일괄 | 대용량 DXF에서 `TimeoutExpired` |
-| `--floor all` | 동일 |
-| 기존 `$ART` 있을 때 묻지 않고 덮어쓰기 | 산출 손실 |
-| `parts/` / `floor_overview.*` 기본 생성 | 워크플로에서 제외 |
+| 층당 bash 1회 | 대용량 DXF에서 `for` 일괄·`--floor all`은 `TimeoutExpired` |
+| `parts/` / `floor_overview.*` / `floor_structure.*` | 만들지 않음. 미리보기는 `floor_original.png` |
 
 ### 경로 bootstrap (로컬)
 
@@ -285,11 +351,13 @@ DXF 입력
 
 | 스크립트 | 역할 |
 |----------|------|
-| `extract_2d.py` | **기본** — 한 층 `floor_original` |
+| `extract_2d.py` | 한 층 `floor_original`, `drawing_list.json` 갱신 |
 | `analyze_drawing.py` | 구조 실측 → `structure.md` / `.json` |
-| `lib_split.py` | primary bbox·타일 격자 유틸 |
+| `lib_sheet.py` | `XA-S`가 없을 때 도곽·층 제목 |
+| `lib_structure.py` | 도곽 + 건축 레이어일 때 벽·창·실명·문 스윙 |
+| `lib_split.py` | primary bbox |
 | `lib_render.py` | 치수·고해상도 PNG |
-| `plan_split.py` / `split_floor.py` | **레거시·선택** 타일 분할 |
+| `plan_split.py` / `split_floor.py` | 타일 분할. 사용자가 명시할 때만 |
 
 ---
 
@@ -298,7 +366,8 @@ DXF 입력
 | 다음 스킬 | 입력 |
 |-----------|------|
 | `drawing-walldetector` | `floors/<F>/floor_original.dxf` → `floor_wall_original.*` |
-| `drawing-llmvalidator` | 벽 검출 결과 보정 |
+| `drawing-llmvalidator` | `floor_wall_validated.*` |
+| `drawing-areasizing` | 추출 → 벽 → 검증 → 실명 면적을 이 순서로 호출 |
 
 원본 277 MB를 walldetector에 직접 넣지 않습니다. **devider가 만든 층 DXF만** 사용합니다.
 
