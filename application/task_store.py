@@ -28,7 +28,7 @@ _APPLICATION_DIR = os.path.dirname(os.path.abspath(__file__))
 _DATA_DIR = os.path.join(_APPLICATION_DIR, "data")
 _GLOBAL_DB_PATH = working_db_path()
 
-DEFAULT_MODEL = "Claude 4.6 Sonnet"
+DEFAULT_MODEL = "Claude 5.0 Sonnet"
 
 _USER_SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS tasks (

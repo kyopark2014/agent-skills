@@ -35,7 +35,7 @@ description: >-
 
 1. **선행** — 위 절차로 고른 `floors/<F>/floor_wall_original.dxf` (walldetector)가 있어야 한다.
 2. **Vision은 스크립트** — `view_image` 도구는 없다. 호출하지 않는다.
-   `prepare_review.py` 다음에 `scripts/view_image.py`를 층당 1회 실행한다.
+   `prepare_review_all.py` 다음에 `scripts/view_image_all.py`를 각 한 번 실행한다.
    그 스크립트가 `llm_review/` PNG를 본다. 한 변이 5000px 이하면 타일은 한 장이다.
    한 변이 5000px를 넘을 때만 겹침 격자로 나뉘고, 나뉜 파일마다 스크립트 안에서 1회 본다.
    `floor_wall_original.png`, `floor_wall_full.png`, overlay, `room_eval`은 보지 않는다.
@@ -58,31 +58,32 @@ SCRIPTS=/Users/ksdyb/Documents/src/agent-skills/application/skills/drawing-llmva
 # Runtime: SCRIPTS="$WORKING_DIR/skills/drawing-llmvalidator/scripts"
 ART="$ARTIFACTS_DIR/<drawing_id>"
 
-# 사용자가 층을 지정하면 그 층만. 아니면 floor_wall_original.dxf 가 있는 층 전부.
-# 층마다 ①→②→③ 을 끝내고, 확인 없이 다음 층으로 간다.
-# 쉘 한 번에 correct 까지 넣지 않는다. view_image.py 로그에 review.json 이 나온 뒤에 보정한다.
-# bash 는 300초가 지나면 자식을 죽인다. Vision 은 nohup 으로 로그에 남긴다.
+# 사용자가 층을 지정하면 --floors 그 층만. 아니면 original 이 있는 층 전부.
+# ① prepare_review_all.py 한 번. ② view_image_all.py 한 번. 포그라운드로 끝날 때까지 기다린다.
+# 진행 중인 Vision 호출은 물리 CPU 코어 수. 한 층이 그 수를 쓰고 다음 층으로 넘어간다.
+# nohup, &, sleep, for, find / 는 쓰지 않는다.
+# 쉘 한 번에 correct 까지 넣지 않는다. view_image_all.py 가 끝난 뒤에 보정한다.
 
-python3 "$SCRIPTS/prepare_review.py" --artifacts "$ART" --floor "$FLOOR"
-if command -v python3.13 >/dev/null 2>&1; then PY=python3.13; else PY=python3; fi
-LOG="$ART/floors/$FLOOR/llm_review/view_image.log"
-nohup "$PY" "$SCRIPTS/view_image.py" --artifacts "$ART" --floor "$FLOOR" > "$LOG" 2>&1 &
-echo "started $!"
-tail -n 20 "$LOG"
+python3 "$SCRIPTS/prepare_review_all.py" --artifacts "$ART"
+python3 "$SCRIPTS/view_image_all.py" --artifacts "$ART"
 ```
 
-로그에 `→ .../review.json` 이 보이기 전에는 아래를 실행하지 않는다. `sleep`으로 300초에 가깝게 기다리지 않고, 짧은 `tail`로 다시 확인한다.
+`view_image_all.py` 가 `view_image_index.json` 을 쓰기 전에는 아래를 실행하지 않는다.
+
+층이 둘 이상이면 보정을 한 번에 돌린다. 층 안에서는 보정 다음 diff 다. 동시에 도는 층 수는 물리 CPU 코어 수다. `for` 루프는 쓰지 않는다. 한 층이면 `--floors` 에 그 층을 넘긴다.
 
 ```bash
-python3 "$SCRIPTS/correct_walls_floor.py" --artifacts "$ART" --floor "$FLOOR"
-python3 "$SCRIPTS/render_wall_diff.py" --artifacts "$ART" --floor "$FLOOR"
+python3 "$SCRIPTS/correct_walls_all.py" --artifacts "$ART"
 ```
 
 | 스크립트 | 역할 |
 | --- | --- |
-| `prepare_review.py` | `floor_wall_original.png` → `llm_review/` 조각 (한 변 5000px 이하) + `tiles.json` |
-| `view_image.py` | 타일 PNG를 Vision으로 보고 `llm_review/review.json` 작성. UI에서 고른 모델(`UI_MODEL_NAME`). thinking 끄기. 도구가 아니다 |
-| `correct_walls_floor.py` | demote/promote → `floor_wall_validated.*` + `llm_review/corrections.json` |
+| `prepare_review_all.py` | original png 가 있는 층을 물리 CPU 코어 수만큼 동시에 타일 준비 |
+| `prepare_review.py` | 한 층. `floor_wall_original.png` → `llm_review/` 조각 (한 변 5000px 이하) + `tiles.json` |
+| `view_image_all.py` | tiles.json 이 있는 층을 판정. 진행 중 Vision 호출은 물리 CPU 코어 수. 끝날 때까지 대기 |
+| `view_image.py` | 한 층 타일 PNG를 Vision으로 보고 `llm_review/review.json` 작성. UI에서 고른 모델(`UI_MODEL_NAME`). thinking 끄기. 도구가 아니다 |
+| `correct_walls_all.py` | `review.json` 이 있는 층을 물리 CPU 코어 수만큼 동시에 보정하고 diff |
+| `correct_walls_floor.py` | 한 층 demote/promote → `floor_wall_validated.*` + `llm_review/corrections.json` |
 | `render_wall_diff.py` | original vs validated → `diff_original_vs_validated.png` (초록=promote, 파랑=demote) |
 | `lib_llm_correct.py` | 갭 승격·가구 강등·WALL DXF PNG 재렌더 |
 
@@ -93,14 +94,14 @@ drawing_list.json 에서 건물(source_filename) · 층(floor) 결정
   ↓
 지정한 층, 또는 층을 말하지 않았으면 walldetector 산출이 있는 모든 층 (floor_wall_original.dxf)
   floors/<F>/floor_wall_original.{dxf,png}   ← 입력(불변)
-  ↓  확인 없이, 층마다 아래를 끝까지
-① prepare_review.py → llm_review/R*C*.png (5000×5000 이하) + tiles.json
-     이전 크롭 PNG와 review.json 은 지우고 다시 쓴다
+  ↓  확인 없이, 아래를 범위 전체에 한 번씩
+① prepare_review_all.py 한 번 → 각 층 llm_review/R*C*.png (5000×5000 이하) + tiles.json
+     이전 크롭 PNG와 review.json 은 지우고 다시 쓴다. 층 for 루프는 쓰지 않는다
   ↓
-② view_image.py 를 층당 1회. 도구 view_image 는 호출하지 않는다
-     스크립트가 tiles.json 의 PNG를 보고 review.json 을 쓴다
+② view_image_all.py 한 번. 도구 view_image 는 호출하지 않는다
+     한 층이 물리 CPU 코어 수만큼 타일을 보고 review.json 을 쓴 다음 다음 층으로 간다
      5000px 이하면 타일 한 장. 한 변이 5000px를 넘을 때만 나뉜 파일마다 스크립트 안에서 1회
-     채팅에 판정·공간 분석을 쓰지 않는다. 로그의 review.json 경로가 나온 뒤에 ③으로 간다
+     채팅에 판정·공간 분석을 쓰지 않는다. 스크립트가 끝난 뒤에 ③으로 간다
   ↓
 ③ correct_walls_floor.py
      - 기하: WALL 런 사이 진짜 갭 + 이중선 promote
@@ -115,7 +116,7 @@ drawing_list.json 에서 건물(source_filename) · 층(floor) 결정
    저장 레이어는 나눈다. 벽은 빨강 `WALL`. 여닫이·미닫이 문짝과 스윙은 연두 `DOOR`. 같은 개구에 나란히 겹친 창틀과 관찰창 유리는 청록 `WINDOW`. 기둥은 파랑 `COLUMN`. 닫힌 폴리선이 아니라 선 네 개로 그린 정사각 기둥도 `COLUMN`이다. 면적 계산은 `WALL`·`WINDOW`·`COLUMN`·`DOOR` 선을 경계로 읽는다. `_meta.json`의 `doors`·`windows`·`columns`에 범위가 있다.
    diff_original_vs_validated.png 저장 (있으면 덮어씀)
   ↓
-⑤ 남은 층이 있으면 바로 ①부터 반복. 전 층이 끝난 뒤에만 결과를 보고한다.
+⑤ ①②가 범위 전체를 끝낸 뒤에만 결과를 보고한다.
 ```
 
 ## Vision 판정 기준
@@ -293,7 +294,7 @@ $ARTIFACTS_DIR/<drawing_id>/floors/<F>/
 - [ ] 지정한 층, 또는 층 미지정 시 `floor_wall_original.dxf`가 있는 층을 이번 실행에서 처리했는가
 - [ ] 출력이 `floor_wall_validated.*` 인가 (original 덮어쓰기 금지)
 - [ ] 기존 validated·diff·llm_review 가 있어도 덮어썼는가
-- [ ] `view_image.py`를 층당 1회 실행해 `review.json`을 썼는가 (`view_image` 도구 호출 없음)
+- [ ] `prepare_review_all.py`와 `view_image_all.py`를 각 한 번 실행해 `review.json`을 썼는가 (`view_image` 도구 호출 없음, `nohup` 없음)
 - [ ] 층 사이에 사용자 컨펌을 기다리지 않았는가
 
 ## Related

@@ -18,12 +18,30 @@ import math
 import os
 import re
 import shutil
+import subprocess
 import sys
 import threading
 import traceback
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from io import BytesIO
 from pathlib import Path
+
+
+def physical_cpu_count() -> int:
+    """병렬 워커 기본값. 물리 CPU 코어 수."""
+    if sys.platform == "darwin":
+        try:
+            out = subprocess.check_output(
+                ["sysctl", "-n", "hw.physicalcpu"],
+                text=True,
+                timeout=2,
+            ).strip()
+            n = int(out)
+            if n >= 1:
+                return n
+        except (OSError, ValueError, subprocess.SubprocessError):
+            pass
+    return max(1, os.cpu_count() or 1)
 
 
 def _reexec_supported_python() -> None:
@@ -328,9 +346,15 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="llm_review 타일을 Vision으로 보고 review.json을 쓴다")
     parser.add_argument("--artifacts", type=Path, required=True)
     parser.add_argument("--floor", required=True)
-    parser.add_argument("--workers", type=int, default=4)
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=None,
+        help="동시에 Vision 호출할 타일 수. 생략하면 물리 CPU 코어 수",
+    )
     args = parser.parse_args()
-    if args.workers < 1:
+    workers = physical_cpu_count() if args.workers is None else args.workers
+    if workers < 1:
         raise SystemExit("--workers 는 1 이상이어야 합니다")
 
     review_dir = args.artifacts / "floors" / args.floor / "llm_review"
@@ -348,8 +372,8 @@ def main() -> int:
     promote: list[dict] = []
     failed: list[str] = []
     _configure_chat()
-    print(f"tiles={len(tiles)} workers={args.workers}", flush=True)
-    with ThreadPoolExecutor(max_workers=args.workers) as pool:
+    print(f"tiles={len(tiles)} workers={workers}", flush=True)
+    with ThreadPoolExecutor(max_workers=workers) as pool:
         futures = {
             pool.submit(_invoke_tile, tile, review_dir, prompt): tile["file"]
             for tile, prompt in jobs

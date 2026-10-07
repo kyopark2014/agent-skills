@@ -34,7 +34,7 @@ description: >-
 2. **입력 미리보기** — 검출 입력은 `$ARTIFACTS_DIR/<drawing_id>/floors/<F>/floor_original.png` 이다. 사용자에게 진행 여부를 묻지 않는다.
 3. **기존 산출** — `floors/<F>/floor_wall_original.*`가 **이미 있어도 묻지 않는다**. 바로 검출하고 **덮어쓴다**. 폴더를 통째로 지우지는 않는다.
 4. **범위** — 사용자가 층을 지정하면 그 층만 검출한다. 층을 말하지 않으면 `discovered_floors`를 순서대로 끝까지 검출한다. 파일럿 확인은 받지 않는다.
-5. **층별 1개씩, 확인 없이** — 한 bash에 `for FLOOR in …` 일괄·`detect_walls_all`로 전층 한 번에 돌리는 것을 기본 **금지**한다 (대용량에서 Timeout). 한 층이 끝나면 **사용자에게 묻지 말고** 바로 다음 층을 같은 방식으로 실행한다. 사용자가 일괄을 명시할 때만 `detect_walls_all` 허용.
+5. **여러 층은 한 번에** — 층이 둘 이상이면 `detect_walls_all.py` 한 번. 물리 CPU 코어 수만큼 층을 동시에 검출한다. 한 층이면 `detect_walls_floor.py`. `for FLOOR in …` 는 쓰지 않는다. 층 사이에 사용자 확인은 없다.
 6. **벽은 빨간색** — 출력 DXF의 `WALL` 레이어(ACI 1). 베이스 기하는 `BASE`(회색).
 7. **산출 경로** — `$ARTIFACTS_DIR/<drawing_id>/floors/<F>/floor_wall_original.*` (프로젝트 조건과 샘플 조건 포함). 같은 폴더의 `floor_wall_common.png`는 `common`만 적용한 검수용이다. 레거시 타일은 `walls/` (선택).
 8. **도면별 벽 치수** — 벽 두께·길이는 도면마다 다르다. `wall_conditions.json` 의 `common` 은 공통값이고, 그 도면에서 빠진 벽은 샘플 2장을 읽어 모은다. `floors/<F>/wall_samples/wall_conditions.json` 이 없으면 검출 전에 만들고, 이미 있으면 묻지 않고 그 파일을 쓴다. 사용자가 다시 뽑으라고 할 때만 샘플부터 다시 한다.
@@ -52,7 +52,7 @@ description: >-
 | `$WORKING_DIR/skills/drawing-walldetector/scripts/sample_wall_conditions.py` | 가운데 샘플 2장 → 도면별 벽 두께·길이 조건 |
 | `$WORKING_DIR/skills/drawing-walldetector/scripts/detect_walls_floor.py` | **한 층** `floor_wall_original` (기본). `wall_samples/wall_conditions.json` 이 있으면 붙인다 |
 | `$WORKING_DIR/skills/drawing-walldetector/scripts/detect_walls_tile.py` | 단일 DXF (레거시·선택) |
-| `$WORKING_DIR/skills/drawing-walldetector/scripts/detect_walls_all.py` | 다층 일괄 (사용자 명시 시에만) |
+| `$WORKING_DIR/skills/drawing-walldetector/scripts/detect_walls_all.py` | 층이 둘 이상. 물리 CPU 코어 수만큼 동시 검출 |
 | `$WORKING_DIR/skills/drawing-walldetector/scripts/lib_walls.py` | 평행 이중선 기반 벽 분류·DXF/PNG |
 
 **IMPORTANT**: `skills/...` 또는 `scripts/...` 상대경로를 쓰지 마세요. cwd가 `artifacts/`라 실패합니다.  
@@ -62,8 +62,11 @@ description: >-
 SCRIPTS="$WORKING_DIR/skills/drawing-walldetector/scripts"
 ART="$ARTIFACTS_DIR/<drawing_id>"
 
-# 한 층. 끝나면 묻지 않고 다음 층도 같은 호출
+# 한 층
 python3 "$SCRIPTS/detect_walls_floor.py" --artifacts "$ART" --floor 12F
+
+# 여러 층. workers 생략 시 물리 CPU 코어 수
+python3 "$SCRIPTS/detect_walls_all.py" --artifacts "$ART"
 ```
 
 로컬 개발(비 Runtime) 예:
@@ -89,7 +92,8 @@ drawing-devider 산출물
      sample_wall_conditions.py --vision
      → floors/<F>/wall_samples/wall_conditions.json
   ↓
-② detect_walls_floor.py --floor <각 층>   ← 층당 bash 1회, 확인 없이 전 층
+② 층이 하나면 detect_walls_floor.py
+   층이 둘 이상이면 detect_walls_all.py  ← 물리 CPU 코어 수만큼 동시
      → floors/<F>/floor_wall_original.*   ← common + project + 샘플 조건
      → floors/<F>/floor_wall_common.png   ← common 조건만, project·샘플 미적용
   ↓
@@ -180,7 +184,7 @@ $ARTIFACTS_DIR/<drawing_id>/
 - [ ] `floor_wall_original.*`가 이미 있어도 묻지 않고 덮어썼는가
 - [ ] 스크립트를 `$WORKING_DIR/skills/drawing-walldetector/scripts/...`로 호출하는가
 - [ ] 다층이면 확인 없이 전 층을 이어서 검출했는가
-- [ ] 검출을 **층당 bash 1회**로만 돌리는가 (`for` 일괄·`detect_walls_all` 기본 금지, 층 사이 사용자 확인 없음)
+- [ ] 여러 층은 `detect_walls_all.py` 한 번인가 (`for` 루프 없음)
 
 ---
 
@@ -192,7 +196,7 @@ $ARTIFACTS_DIR/<drawing_id>/
 | 요청 층이 `1F`인데 목록은 `sheet_XX` | `--floor 1F`로 끝내지 않는다. `sheet_XX`를 추출한 뒤 그 폴더로 벽 검출을 이어 간다. "여러 층 표기가 혼재해 영역을 확정하지 못했다"고 보고하지 않는다. 층 이름만 미확정이다 |
 | `skills/...` / `cde-pilot/...` 경로 실패 | `$WORKING_DIR/skills/drawing-walldetector/scripts/...` 사용 |
 | `floor_wall_original.*` 이미 존재 | 묻지 않고 덮어쓴다. 폴더는 삭제하지 않는다 |
-| Timeout / 전층 일괄 실패 | `detect_walls_all` 금지 → `detect_walls_floor --floor <F>` 층당 1회, 확인 없이 다음 층 |
+| Timeout / 전층 일괄 실패 | `detect_walls_all` 을 유지한다. 동시에 너무 많으면 `--workers` 를 줄인다 |
 | 과검출·미검출 | 샘플 조건이 오래됐으면 `wall_samples/` 를 지우고 다시 모은다. 그래도 남으면 `min_len_mm` / `thick_min_mm` / `thick_max_mm` 조정 (reference.md) |
 | 샘플에서 벽을 못 찾음 | `observations.json` 의 `walls` 를 `[]` 로 두고 조건 파일을 만든다. 검출은 common 만 쓴다 |
 

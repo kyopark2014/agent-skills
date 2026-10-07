@@ -19,12 +19,16 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import gc
 import json
 import math
+import multiprocessing
 import os
 import re
+import subprocess
 import sys
 from collections import Counter
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
@@ -47,6 +51,26 @@ from lib_render import render_floor_original_preview  # noqa: E402
 from lib_sheet import discover_layout, normalize_floor_token  # noqa: E402
 from lib_split import find_primary_floor_bbox, find_primary_line_bbox  # noqa: E402
 from lib_structure import collect_structural_sheet  # noqa: E402
+
+
+_EXTRACT_DOC: Drawing | None = None
+
+
+def physical_cpu_count() -> int:
+    """병렬 워커 기본값. 물리 CPU 코어 수."""
+    if sys.platform == "darwin":
+        try:
+            out = subprocess.check_output(
+                ["sysctl", "-n", "hw.physicalcpu"],
+                text=True,
+                timeout=2,
+            ).strip()
+            n = int(out)
+            if n >= 1:
+                return n
+        except (OSError, ValueError, subprocess.SubprocessError):
+            pass
+    return max(1, os.cpu_count() or 1)
 
 
 def resolve_artifacts_dir() -> Path:
@@ -1101,12 +1125,103 @@ def default_dxf_path() -> Path:
     )
 
 
+def parse_floor_spec(raw: str) -> list[str] | None:
+    """쉼표로 고른 층. None 이면 발견된 층 전부."""
+    parts = [part.strip() for part in raw.split(",") if part.strip()]
+    if not parts:
+        raise SystemExit("층이 비어 있습니다")
+    if len(parts) == 1 and parts[0].lower() == "all":
+        return None
+    return [floor_token(part) for part in parts]
+
+
+def _init_extract_worker(dxf_path: str) -> None:
+    global _EXTRACT_DOC
+    _EXTRACT_DOC = read_dxf(Path(dxf_path))
+
+
+def _execute_extract_job(doc: Drawing, job: dict) -> dict:
+    floor = job["floor"]
+    variant = job["variant"]
+    try:
+        out_dir = Path(job["out_dir"])
+        if job["method"] == "sheet":
+            return extract_sheet_floor(
+                doc,
+                floor,
+                out_dir,
+                job["sheet"],
+                variant=variant,
+                drawing_id=job["drawing_id"],
+                skip_furniture=job["skip_furniture"],
+                do_dxf=job["do_dxf"],
+                do_json=job["do_json"],
+                do_png=job["do_png"],
+                include_text=job["include_text"],
+                origin_shift_mode=job["origin_shift"],
+            )
+        return extract_floor(
+            doc,
+            floor,
+            out_dir,
+            variant=variant,
+            drawing_id=job["drawing_id"],
+            do_dxf=job["do_dxf"],
+            do_json=job["do_json"],
+            do_png=job["do_png"],
+            include_text=job["include_text"],
+            origin_shift_mode=job["origin_shift"],
+            **job["clean_kwargs"],
+        )
+    except Exception as exc:  # noqa: BLE001
+        print(f"[error] {floor}/{variant}: {exc}", file=sys.stderr)
+        return {"floor": floor, "variant": variant, "error": str(exc)}
+
+
+def _run_extract_job(job: dict) -> dict:
+    if _EXTRACT_DOC is None:
+        raise RuntimeError("추출 워커가 DXF를 읽지 못했습니다")
+    return _execute_extract_job(_EXTRACT_DOC, job)
+
+
+def _run_extract_jobs(doc: Drawing | None, dxf_path: Path, jobs: list[dict], workers: int) -> list[dict]:
+    if len(jobs) <= 1 or workers <= 1:
+        if doc is None:
+            raise RuntimeError("단일 추출에는 이미 읽은 DXF가 필요합니다")
+        return [_execute_extract_job(doc, job) for job in jobs]
+    worker_n = max(1, min(workers, len(jobs)))
+    print(f"floors={len(jobs)} workers={worker_n}", flush=True)
+    ctx = multiprocessing.get_context("spawn")
+    with ProcessPoolExecutor(
+        max_workers=worker_n,
+        mp_context=ctx,
+        initializer=_init_extract_worker,
+        initargs=(str(dxf_path),),
+    ) as pool:
+        futures = [pool.submit(_run_extract_job, job) for job in jobs]
+        done: dict[tuple[str, str], dict] = {}
+        for future in as_completed(futures):
+            item = future.result()
+            done[(item.get("floor", ""), item.get("variant", ""))] = item
+    return [done[(job["floor"], job["variant"])] for job in jobs]
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="원본 DXF → floors/<F>/floor_original.dxf (+ .png)"
     )
     parser.add_argument("--dxf", type=Path, default=None, help="입력 DXF (기본: ARTIFACTS_DIR/*.dxf)")
-    parser.add_argument("--floor", default="5F", help="층 (예: 5F, B1F) 또는 all")
+    parser.add_argument(
+        "--floor",
+        default="5F",
+        help="층 (예: 5F, B1F), 쉼표로 여러 층, 또는 all. 여러 층은 물리 CPU 코어 수만큼 동시에 추출",
+    )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=None,
+        help="동시에 추출할 층 수. 생략하면 물리 CPU 코어 수",
+    )
     parser.add_argument(
         "--layout",
         choices=("auto", "block", "sheet"),
@@ -1164,7 +1279,9 @@ def main() -> int:
     dxf_path = args.dxf or default_dxf_path()
     out_dir = args.out or resolve_artifacts_dir()
 
-    floor_arg = floor_token(args.floor)
+    if args.workers is not None and args.workers < 1:
+        raise SystemExit("--workers 는 1 이상이어야 합니다")
+    floor_spec = parse_floor_spec(args.floor)
     print(f"loading {dxf_path} ...", flush=True)
     doc = read_dxf(dxf_path)
     print(f"loaded version={doc.dxfversion}", flush=True)
@@ -1190,71 +1307,60 @@ def main() -> int:
     if not floors:
         print("[error] 층 블록과 도곽·층 제목을 모두 찾지 못했습니다.", file=sys.stderr)
         return 2
-    if layout.method == "sheet" and floor_arg != "ALL" and floor_arg not in sheets:
-        print(
-            f"[error] 요청한 {floor_arg} 이름의 도곽은 없습니다. "
-            f"도곽은 이미 나뉘어 있습니다. 미확정 도곽은 sheet_XX 이며 영역을 다시 찾지 않습니다. "
-            f"발견된 이름 그대로 한 장씩 추출하세요: {floors}",
-            file=sys.stderr,
-        )
-        return 2
+    targets = floors if floor_spec is None else floor_spec
+    if layout.method == "sheet":
+        missing = [floor for floor in targets if floor not in sheets]
+        if missing:
+            print(
+                f"[error] 요청한 {', '.join(missing)} 이름의 도곽은 없습니다. "
+                f"도곽은 이미 나뉘어 있습니다. 미확정 도곽은 sheet_XX 이며 영역을 다시 찾지 않습니다. "
+                f"발견된 이름 그대로 추출하세요: {floors}",
+                file=sys.stderr,
+            )
+            return 2
 
     out_dir.mkdir(parents=True, exist_ok=True)
-    targets = floors if floor_arg == "ALL" else [floor_arg]
-    if layout.method == "block" and floor_arg != "ALL" and floor_arg not in floors:
-        print(f"[warn] {floor_arg}가 평면 블록 목록에 없음. INSERT 패턴으로 재시도.", file=sys.stderr)
+    if layout.method == "block" and floor_spec is not None:
+        unknown = [floor for floor in targets if floor not in floors]
+        if unknown:
+            print(
+                f"[warn] {', '.join(unknown)}가 평면 블록 목록에 없음. INSERT 패턴으로 재시도.",
+                file=sys.stderr,
+            )
 
     if args.variant == "clean":
         print("[warn] --variant clean 은 레거시입니다. original 사용을 권장합니다.", file=sys.stderr)
 
-    variants = [args.variant]
     clean_kwargs: dict = {}
     if args.keep_furniture:
         clean_kwargs["skip_furniture"] = False
     if args.include_extra:
         clean_kwargs["include_extra"] = True
-
-    summary = []
-    for fl in targets:
-        for var in variants:
-            try:
-                kw = dict(clean_kwargs) if var == "clean" else {}
-                if layout.method == "sheet":
-                    summary.append(
-                        extract_sheet_floor(
-                            doc,
-                            fl,
-                            out_dir,
-                            sheets[fl],
-                            variant=var,
-                            drawing_id=args.drawing_id,
-                            skip_furniture=bool(kw.get("skip_furniture", var == "clean")),
-                            do_dxf=not args.no_dxf,
-                            do_json=args.geom_json,
-                            do_png=not args.no_png,
-                            include_text=not args.no_text,
-                            origin_shift_mode=args.origin_shift,
-                        )
-                    )
-                else:
-                    summary.append(
-                        extract_floor(
-                            doc,
-                            fl,
-                            out_dir,
-                            variant=var,
-                            drawing_id=args.drawing_id,
-                            do_dxf=not args.no_dxf,
-                            do_json=args.geom_json,
-                            do_png=not args.no_png,
-                            include_text=not args.no_text,
-                            origin_shift_mode=args.origin_shift,
-                            **kw,
-                        )
-                    )
-            except Exception as exc:  # noqa: BLE001
-                print(f"[error] {fl}/{var}: {exc}", file=sys.stderr)
-                summary.append({"floor": fl, "variant": var, "error": str(exc)})
+    variant = args.variant
+    kw = dict(clean_kwargs) if variant == "clean" else {}
+    jobs = [
+        {
+            "floor": floor,
+            "variant": variant,
+            "method": layout.method,
+            "sheet": sheets.get(floor),
+            "out_dir": str(out_dir),
+            "drawing_id": args.drawing_id,
+            "skip_furniture": bool(kw.get("skip_furniture", variant == "clean")),
+            "clean_kwargs": kw,
+            "do_dxf": not args.no_dxf,
+            "do_json": args.geom_json,
+            "do_png": not args.no_png,
+            "include_text": not args.no_text,
+            "origin_shift": args.origin_shift,
+        }
+        for floor in targets
+    ]
+    workers = physical_cpu_count() if args.workers is None else args.workers
+    if len(jobs) > 1 and workers > 1:
+        doc = None
+        gc.collect()
+    summary = _run_extract_jobs(doc, dxf_path, jobs, workers)
 
     meta_path = resolve_summary_path(out_dir, args.drawing_id)
     meta_path.parent.mkdir(parents=True, exist_ok=True)

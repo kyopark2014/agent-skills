@@ -72,7 +72,7 @@ tail -n 20 "$LOG"
 | `--output` | 선택. 빨간 표시 PNG 경로. 생략 시 원본과 같은 폴더의 `{stem}.{주제}.png` |
 | `--model` | 선택. **기본 생략.** UI 선택 모델(`UI_MODEL_NAME`) |
 | `--max-tiles` | 선택. 조각 수에 영향 없음. 나누기는 아래 5000px 규칙을 따른다. 여백 조각은 건너뜀 |
-| `--workers` | 선택. 동시에 Vision 호출할 조각 수. 기본 4 |
+| `--workers` | 선택. 동시에 Vision 호출할 조각 수. 생략하면 물리 CPU 코어 수 |
 | `--color` | 선택. 표시 색. 기본 빨강. `연두`, `lightgreen`, `#RRGGBB` |
 
 ## Workflow
@@ -87,7 +87,7 @@ extract_objects.py
   2. 겹침을 넣은 조각의 가로 또는 세로가 5000px를 넘으면 그 방향으로 더 나눈다.
      5000×5000 이하면 그대로 둔다. 200만 픽셀로 축소하지 않는다.
      거의 흰 여백 조각은 건너뜀
-  3. 잉크가 있는 조각을 `--workers`(기본 4)개씩 동시에 base64 PNG + 주제 프롬프트로 get_chat().invoke
+  3. 잉크가 있는 조각을 `--workers`(생략 시 물리 CPU 코어 수)개씩 동시에 base64 PNG + 주제 프롬프트로 get_chat().invoke
      응답은 <result> JSON {objects:[{label, bbox}]}
   4. 조각 좌표를 원본 픽셀로 되돌리고, 조각 전체를 덮는 박스는 버림
   5. 겹치는 검출은 더 작은 박스를 남기고 합침

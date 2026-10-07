@@ -16,12 +16,30 @@ import math
 import os
 import re
 import shutil
+import subprocess
 import sys
 import threading
 import traceback
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from io import BytesIO
 from pathlib import Path
+
+
+def physical_cpu_count() -> int:
+    """병렬 워커 기본값. 물리 CPU 코어 수."""
+    if sys.platform == "darwin":
+        try:
+            out = subprocess.check_output(
+                ["sysctl", "-n", "hw.physicalcpu"],
+                text=True,
+                timeout=2,
+            ).strip()
+            n = int(out)
+            if n >= 1:
+                return n
+        except (OSError, ValueError, subprocess.SubprocessError):
+            pass
+    return max(1, os.cpu_count() or 1)
 
 
 def _reexec_supported_python() -> None:
@@ -492,7 +510,7 @@ def extract_objects(
     topic: str,
     *,
     max_tiles: int = 0,
-    workers: int = 4,
+    workers: int | None = None,
 ) -> tuple[list[dict], dict]:
     chat = _import_chat()
     prompt = build_prompt(topic)
@@ -511,6 +529,8 @@ def extract_objects(
         crop.save(buffer, format="PNG")
         jobs.append((index, len(tiles), tile, buffer.getvalue()))
 
+    if workers is None or workers < 1:
+        workers = physical_cpu_count()
     worker_n = max(1, min(workers, len(jobs) or 1))
     logger.info("parallel workers: %s jobs: %s", worker_n, len(jobs))
     found: list[dict] = []
@@ -563,7 +583,7 @@ def run(
     output: Path | None,
     model: str | None,
     max_tiles: int,
-    workers: int = 4,
+    workers: int | None = None,
     mark_color: str | None = None,
 ) -> dict:
     if not topic.strip():
@@ -629,8 +649,8 @@ def main() -> int:
     parser.add_argument(
         "--workers",
         type=int,
-        default=4,
-        help="동시에 분석할 조각 수 (기본 4). Vision 호출은 네트워크 대기라 병렬로 줄인다",
+        default=None,
+        help="동시에 분석할 조각 수. 생략하면 물리 CPU 코어 수",
     )
     parser.add_argument(
         "--color",
@@ -645,7 +665,7 @@ def main() -> int:
         args.output.expanduser().resolve() if args.output else None,
         args.model,
         max(0, args.max_tiles),
-        max(1, args.workers),
+        None if args.workers is None else max(1, args.workers),
         args.color,
     )
     print(f"model: {payload['model']}")

@@ -52,7 +52,7 @@ description: >-
    같은 실명이 여러 곳이면 스크립트가 좌표를 알리고 멈춘다. DXF를 복사하거나 글자를 고치지 말고, 고른 좌표를 `--x` `--y`로 다시 호출한다.
 5. **기존 산출 덮어쓰기** — `room_eval/` 이 이미 있어도 건너뛰거나 묻지 않는다. 같은 경로에 다시 써서 덮어쓴다.
    `room_eval_1`, `room_eval_2`처럼 번호를 붙인 폴더를 새로 만들지 않는다. `--out`으로 다른 경로를 지정하지 않는다.
-6. **스크립트 절대경로** — 이 SKILL.md 옆 `scripts/evaluate_room.py`.
+6. **스크립트 절대경로** — 한 층은 이 SKILL.md 옆 `scripts/evaluate_room.py`. 같은 실명을 여러 층에서 보면 `scripts/evaluate_floors.py` 한 번. 물리 CPU 코어 수만큼 층을 동시에 계산한다. `for` 루프로 층마다 `evaluate_room.py`를 호출하지 않는다.
 7. 응답은 **한국어**. 경로·JSON 키는 영문.
 
 ## Script Location
@@ -72,6 +72,17 @@ python3.13 "$SCRIPTS/evaluate_room.py" \
 ```
 
 `--door`를 생략하면 `close`다. 사용자가 그 실의 문을 열어서 계산하라고 하면 `--door open`을 붙인다. 열리는 문은 닫힌 벽 테두리에 닿는 여닫이뿐이다.
+
+같은 실명을 여러 층에서 볼 때는 층마다 호출하지 않는다. `--workers`를 생략하면 물리 CPU 코어 수다.
+
+```bash
+python3.13 "$SCRIPTS/evaluate_floors.py" \
+  --artifacts "$ART/sk_yongin_jiwon" \
+  --room "회의실#1" \
+  --door close
+```
+
+고른 층만이면 `--floors 1F,5F`. 한 층이면 `evaluate_room.py`.
 
 | 인자 | 의미 |
 | --- | --- |

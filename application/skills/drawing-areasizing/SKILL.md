@@ -50,9 +50,9 @@ get_skill_instructions(plugin_name="base", skill_name="drawing-totalroom")
 ## Critical Rules
 
 1. **기존 스킬만 실행** — 추출·벽·보정·실면적 코드를 새로 작성하지 않는다. ad-hoc DXF 파싱도 하지 않는다.
-2. **층당 bash 1회** — `extract_2d`, `detect_walls_floor`, `prepare_review`, `correct_walls_floor`, `render_wall_diff`, `detect_labels`는 호출 하나당 층 하나. `for FLOOR in …` 일괄, `--floor all`, `detect_walls_all` 은 쓰지 않는다.
+2. **층을 지정하지 않으면 발견 층 전체** — 한 층만 먼저 하고 멈추지 않는다. 추출은 `extract_2d.py --floor all`, 벽은 `detect_walls_all.py`, 타일 준비는 `prepare_review_all.py`, Vision 판정은 `view_image_all.py`, 보정은 `correct_walls_all.py`, 실면적은 `detect_labels_all.py` 를 범위에 대해 각 한 번 실행한다. 추출·벽·타일 준비·보정·실면적은 물리 CPU 코어 수만큼 층을 동시에 처리한다. Vision 판정은 진행 중 호출이 물리 CPU 코어 수다. 한 층이 그 수를 쓰고 다음 층으로 넘어간다. 층을 지정하면 `--floors` 로 그 층만 한다. `review.json` 이 생기기 전에 실면적으로 가지 않는다. `for`, `nohup`, `&`, `sleep`, `find /` 는 쓰지 않는다. 스킬과 산출 경로는 아래 `SKILLS` 와 `ARTIFACTS_DIR` 이다.
 3. **확인 없이 범위 끝까지** — 층 사이·단계 사이에 진행 여부를 묻지 않는다. 그 사이에 채팅 문장도 쓰지 않고, 도구 결과 뒤에 바로 다음 도구를 호출한다. 사용자에게 보이는 글은 전 층이 끝난 뒤 `area_sizing.md`와 요약 한 번뿐이다.
-4. **Vision은 생략하지 않는다** — `prepare_review.py` 다음에 `view_image.py`를 그 층에 1회 실행한다. `view_image` 도구는 없다. 판정은 채팅에 쓰지 않는다. 로그에 `review.json` 경로가 나온 뒤에 `correct_walls_floor.py`를 실행한다. prepare와 correct를 한 bash에 넣지 않는다. `floor_wall_original.png` 원본은 Vision에 넣지 않는다. `read_file`과 S3 업로드로 이미지를 보지 않는다.
+4. **Vision은 생략하지 않는다** — `prepare_review_all.py` 다음에 `view_image_all.py`를 포그라운드로 각 한 번 실행하고, 그 명령이 끝난 뒤에 `correct_walls_all.py`를 실행한다. `view_image` 도구는 없다. 판정은 채팅에 쓰지 않는다. prepare와 correct를 한 bash에 넣지 않는다. `floor_wall_original.png` 원본은 Vision에 넣지 않는다. `read_file`과 S3 업로드로 이미지를 보지 않는다.
 5. **기존 파일은 skip 하지 않는다** — `floor_original.*`, `floor_wall_original.*`, `floor_wall_validated.*`, `llm_review/`, `floor_label_detected.*`, `structure.*`, `area_sizing.md`가 이미 있어도 그 층·그 단계를 건너뛰거나 묻지 않는다. 같은 경로에 다시 써서 **덮어쓴다**. 도면 폴더를 통째로 지우지는 않는다. 원본 DXF와 각 단계의 읽기 전용 입력(직전 단계 산출)은 그 단계에서 수정하지 않는다.
 6. **실패 층** — 그 층은 실패한 단계에서 멈춘다. 나머지 층은 이어서 처리하고, 마지막 보고에 실패 층을 적는다.
 7. 응답은 **한국어**. 경로·JSON 키·층 이름은 산출 그대로 쓴다.
@@ -72,7 +72,8 @@ fi
 
 test -f "$SKILLS/drawing-devider/scripts/extract_2d.py"
 test -f "$SKILLS/drawing-walldetector/scripts/detect_walls_floor.py"
-test -f "$SKILLS/drawing-llmvalidator/scripts/prepare_review.py"
+test -f "$SKILLS/drawing-llmvalidator/scripts/prepare_review_all.py"
+test -f "$SKILLS/drawing-llmvalidator/scripts/view_image_all.py"
 test -f "$SKILLS/drawing-totalroom/scripts/detect_labels.py"
 test -d "$ARTIFACTS_DIR"
 ```
@@ -90,33 +91,36 @@ test -d "$ARTIFACTS_DIR"
 ## Workflow
 
 ```
-대상 도면 · 층 범위 결정
+대상 도면 결정
+  층을 지정하지 않음 → 발견된 층 전체
+  층을 지정함 → 그 층만
   ↓
-① drawing-devider     범위 안 전 층 추출 → analyze_drawing 1회
+① drawing-devider     그 범위 전체를 extract 한 번 → analyze_drawing 1회
   ↓                     (floor_original.* 가 있어도 skip 하지 않고 덮어쓰기)
-② 층마다, 확인 없이, 채팅 문장 없이:
-     drawing-walldetector
-     drawing-llmvalidator    ← Vision review.json 필수
-     drawing-totalroom
+② drawing-walldetector 그 범위 전체를 detect_walls_all 한 번
+  ↓
+③ drawing-llmvalidator prepare_review_all 한 번 → view_image_all 한 번 → correct_walls_all 한 번
+  ↓
+④ drawing-totalroom   그 범위 전체를 detect_labels_all 한 번
   ↓                     (각 산출이 있어도 skip 하지 않고 덮어쓰기)
-③ $ARTIFACTS_DIR/<drawing_id>/area_sizing.md  ← 여기서만 사용자에게 보고
+⑤ $ARTIFACTS_DIR/<drawing_id>/area_sizing.md  ← 여기서만 사용자에게 보고
 ```
 
 산출물이 이미 있어도 그 단계를 생략하지 않는다. 범위 안 전 층·전 단계를 다시 실행하고 같은 경로에 덮어쓴다.
 
-①을 범위 안 전 층에 대해 끝낸 다음 ②로 간다. ②는 **층 하나 안에서** 벽 검출 → LLM 검증 → 실 면적을 끝내고 다음 층으로 간다. Vision 조각이 여러 층에 쌓이지 않게 한다. 스크립트가 끝나면 채팅에 쓰지 않고 바로 다음 도구를 호출한다.
+층을 말하지 않으면 발견 층 전체가 한 작업이다. ①②③④는 그 범위를 스크립트 한 번씩으로 처리한다. Vision 판정은 `view_image_all.py` 안에서 한 층씩 물리 CPU 코어 수만큼 호출한다. 범위가 끝나기 전에 멈추거나 실면적으로 넘어가지 않는다. 스크립트가 끝나면 채팅에 쓰지 않고 바로 다음 도구를 호출한다.
 
 ### ① drawing-devider
 
 `get_skill_instructions(..., "drawing-devider")` 후 그 Workflow를 따른다.
 
 - 도곽 도면이면 먼저 `--list-floors`. 나온 이름만 `--floor`에 넣는다.
-- 층마다 bash 1회:
+- 범위가 여러 층이면 한 번. `--floor all` 또는 `--floor 1F,3F`. 한 층이면 `--floor <F>`.
 
 ```bash
 python3 "$SKILLS/drawing-devider/scripts/extract_2d.py" \
   --dxf "$ARTIFACTS_DIR/<input>.dxf" \
-  --floor <F> \
+  --floor all \
   --out "$ARTIFACTS_DIR" \
   --drawing-id <drawing_id>
 ```
@@ -125,62 +129,50 @@ python3 "$SKILLS/drawing-devider/scripts/extract_2d.py" \
 - `floor_original.*`가 이미 있어도 그 층 추출을 skip 하지 않는다. 같은 경로에 덮어쓴다.
 - 다음 단계 입력: `floors/<F>/floor_original.dxf` 와 `floor_original.png`.
 
-### ②-a drawing-walldetector
+### ② drawing-walldetector
 
-`get_skill_instructions(..., "drawing-walldetector")` 후 그 층의 벽만 검출한다.
+`get_skill_instructions(..., "drawing-walldetector")` 후 범위 전체의 벽을 한 번에 검출한다. 층이 하나면 `--floors <F>`.
 
 ```bash
-python3 "$SKILLS/drawing-walldetector/scripts/detect_walls_floor.py" \
-  --artifacts "$ARTIFACTS_DIR/<drawing_id>" \
-  --floor <F>
+python3 "$SKILLS/drawing-walldetector/scripts/detect_walls_all.py" \
+  --artifacts "$ARTIFACTS_DIR/<drawing_id>"
 ```
 
 `floor_wall_original.*`가 이미 있어도 skip 하지 않고 덮어쓴다. 다음 단계 입력: `floors/<F>/floor_wall_original.dxf` 와 `.png`. original은 이후 단계에서 읽기 전용이다.
 
-### ②-b drawing-llmvalidator
+### ③ drawing-llmvalidator
 
-`get_skill_instructions(..., "drawing-llmvalidator")` 의 판정 기준으로 그 층만 검증한다.
+`get_skill_instructions(..., "drawing-llmvalidator")` 의 판정 기준으로 범위를 검증한다. 타일 준비, Vision 판정, 보정을 각 한 번 실행한다. 층을 지정하지 않았으면 발견된 층 전체를 끝내고, 한 층에서 멈추지 않는다.
 
 ```bash
-python3 "$SKILLS/drawing-llmvalidator/scripts/prepare_review.py" \
-  --artifacts "$ARTIFACTS_DIR/<drawing_id>" \
-  --floor <F>
+python3 "$SKILLS/drawing-llmvalidator/scripts/prepare_review_all.py" \
+  --artifacts "$ARTIFACTS_DIR/<drawing_id>"
 ```
 
-`floor_wall_validated.*`와 `llm_review/`가 이미 있어도 skip 하지 않는다. `view_image` 도구는 호출하지 않는다. `view_image.py`가 타일을 보고 `llm_review/review.json`을 쓴다. 판정은 채팅에 쓰지 않는다. 기준은 그 스킬의 Vision 판정(문·기둥·창·복도·계단·엘리베이터)을 따른다.
+`floor_wall_validated.*`와 `llm_review/`가 이미 있어도 skip 하지 않는다. `view_image` 도구는 호출하지 않는다. `view_image_all.py`가 타일을 보고 `llm_review/review.json`을 쓴다. 진행 중 Vision 호출은 물리 CPU 코어 수다. 판정은 채팅에 쓰지 않는다. 기준은 그 스킬의 Vision 판정(문·기둥·창·복도·계단·엘리베이터)을 따른다. `nohup`, `&`, `sleep`, `for` 는 쓰지 않고, 명령이 끝날 때까지 기다린다.
 
 ```bash
-if command -v python3.13 >/dev/null 2>&1; then PY=python3.13; else PY=python3; fi
-LOG="$ARTIFACTS_DIR/<drawing_id>/floors/<F>/llm_review/view_image.log"
-nohup "$PY" "$SKILLS/drawing-llmvalidator/scripts/view_image.py" \
-  --artifacts "$ARTIFACTS_DIR/<drawing_id>" \
-  --floor <F> > "$LOG" 2>&1 &
-echo "started $!"
-tail -n 20 "$LOG"
+python3 "$SKILLS/drawing-llmvalidator/scripts/view_image_all.py" \
+  --artifacts "$ARTIFACTS_DIR/<drawing_id>"
 ```
 
-로그에 `review.json` 경로가 나온 뒤에 correct를 실행한다.
+`view_image_all.py` 가 끝난 뒤에 보정을 한 번 실행한다. `for` 로 층마다 보정하지 않는다.
 
 ```bash
-python3 "$SKILLS/drawing-llmvalidator/scripts/correct_walls_floor.py" \
-  --artifacts "$ARTIFACTS_DIR/<drawing_id>" \
-  --floor <F>
-
-python3 "$SKILLS/drawing-llmvalidator/scripts/render_wall_diff.py" \
-  --artifacts "$ARTIFACTS_DIR/<drawing_id>" \
-  --floor <F>
+python3 "$SKILLS/drawing-llmvalidator/scripts/correct_walls_all.py" \
+  --artifacts "$ARTIFACTS_DIR/<drawing_id>"
 ```
 
 다음 단계 입력: `floor_wall_validated.dxf`, `floor_wall_validated_meta.json`.
 
-### ②-c drawing-totalroom
+### ④ drawing-totalroom
 
-`get_skill_instructions(..., "drawing-totalroom")` 후 그 층의 라벨 실을 계산한다. 인터프리터는 그 스킬과 같이 `python3.13`이다.
+`get_skill_instructions(..., "drawing-totalroom")` 후 범위 안 층의 라벨 실을 한 번에 계산한다. 인터프리터는 `python3.13`이다. 층이 하나면 그 층 DXF를 `detect_labels.py`에 넘긴다.
 
 ```bash
-python3.13 "$SKILLS/drawing-totalroom/scripts/detect_labels.py" \
-  --dxf "$ARTIFACTS_DIR/<drawing_id>/floors/<F>/floor_wall_validated.dxf" \
-  --meta "$ARTIFACTS_DIR/<drawing_id>/floors/<F>/floor_wall_validated_meta.json" \
+python3.13 "$SKILLS/drawing-totalroom/scripts/detect_labels_all.py" \
+  --artifacts "$ARTIFACTS_DIR/<drawing_id>" \
+  --floors <F,F> \
   --door close
 ```
 
@@ -188,7 +180,7 @@ python3.13 "$SKILLS/drawing-totalroom/scripts/detect_labels.py" \
 
 `floor_label_detected.*`가 이미 있어도 skip 하지 않고 같은 폴더에 덮어쓴다. 산출: `floor_label_detected.dxf`, `.png`, `.json`.
 
-### ③ 보고
+### ⑤ 보고
 
 `$ARTIFACTS_DIR/<drawing_id>/area_sizing.md`를 쓰고 사용자에게 경로와 요약을 전달한다.
 
@@ -228,7 +220,7 @@ python3.13 "$SKILLS/drawing-totalroom/scripts/detect_labels.py" \
 
 - [ ] 네 단계를 devider → walldetector → llmvalidator → totalroom 순으로 실행했는가
 - [ ] 각 단계 전에 그 스킬 지침을 로드하고, 스크립트는 그 스킬 `scripts/`만 호출했는가
-- [ ] 층당 bash 1회인가
+- [ ] 층을 지정하지 않았으면 발견 층 전체를 처리했는가. 추출·벽·타일 준비·Vision 판정·보정·실면적은 각 한 번인가
 - [ ] LLM 단계에서 `review.json`을 Vision으로 쓴 뒤에 correct를 실행했는가
 - [ ] 지정 층만, 또는 미지정이면 발견 층 전체를 처리했는가
 - [ ] 기존 산출이 있어도 단계를 skip 하지 않고 같은 경로에 덮어썼는가
@@ -243,7 +235,7 @@ python3.13 "$SKILLS/drawing-totalroom/scripts/detect_labels.py" \
 | `floor_original.dxf` 없음 | ①을 그 층에 대해 다시 실행한 뒤 ②로 간다 |
 | `floor_wall_original.dxf` 없음 | walldetector를 그 층에 대해 실행한 뒤 검증으로 간다 |
 | `floor_wall_validated.dxf` 없음 | totalroom으로 가지 않는다. llmvalidator를 끝낸 뒤 진행한다 |
-| `TimeoutExpired` | 그 층의 해당 스크립트만 다시 실행한다. 여러 층을 한 명령에 묶지 않는다 |
+| `TimeoutExpired` | 그 단계의 범위 전체 명령을 다시 실행한다. Vision 판정은 `view_image_all.py` 한 번을 다시 실행한다 |
 | `sheet_XX`만 발견됨 | `1F`로 바꾸지 않는다. 발견된 이름으로 네 단계를 진행한다 |
 | 자식 스킬 명령이 이 문서와 다름 | 자식 `SKILL.md`를 따른다 |
 

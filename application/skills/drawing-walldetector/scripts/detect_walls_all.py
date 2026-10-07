@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""artifacts 아래 층들에 대해 벽 검출 (사용자 일괄 명시 시에만).
+"""artifacts 아래 층들에 대해 벽 검출.
+
+층마다 detect_walls_floor.py 를 띄운다. 동시에 도는 층 수는 물리 CPU 코어 수다.
+--workers 로 바꿀 수 있다. 층 폴더 산출은 서로 겹치지 않는다.
 
 Usage:
   python detect_walls_all.py --artifacts $ARTIFACTS_DIR/<drawing_id>
@@ -10,11 +13,32 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import sys
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 _SCRIPTS = Path(__file__).resolve().parent
+_PRINT = threading.Lock()
+
+
+def physical_cpu_count() -> int:
+    """병렬 워커 기본값. 물리 CPU 코어 수."""
+    if sys.platform == "darwin":
+        try:
+            out = subprocess.check_output(
+                ["sysctl", "-n", "hw.physicalcpu"],
+                text=True,
+                timeout=2,
+            ).strip()
+            n = int(out)
+            if n >= 1:
+                return n
+        except (OSError, ValueError, subprocess.SubprocessError):
+            pass
+    return max(1, os.cpu_count() or 1)
 
 
 def list_floors(artifacts: Path) -> list[str]:
@@ -25,10 +49,78 @@ def list_floors(artifacts: Path) -> list[str]:
     for p in floors_dir.iterdir():
         if p.is_dir() and (p / "floor_original.dxf").is_file():
             out.append(p.name)
+
     def key(f: str) -> int:
         n = f[:-1] if f.endswith("F") and f[:-1].isdigit() else "0"
         return int(n) if n.isdigit() else 0
+
     return sorted(out, key=key)
+
+
+def _floor_cmd(args: argparse.Namespace, floor: str) -> list[str]:
+    cmd = [
+        sys.executable,
+        str(_SCRIPTS / "detect_walls_floor.py"),
+        "--artifacts",
+        str(args.artifacts),
+        "--floor",
+        floor,
+        "--dpi",
+        str(args.dpi),
+        "--px-width",
+        str(args.px_width),
+    ]
+    if args.project:
+        cmd.extend(["--project", args.project])
+    if args.min_len_mm is not None:
+        cmd.extend(["--min-len-mm", str(args.min_len_mm)])
+    if args.thick_min_mm is not None:
+        cmd.extend(["--thick-min-mm", str(args.thick_min_mm)])
+    if args.thick_max_mm is not None:
+        cmd.extend(["--thick-max-mm", str(args.thick_max_mm)])
+    if args.no_png:
+        cmd.append("--no-png")
+    if args.with_tiles:
+        cmd.append("--with-tiles")
+    elif args.overview_only:
+        cmd.append("--overview-only")
+    return cmd
+
+
+def _read_floor_summary(artifacts: Path, floor: str) -> dict | None:
+    floor_dir = artifacts / "floors" / floor
+    idx = floor_dir / "walls" / "walls_index.json"
+    if not idx.is_file():
+        idx = floor_dir / "floor_wall_index.json"
+    if not idx.is_file():
+        return None
+    data = json.loads(idx.read_text(encoding="utf-8"))
+    fov = data.get("floor_wall_original") or data.get("floor_walls_overview") or {}
+    return {
+        "drawing_id": data.get("drawing_id"),
+        "entry": {
+            "n_tiles": data.get("n_tiles"),
+            "walls_index": str(idx),
+            "floor_wall_original_dxf": fov.get("dxf"),
+            "floor_wall_original_png": fov.get("png"),
+        },
+    }
+
+
+def _run_floor(args: argparse.Namespace, floor: str) -> tuple[str, int]:
+    with _PRINT:
+        print(f"\n######## WALL FLOOR {floor} ########", flush=True)
+    proc = subprocess.Popen(
+        _floor_cmd(args, floor),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    assert proc.stdout is not None
+    for line in proc.stdout:
+        with _PRINT:
+            print(f"[{floor}] {line}", end="", flush=True)
+    return floor, proc.wait()
 
 
 def main() -> int:
@@ -58,6 +150,12 @@ def main() -> int:
     p.add_argument("--overview-only", action="store_true", help="(레거시) 층 전체만 — 기본과 동일")
     p.add_argument("--dpi", type=int, default=200)
     p.add_argument("--px-width", type=int, default=2400)
+    p.add_argument(
+        "--workers",
+        type=int,
+        default=None,
+        help="동시에 검출할 층 수. 생략하면 물리 CPU 코어 수",
+    )
     args = p.parse_args()
 
     if args.floors:
@@ -68,59 +166,39 @@ def main() -> int:
     floors = [f for f in floors if f not in skip]
     if not floors:
         raise SystemExit("처리할 층 없음")
+    if args.workers is not None and args.workers < 1:
+        raise SystemExit("--workers 는 1 이상이어야 합니다")
 
-    floor_script = _SCRIPTS / "detect_walls_floor.py"
-    summary: dict = {"drawing_id": None, "floors": {}, "status": "completed"}
+    workers = physical_cpu_count() if args.workers is None else args.workers
+    worker_n = max(1, min(workers, len(floors)))
+    print(f"floors={len(floors)} workers={worker_n}", flush=True)
+
+    codes: dict[str, int] = {}
+    with ThreadPoolExecutor(max_workers=worker_n) as pool:
+        futures = [pool.submit(_run_floor, args, fl) for fl in floors]
+        for future in as_completed(futures):
+            floor, code = future.result()
+            codes[floor] = code
+
+    summary: dict = {"drawing_id": None, "floors": {}, "status": "completed", "workers": worker_n}
+    failed = [fl for fl in floors if codes.get(fl, 1) != 0]
+    if failed:
+        summary["status"] = "failed"
+        summary["failed"] = failed
     for fl in floors:
-        print(f"\n######## WALL FLOOR {fl} ########", flush=True)
-        cmd = [
-            sys.executable,
-            str(floor_script),
-            "--artifacts",
-            str(args.artifacts),
-            "--floor",
-            fl,
-            "--dpi",
-            str(args.dpi),
-            "--px-width",
-            str(args.px_width),
-        ]
-        if args.project:
-            cmd.extend(["--project", args.project])
-        if args.min_len_mm is not None:
-            cmd.extend(["--min-len-mm", str(args.min_len_mm)])
-        if args.thick_min_mm is not None:
-            cmd.extend(["--thick-min-mm", str(args.thick_min_mm)])
-        if args.thick_max_mm is not None:
-            cmd.extend(["--thick-max-mm", str(args.thick_max_mm)])
-        if args.no_png:
-            cmd.append("--no-png")
-        if args.with_tiles:
-            cmd.append("--with-tiles")
-        elif args.overview_only:
-            cmd.append("--overview-only")
-        r = subprocess.run(cmd, check=False)
-        if r.returncode != 0:
-            raise SystemExit(f"실패: {fl} exit={r.returncode}")
-        floor_dir = args.artifacts / "floors" / fl
-        idx = floor_dir / "walls" / "walls_index.json"
-        if not idx.is_file():
-            idx = floor_dir / "floor_wall_index.json"
-        if idx.is_file():
-            data = json.loads(idx.read_text(encoding="utf-8"))
-            summary["drawing_id"] = data.get("drawing_id") or summary["drawing_id"]
-            fov = data.get("floor_wall_original") or data.get("floor_walls_overview") or {}
-            summary["floors"][fl] = {
-                "n_tiles": data.get("n_tiles"),
-                "walls_index": str(idx),
-                "floor_wall_original_dxf": fov.get("dxf"),
-                "floor_wall_original_png": fov.get("png"),
-            }
+        info = _read_floor_summary(args.artifacts, fl)
+        if not info:
+            continue
+        if info.get("drawing_id"):
+            summary["drawing_id"] = info["drawing_id"]
+        summary["floors"][fl] = info["entry"]
 
     out = args.artifacts / "walls_all_index.json"
     out.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"\n→ {out}")
     print("floors:", ", ".join(f"{k}({v['n_tiles']})" for k, v in summary["floors"].items()))
+    if failed:
+        raise SystemExit("실패: " + ", ".join(f"{fl} exit={codes[fl]}" for fl in failed))
     return 0
 
 

@@ -31,7 +31,7 @@ if command -v python3.13 >/dev/null 2>&1; then PY=python3.13; else PY=python3; f
 
 이미 `wall_samples/wall_conditions.json` 이 있으면 이 단계를 건너뛴다.
 
-## 2) 전 층 (확인 없음, 층당 bash 1회)
+## 2) 한 층
 
 ```bash
 python3 "$SCRIPTS/detect_walls_floor.py" \
@@ -41,14 +41,10 @@ python3 "$SCRIPTS/detect_walls_floor.py" \
 
 미리보기: `$ART/floors/12F/floor_wall_original.png` (이미 있으면 덮어씀)
 
-## 3) 다음 층도 바로 (층당 bash 1회)
+## 3) 여러 층은 한 번
 
 ```bash
-# ❌ 금지: for FLOOR in 5F 6F …; do detect_walls_floor …; done
-# ❌ 기본 금지: detect_walls_all (사용자가 일괄을 명시한 경우만)
-
-python3 "$SCRIPTS/detect_walls_floor.py" --artifacts "$ART" --floor 6F
-# 묻지 않고 7F도 별도 bash로 바로 실행
+python3 "$SCRIPTS/detect_walls_all.py" --artifacts "$ART"
 ```
 
 ## 4) (선택) 레거시 타일 — parts 가 있고 사용자가 명시한 경우만
@@ -66,7 +62,7 @@ python3 "$SCRIPTS/detect_walls_tile.py" \
   --floor 12F
 ```
 
-## 5) (선택) 사용자가 일괄을 명시한 경우만
+## 5) 일부 층 제외
 
 ```bash
 python3 "$SCRIPTS/detect_walls_all.py" --artifacts "$ART" --skip 12F

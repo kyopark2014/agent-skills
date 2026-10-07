@@ -23,7 +23,7 @@ description: >-
 2. **구조 파악** — 전 층 추출이 끝나면 “파일 실측 요약”을 `structure.md` / `structure.json`으로 저장한다. 층 추출을 멈추는 조건이 아니다.
 3. **층 단위만** — 기본 산출은 `floors/<F>/floor_original.dxf` (+ `.png`). `parts/`·`floor_parts_index.json`·`split_plan.*`를 **만들지 않는다**.
 4. **치수** — 층 PNG/DXF 미리보기에 전체·그리드 치수를 포함한다 (`lib_render.py`).
-5. **층별 1개씩, 확인 없이** — `extract_2d`는 **한 번의 bash/도구 호출에 층 1개만** 실행한다. `for FLOOR in 6F 7F …` 일괄 루프, `--floor all`, 여러 층을 한 커맨드에 묶어 돌리는 것을 **금지**한다 (대용량 DXF에서 TimeoutExpired 발생). 한 층이 끝나면 **사용자에게 묻지 말고** 바로 다음 층을 같은 방식으로 실행한다.
+5. **여러 층은 한 번에, 확인 없이** — 층이 둘 이상이면 `extract_2d.py`를 **한 번** 실행한다. `--floor all` 또는 `--floor 1F,3F` 처럼 쉼표로 적는다. 스크립트가 물리 CPU 코어 수만큼 층을 동시에 추출한다. `for FLOOR in …` 루프는 쓰지 않는다. 한 층이면 `--floor <F>`. 층 사이에 사용자 확인은 없다.
 6. **전 층 연속** — 다층이어도 파일럿 확인을 받지 않는다. 발견된 층을 순서대로 끝까지 추출한 뒤 구조 분석으로 넘어간다.
 7. **산출물 경로** — 층 산출은 **사용자 artifacts** (`$ARTIFACTS_DIR/<drawing_id>/`) 아래에만 저장한다. 예외는 프로젝트 도면 목록 `$ARTIFACTS_DIR/drawing_list.json` 하나다. 추출할 때마다 이 파일을 갱신하고, 다른 `drawing_id` 항목은 지우지 않는다. (아래 [Artifacts](#artifacts-layout))
 8. **미리보기** — 층 시각 확인은 `floors/<F>/floor_original.png`만 사용. `floor_structure.*` / `floor_overview.*` / `floor_*_2d.png` / `floor_*_geom.json`을 **만들지 않는다**.
@@ -117,7 +117,7 @@ DXF 입력 (artifacts/ 또는 --dxf)
 ⓪ drawing_id 결정
   ↓ (폴더가 이미 있어도 묻지 않고 덮어쓰기)
   ↓
-① extract_2d.py --floor <각 층>   ← 층당 bash 1회, 확인 없이 전 층
+① extract_2d.py --floor all 또는 --floor 1F,3F   ← 한 번. 물리 CPU 코어 수만큼 동시 추출
      → floors/<F>/floor_original.dxf (+ floor_original.png)
      ※ floor_*_clean.dxf / floor_*_2d.png / parts/ 생성 금지
      ※ PNG는 기본 생성 (`--no-png`로 생략)
@@ -170,19 +170,17 @@ python3 "$SCRIPTS/extract_2d.py" \
   --drawing-id <drawing_id>
 ```
 
-나머지 층도 **한 층 = bash 1회**로, 묻지 않고 이어서 진행한다.
-
-**금지 예** (대용량 DXF에서 `TimeoutExpired` 유발):
+층이 둘 이상이면 아래 한 번으로 추출한다. `--workers`를 생략하면 물리 CPU 코어 수다.
 
 ```bash
-# ❌ 여러 층을 한 bash에 for-루프로 일괄 추출
-for FLOOR in 6F 7F 8F 9F 10F 11F 12F; do
-  python3 "$SCRIPTS/extract_2d.py" --dxf … --floor "$FLOOR" …
-done
-
-# ❌ --floor all
-python3 "$SCRIPTS/extract_2d.py" --dxf … --floor all …
+python3 "$SCRIPTS/extract_2d.py" \
+  --dxf "$ARTIFACTS_DIR/<input>.dxf" \
+  --floor all \
+  --out "$ARTIFACTS_DIR" \
+  --drawing-id <drawing_id>
 ```
+
+`for FLOOR in …` 로 `extract_2d.py`를 여러 번 호출하지 않는다.
 
 ### ② 구조 파악 (파일 실측 요약)
 
@@ -339,7 +337,7 @@ $ARTIFACTS_DIR/
 - [ ] 산출 경로가 `$ARTIFACTS_DIR/<id>/` 인가
 - [ ] 다층이면 확인 없이 전 층을 이어서 추출했는가
 - [ ] `XA-S-{N}F` 블록이 없으면 도곽·층 제목(`--list-floors`)으로 넘어갔는가 (중단하고 스킬 수정을 묻지 않음)
-- [ ] extract를 **층당 bash 1회**로만 돌리는가 (`for` 일괄·`--floor all` 없음, 층 사이 사용자 확인 없음)
+- [ ] 여러 층은 `extract_2d.py` 한 번(`--floor all` 또는 쉼표 층)인가. `for` 루프는 없는가
 - [ ] 미리보기로 `floor_structure.*` / `floor_*_2d.png` / `floor_overview.*`를 쓰지 않는가 (`floor_original.png`만)
 - [ ] `drawing_list.json` 각 도면에 원본 DXF `source_filename`을 `floors`보다 앞에 넣었는가
 
@@ -354,7 +352,7 @@ $ARTIFACTS_DIR/
 | 목록에 `1F`가 없고 `sheet_XX`가 있음 | `--floor 1F`로 재시도하지 않는다. `sheet_01`부터 발견된 이름 그대로 추출한다. 사용자에게 "영역을 확정하지 못했다"고 쓰지 않는다. 미확정은 층 이름만 해당하고 도곽은 이미 있다 |
 | `요청한 1F 이름의 도곽은 없습니다` | 실패로 끝내지 않는다. 출력된 발견 목록의 각 이름을 `--floor`에 넣어 이어서 추출한다 |
 | 도곽·층 제목도 없음 | 추출하지 않는다. 원본은 그대로 두고, 찾은 테두리·경고를 보고한다 |
-| `TimeoutExpired` (extract) | 여러 층 일괄 루프·`--floor all` 금지 → **층당 bash 1회**로 재시도 |
+| `TimeoutExpired` (extract) | `--floor all` 은 유지한다. 동시에 너무 많으면 `--workers` 를 줄인다. `for` 루프로 나누지 않는다 |
 | PNG에 도면이 좌·우 둘 | primary 클러스터(LINE 많은 쪽)만 bbox — `extract_2d` 공통 |
 | 치수 없음 | `--with-dims`, PNG 오버레이 + DXF `DIMS` 레이어 |
 | 원본 277MB 로드 실패 | 층별 `floor_original.dxf`를 먼저 만든 뒤 후속 스킬 |

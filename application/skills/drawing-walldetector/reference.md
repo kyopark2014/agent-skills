@@ -30,12 +30,12 @@ $ARTIFACTS_DIR/<drawing_id>/
 
 `floors/<F>/floor_wall_original.*`가 이미 있어도 묻지 않고 `detect_walls_floor`로 덮어쓴다. 폴더를 통째로 삭제하지 않는다.
 
-## 층별 1개씩 · 확인 없음
+## 여러 층은 한 번에
 
-1. 발견된 층을 **층당 bash 1회**로 끝까지 검출한다. 파일럿 확인을 받지 않는다
+1. 층을 말하지 않으면 발견된 층 전체를 `detect_walls_all.py` 한 번으로 검출한다. 동시에 도는 층 수는 물리 CPU 코어 수다
 2. 같은 경로의 `floor_wall_original.*` 가 있으면 덮어쓴다
-3. **금지(기본):** `for FLOOR in …` 일괄, `detect_walls_all` 한 방에 전층, 층 사이에 사용자 확인
-4. `detect_walls_all`은 사용자가 일괄을 **명시한 경우만**
+3. **금지:** `for FLOOR in …` 로 층마다 호출, 층 사이에 사용자 확인
+4. 한 층만 필요하면 `detect_walls_floor.py --floor <F>`
 
 ## 왜 기하 휴리스틱인가
 

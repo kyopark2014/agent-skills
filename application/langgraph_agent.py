@@ -37,7 +37,7 @@ config = utils.load_config()
 sharing_url = config["sharing_url"] if "sharing_url" in config else None
 s3_prefix = "docs"
 
-import io, os, sys, json, traceback, fnmatch
+import io, os, signal, sys, json, traceback, fnmatch
 import subprocess as _subprocess, pathlib as _pathlib, shutil as _shutil
 import tempfile as _tempfile, glob as _glob, datetime as _datetime
 import math as _math, re as _re, requests as _requests
@@ -1003,9 +1003,40 @@ def upload_file_to_s3(filepath: str) -> str:
     except Exception as e:
         return f"Upload failed: {str(e)}"
 
+_BASH_TIMEOUT_SECONDS = 300
+
+
+def _bash_cancel_key() -> str | None:
+    """LangGraph thread id for the tool call that is running this bash."""
+    try:
+        from langchain_core.runnables.config import var_child_runnable_config
+    except ImportError:
+        return None
+    cfg = var_child_runnable_config.get()
+    if not cfg:
+        return None
+    thread_id = (cfg.get("configurable") or {}).get("thread_id")
+    return str(thread_id) if thread_id else None
+
+
+def _kill_bash_group(pgid: int) -> None:
+    if pgid <= 1:
+        return
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        try:
+            os.killpg(pgid, sig)
+        except (ProcessLookupError, PermissionError, OSError):
+            return
+
+
 @tool
 def bash(command: str) -> str:
-    """Execute a bash command and return the result"""
+    """Execute a bash command and return the result.
+
+    The command runs in the foreground in its own process group. Stop and the
+    300s limit kill that group, including children. Do not use nohup, `&`, or
+    `find /`.
+    """
     logger.info(f"###### bash: {command} ######")
     resolved = unicode_paths.rewrite_command_unicode_paths(command)
     if resolved != command:
@@ -1014,20 +1045,44 @@ def bash(command: str) -> str:
     _ensure_cli_scripts_on_path()
     _ensure_user_site_on_sys_path()
     _ensure_node_path()
-    result = subprocess.run(
-        command, shell=True, capture_output=True, text=True,
-        cwd=WORKING_DIR, timeout=300,
+    cancel_key = _bash_cancel_key()
+    # start_new_session: this shell is its own process-group leader, so Stop
+    # and the timeout can signal the shell and the children together.
+    proc = subprocess.Popen(
+        command,
+        shell=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        cwd=WORKING_DIR,
         env=os.environ,
+        start_new_session=True,
     )
+    pgid = proc.pid
+    run_cancel.track_pgroup(cancel_key, pgid)
+    timed_out = False
+    try:
+        stdout, stderr = proc.communicate(timeout=_BASH_TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired:
+        timed_out = True
+        logger.warning("bash timed out after %ss", _BASH_TIMEOUT_SECONDS)
+        _kill_bash_group(pgid)
+        stdout, stderr = proc.communicate()
+    finally:
+        run_cancel.untrack_pgroup(cancel_key, pgid)
     # pip install may have just created ~/.local/.../site-packages
     _ensure_user_site_on_sys_path()
+    if timed_out:
+        return f"Error: command timed out after {_BASH_TIMEOUT_SECONDS}s"
+    if cancel_key and run_cancel.is_cancelled(cancel_key):
+        return "Cancelled by user"
     parts = []
-    if result.stdout:
-        parts.append(f"STDOUT:\n{result.stdout}")
-    if result.stderr:
-        parts.append(f"STDERR:\n{result.stderr}")
-    if result.returncode != 0:
-        parts.append(f"Return code: {result.returncode}")
+    if stdout:
+        parts.append(f"STDOUT:\n{stdout}")
+    if stderr:
+        parts.append(f"STDERR:\n{stderr}")
+    if proc.returncode not in (0, None):
+        parts.append(f"Return code: {proc.returncode}")
     return "\n".join(parts) if parts else "(no output)"
 
 def get_builtin_tools() -> list:

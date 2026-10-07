@@ -49,8 +49,8 @@ MODELS = [
     "Kimi K3",
 ]
 
-DEFAULT_MODEL = "Claude 4.6 Sonnet"
-DEFAULT_GATEWAY_MODEL = "Claude 4.6 Sonnet"
+DEFAULT_MODEL = "Claude 5.0 Sonnet"
+DEFAULT_GATEWAY_MODEL = "Claude 5.0 Sonnet"
 
 
 def load_capability_list_from_path(path: str) -> list[str]:
