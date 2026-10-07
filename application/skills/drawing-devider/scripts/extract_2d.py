@@ -42,7 +42,7 @@ _SKILLS_DIR = SCRIPTS_DIR.parents[1]
 if str(_SKILLS_DIR) not in sys.path:
     sys.path.insert(0, str(_SKILLS_DIR))
 
-from lib_korean_dxf import apply_korean_text  # noqa: E402
+from lib_korean_dxf import apply_korean_text, read_dxf  # noqa: E402
 from lib_render import render_floor_original_preview  # noqa: E402
 from lib_sheet import discover_layout, normalize_floor_token  # noqa: E402
 from lib_split import find_primary_floor_bbox, find_primary_line_bbox  # noqa: E402
@@ -1166,7 +1166,7 @@ def main() -> int:
 
     floor_arg = floor_token(args.floor)
     print(f"loading {dxf_path} ...", flush=True)
-    doc = ezdxf.readfile(str(dxf_path))
+    doc = read_dxf(dxf_path)
     print(f"loaded version={doc.dxfversion}", flush=True)
 
     layout = discover_layout(doc, mode=args.layout)

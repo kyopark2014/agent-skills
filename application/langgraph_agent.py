@@ -10,6 +10,7 @@ try:
 except ImportError:  # script-style runs with application/ on sys.path
     import chat
     import run_cancel
+import unicode_paths
 import utils
 import agentcore_sigv4_auth
 import subprocess
@@ -842,6 +843,10 @@ def execute_code(code: str) -> str:
         If there is a result file, return the path of the file.            
     """
     logger.info(f"###### execute_code ######")
+    resolved_code = unicode_paths.rewrite_command_unicode_paths(code)
+    if resolved_code != code:
+        logger.info("execute_code unicode path rewrite")
+        code = resolved_code
     os.makedirs(ARTIFACTS_DIR, exist_ok=True)
     _exec_globals["ARTIFACTS_DIR"] = ARTIFACTS_DIR
     _exec_globals["USER_SKILLS_DIR"] = USER_SKILLS_DIR
@@ -965,7 +970,7 @@ def read_file(filepath: str) -> str:
     """
     logger.info(f"###### read_file: {filepath} ######")
     try:
-        full_path = _resolve_workdir_path(filepath)
+        full_path = unicode_paths.resolve_existing_path(_resolve_workdir_path(filepath))
         with open(full_path, "r", encoding="utf-8") as f:
             return f.read()
     except Exception as e:
@@ -1002,6 +1007,10 @@ def upload_file_to_s3(filepath: str) -> str:
 def bash(command: str) -> str:
     """Execute a bash command and return the result"""
     logger.info(f"###### bash: {command} ######")
+    resolved = unicode_paths.rewrite_command_unicode_paths(command)
+    if resolved != command:
+        logger.info("bash unicode path rewrite: %s -> %s", command, resolved)
+        command = resolved
     _ensure_cli_scripts_on_path()
     _ensure_user_site_on_sys_path()
     _ensure_node_path()

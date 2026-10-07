@@ -1060,6 +1060,259 @@ def _window_frame_entity_idxs(entities: list[DXFEntity]) -> set[int]:
     return found
 
 
+def _closet_gap_window_entity_idxs(
+    entities: list[DXFEntity],
+) -> tuple[set[int], set[int]]:
+    """옷장과 안쪽 이중벽 사이의 창. 202호·206호 아래 화살표가 그 예다.
+
+    양 끝 30×50 mm 캡과 그 사이 0.9–1.2 m 선, 캡 사이 양면은 WINDOW다.
+    끝의 짧은 막이선은 WALL로 올린다.
+    """
+    lines: list[tuple[int, bool, float, float, float, float]] = []
+    caps: list[tuple[int, bool, float, float, float, float]] = []
+    for ei, entity in enumerate(entities):
+        if entity.dxftype() == "LINE":
+            x0, y0 = float(entity.dxf.start.x), float(entity.dxf.start.y)
+            x1, y1 = float(entity.dxf.end.x), float(entity.dxf.end.y)
+            if abs(y1 - y0) <= 8.0 and abs(x1 - x0) >= 40.0:
+                lines.append((ei, True, min(x0, x1), max(x0, x1), (y0 + y1) * 0.5, abs(x1 - x0)))
+            elif abs(x1 - x0) <= 8.0 and abs(y1 - y0) >= 40.0:
+                lines.append((ei, False, min(y0, y1), max(y0, y1), (x0 + x1) * 0.5, abs(y1 - y0)))
+        elif entity.dxftype() == "LWPOLYLINE" and entity.closed:
+            pts = [(float(p[0]), float(p[1])) for p in entity.get_points("xy")]
+            if len(pts) < 4:
+                continue
+            xs = [p[0] for p in pts]
+            ys = [p[1] for p in pts]
+            width, height = max(xs) - min(xs), max(ys) - min(ys)
+            short, long = min(width, height), max(width, height)
+            if 20.0 <= short <= 45.0 and 40.0 <= long <= 80.0:
+                caps.append((ei, width >= height, min(xs), max(xs), min(ys), max(ys)))
+    found: set[int] = set()
+    end_walls: set[int] = set()
+    for ei, horizontal, a0, a1, perp, length in lines:
+        if not (800.0 <= length <= 1350.0):
+            continue
+        ends: list[tuple[int, float, float]] = []
+        for ci, cap_h, x0, x1, y0, y1 in caps:
+            if horizontal:
+                if abs((y0 + y1) * 0.5 - perp) > 20.0:
+                    continue
+                if min(abs(x1 - a0), abs(x0 - a1), abs(x0 - a0), abs(x1 - a1)) > 40.0:
+                    continue
+                ends.append((ci, x0, x1))
+            else:
+                if abs((x0 + x1) * 0.5 - perp) > 20.0:
+                    continue
+                if min(abs(y1 - a0), abs(y0 - a1), abs(y0 - a0), abs(y1 - a1)) > 40.0:
+                    continue
+                ends.append((ci, y0, y1))
+        if len(ends) < 2:
+            continue
+        outer0 = min(min(b0, b1) for _ci, b0, b1 in ends)
+        outer1 = max(max(b0, b1) for _ci, b0, b1 in ends)
+        if not (850.0 <= outer1 - outer0 <= 1500.0):
+            continue
+        faces: list[int] = []
+        face_perps: list[float] = []
+        for fi, fh, b0, b1, fperp, flen in lines:
+            if fh is not horizontal or not (850.0 <= flen <= 1500.0):
+                continue
+            if not (60.0 <= abs(fperp - perp) <= 90.0):
+                continue
+            if abs(b0 - outer0) > 40.0 or abs(b1 - outer1) > 40.0:
+                continue
+            faces.append(fi)
+            face_perps.append(fperp)
+        if len(faces) < 2:
+            continue
+        found.add(ei)
+        found.update(ci for ci, _b0, _b1 in ends)
+        found.update(faces)
+        perp_lo, perp_hi = min(face_perps), max(face_perps)
+        for si, sh, s0, s1, sperp, slen in lines:
+            if sh is horizontal or si in found:
+                continue
+            if not (100.0 <= slen <= 220.0):
+                continue
+            if min(abs(sperp - outer0), abs(sperp - outer1)) > 40.0:
+                continue
+            if s0 > perp_lo + 30.0 or s1 < perp_hi - 30.0:
+                continue
+            end_walls.add(si)
+    end_walls -= found
+    return found, end_walls
+
+
+def _line_sash_window_entity_idxs(
+    entities: list[DXFEntity],
+) -> tuple[set[int], set[int]]:
+    """선으로만 그린 두 단 미서기창. 206호 위 화살표가 그 예다.
+
+    약 1 m 선이 좌우로 어긋나 개구 약 1.9 m를 이루면 창선은 WINDOW다.
+    개구 양끝에서 이어진 인접 면과 끝의 짧은 막이 사각은 WALL이다.
+    """
+    closed: list[tuple[float, float, float, float]] = []
+    lines: list[tuple[int, bool, float, float, float, float]] = []
+    for ei, entity in enumerate(entities):
+        if entity.dxftype() == "LINE":
+            x0, y0 = float(entity.dxf.start.x), float(entity.dxf.start.y)
+            x1, y1 = float(entity.dxf.end.x), float(entity.dxf.end.y)
+            if abs(y1 - y0) <= 8.0:
+                a0, a1, perp, length = min(x0, x1), max(x0, x1), (y0 + y1) * 0.5, abs(x1 - x0)
+                horizontal = True
+            elif abs(x1 - x0) <= 8.0:
+                a0, a1, perp, length = min(y0, y1), max(y0, y1), (x0 + x1) * 0.5, abs(y1 - y0)
+                horizontal = False
+            else:
+                continue
+            if length >= 40.0:
+                lines.append((ei, horizontal, perp, a0, a1, length))
+        elif entity.dxftype() == "LWPOLYLINE" and entity.closed:
+            pts = [(float(p[0]), float(p[1])) for p in entity.get_points("xy")]
+            if len(pts) < 4:
+                continue
+            xs = [p[0] for p in pts]
+            ys = [p[1] for p in pts]
+            x0, x1, y0, y1 = min(xs), max(xs), min(ys), max(ys)
+            short, long = min(x1 - x0, y1 - y0), max(x1 - x0, y1 - y0)
+            if 15.0 <= short <= 90.0 and 700.0 <= long <= 1200.0:
+                closed.append((x0, x1, y0, y1))
+    sash = [item for item in lines if 700.0 <= item[5] <= 1200.0]
+    windows: set[int] = set()
+    walls: set[int] = set()
+    if len(sash) < 4:
+        return windows, walls
+
+    def _overlap(a0: float, a1: float, b0: float, b1: float) -> float:
+        return max(0.0, min(a1, b1) - max(a0, b0))
+
+    for horizontal in (True, False):
+        group_lines = [item for item in sash if item[1] is horizontal]
+        used = [False] * len(group_lines)
+        for index, _item in enumerate(group_lines):
+            if used[index]:
+                continue
+            members = [index]
+            used[index] = True
+            grew = True
+            while grew:
+                grew = False
+                for other_index, other in enumerate(group_lines):
+                    if used[other_index]:
+                        continue
+                    for member_index in members:
+                        member = group_lines[member_index]
+                        if abs(member[2] - other[2]) > 250.0:
+                            continue
+                        if _overlap(member[3], member[4], other[3], other[4]) <= 0.0:
+                            continue
+                        used[other_index] = True
+                        members.append(other_index)
+                        grew = True
+                        break
+            faces: list[list[int]] = []
+            for member_index in members:
+                item = group_lines[member_index]
+                placed = False
+                for face in faces:
+                    if any(
+                        _overlap(item[3], item[4], group_lines[other][3], group_lines[other][4])
+                        >= 0.7 * min(item[5], group_lines[other][5])
+                        for other in face
+                    ):
+                        face.append(member_index)
+                        placed = True
+                        break
+                if not placed:
+                    faces.append([member_index])
+            if len(faces) != 2:
+                continue
+            if any(
+                max(group_lines[i][2] for i in face) - min(group_lines[i][2] for i in face) < 80.0
+                for face in faces
+            ):
+                continue
+            along0 = min(group_lines[i][3] for i in members)
+            along1 = max(group_lines[i][4] for i in members)
+            span = along1 - along0
+            if not (1700.0 <= span <= 2300.0):
+                continue
+            perp0 = min(group_lines[i][2] for i in members)
+            perp1 = max(group_lines[i][2] for i in members)
+            if horizontal:
+                has_closed = any(
+                    sx0 >= along0 - 40.0
+                    and sx1 <= along1 + 40.0
+                    and sy0 >= perp0 - 50.0
+                    and sy1 <= perp1 + 50.0
+                    for sx0, sx1, sy0, sy1 in closed
+                )
+            else:
+                has_closed = any(
+                    sy0 >= along0 - 40.0
+                    and sy1 <= along1 + 40.0
+                    and sx0 >= perp0 - 50.0
+                    and sx1 <= perp1 + 50.0
+                    for sx0, sx1, sy0, sy1 in closed
+                )
+            if has_closed:
+                continue
+            for member_index in members:
+                windows.add(group_lines[member_index][0])
+            for ei, is_h, perp, a0, a1, length in lines:
+                if is_h is not horizontal or ei in windows:
+                    continue
+                cover = _overlap(a0, a1, along0, along1)
+                in_band = perp0 - 40.0 <= perp <= perp1 + 40.0
+                if in_band and cover >= span * 0.75 and length <= span + 200.0:
+                    windows.add(ei)
+                    continue
+                outside = a0 >= along1 - 40.0 or a1 <= along0 + 40.0
+                touches = min(abs(a0 - along0), abs(a1 - along0), abs(a0 - along1), abs(a1 - along1)) <= 80.0
+                near_band = perp0 - 80.0 <= perp <= perp1 + 80.0
+                if near_band and outside and touches and 400.0 <= length <= 2600.0 and cover <= 80.0:
+                    walls.add(ei)
+            for ei, is_h, perp, a0, a1, length in lines:
+                if is_h is horizontal or ei in windows or ei in walls:
+                    continue
+                if not (80.0 <= length <= 400.0):
+                    continue
+                if _overlap(a0, a1, perp0 - 40.0, perp1 + 40.0) < 80.0:
+                    continue
+                at_end = min(abs(perp - along0), abs(perp - along1)) <= 80.0
+                inside = along0 + 60.0 < perp < along1 - 60.0
+                if inside:
+                    windows.add(ei)
+                elif at_end:
+                    walls.add(ei)
+            for ei, entity in enumerate(entities):
+                if ei in windows or ei in walls:
+                    continue
+                if entity.dxftype() != "LWPOLYLINE" or not entity.closed:
+                    continue
+                pts = [(float(p[0]), float(p[1])) for p in entity.get_points("xy")]
+                if len(pts) < 4:
+                    continue
+                xs = [p[0] for p in pts]
+                ys = [p[1] for p in pts]
+                width, height = max(xs) - min(xs), max(ys) - min(ys)
+                short, long = min(width, height), max(width, height)
+                if not (20.0 <= short <= 80.0 and 80.0 <= long <= 180.0):
+                    continue
+                if horizontal:
+                    center, across = (min(xs) + max(xs)) * 0.5, (min(ys) + max(ys)) * 0.5
+                else:
+                    center, across = (min(ys) + max(ys)) * 0.5, (min(xs) + max(xs)) * 0.5
+                if min(abs(center - along0), abs(center - along1)) > 80.0:
+                    continue
+                if across < perp0 - 40.0 or across > perp1 + 40.0:
+                    continue
+                walls.add(ei)
+    walls -= windows
+    return windows, walls
+
+
 def _bay_window_entity_idxs(entities: list[DXFEntity]) -> set[int]:
     """돌출창. 45° 볼살, 바깥면, 반대 45° 볼살이 한 폴리선으로 붙는다."""
     found: set[int] = set()
@@ -1195,6 +1448,20 @@ def classify_entities(
     frame_idxs = _window_frame_entity_idxs(entities)
     skip_idxs -= frame_idxs
     wall_entity_idxs |= frame_idxs
+    # 옷장과 안쪽 사이 1.2 m 선과 캡, 캡 사이 양면은 창이다.
+    closet_idxs, closet_walls = _closet_gap_window_entity_idxs(entities)
+    wall_keys = {key for key in wall_keys if key[0] not in closet_idxs}
+    wall_entity_idxs -= closet_idxs
+    wall_entity_idxs |= closet_walls
+    skip_idxs -= closet_idxs
+    skip_idxs -= closet_walls
+    # 두 단 미서기창은 창으로 올리고, 개구 끝의 인접 면은 벽으로 올린다.
+    sash_windows, sash_walls = _line_sash_window_entity_idxs(entities)
+    wall_keys = {key for key in wall_keys if key[0] not in sash_windows}
+    wall_entity_idxs -= sash_windows
+    wall_entity_idxs |= sash_walls
+    skip_idxs -= sash_windows
+    skip_idxs -= sash_walls
     for seg in segs:
         if seg.entity_idx in bay_idxs and seg.length >= 400.0:
             wall_keys.add(seg.key)
@@ -1217,7 +1484,9 @@ def classify_entities(
         "n_door_jambs": len(door_jamb_keys),
         "n_bay_windows": len(bay_idxs),
         "n_window_frames": len(frame_idxs),
-        "window_entity_idxs": sorted(frame_idxs),
+        "n_closet_windows": len(closet_idxs),
+        "n_sash_windows": len(sash_windows),
+        "window_entity_idxs": sorted(frame_idxs | closet_idxs | sash_windows),
         "column_entity_idxs": sorted(hbeam_idxs),
         "door_entity_idxs": sorted(set(door_x_idxs) | set(door_drop)),
         "entity_wall_ratio": entity_wall_ratio,

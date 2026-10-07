@@ -10,6 +10,7 @@ import re
 import uuid
 import base64
 import info 
+import unicode_paths
 import utils
 import bedrock_data_retention
 import langgraph_agent
@@ -1368,6 +1369,11 @@ def build_human_message_with_files(prompt: str, files: list | None = None) -> Hu
     path_names: list[str] = []
 
     for file_ref in file_list:
+        if _is_local_filesystem_ref(file_ref):
+            resolved_ref = unicode_paths.resolve_existing_path(file_ref)
+            if resolved_ref != file_ref and os.path.lexists(resolved_ref):
+                logger.info("unicode path %s -> %s", file_ref, resolved_ref)
+                file_ref = resolved_ref
         file_name = _file_name_from_ref(file_ref)
         # Local non-image paths: pass absolute path so tools can read the file.
         if _is_local_filesystem_ref(file_ref) and not _is_image_filename(file_name):

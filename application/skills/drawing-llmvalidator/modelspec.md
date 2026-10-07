@@ -124,13 +124,13 @@ def apply_corrections(doc: Drawing, *, review=None, ...) -> dict:
 
 - 짧은 벽 (`do_short_demote`, 기본값 False)
 - 닫힌 가구 박스, 운동기구, 회의실 내부, 조경 (`do_box_demote`)
-- 오픈홀 중앙, 계단 디딤판, 엘리베이터 문·후면, 픽토그램
+- 오픈홀 중앙, 엘리베이터 문·후면, 픽토그램
 
 우선순위:
 
 - 보호 집합과 겹치면 보호가 이깁니다 (`demote_ids -= protect_ids`).
 - Vision `review["demote_bboxes"]`는 보호보다 우선합니다. 중심이 상자 안인 `WALL`만 지웁니다. 한 변 25 m 초과 또는 면적 200 m² 초과 bbox는 `normalize_bbox_list`에서 이미 버립니다.
-- 오픈홀 중앙, 계단 디딤판, 픽토그램, 엘리베이터 문·후면, 가구·운동기구·조경도 보호보다 우선합니다.
+- 오픈홀 중앙, 픽토그램, 엘리베이터 문·후면, 가구·운동기구·조경도 보호보다 우선합니다.
 
 ### 4. 모델스페이스에 반영
 
@@ -149,7 +149,7 @@ def apply_corrections(doc: Drawing, *, review=None, ...) -> dict:
 - H-Beam 기둥·슬리브는 demote 이후 `BASE`에서 `WALL`로 승격합니다.
 - 창틀과 관찰창 유리는 `WINDOW`, 기둥은 `COLUMN`, 문짝은 `DOOR`, 벽은 `WALL` 레이어로 저장합니다. 면적 계산은 `WALL`·`WINDOW`·`COLUMN`을 경계로 읽습니다.
 - 다시 빨개진 픽토그램(장애인 표식)을 제거합니다.
-- 문짝은 벽이 아니고 개구 양옆은 벽입니다. promote 이후에 `correct_walls_around_doors`로 개구를 끊습니다. 스윙 힌지에 붙은 얇은 문짝은 `demote_swing_hinge_door_leaves`가 보정 맨 마지막에 BASE로 내립니다. 그 문짝은 실 면적 경계가 되지 않습니다. 벽 두께 안의 X자 블록은 `correct_x_block_doors`가 문을 내리고 양옆 벽면만 올립니다. 양 끝 캡으로 닫힌 문짝은 `correct_capped_leaf_doors`가 개구를 내리고 양옆만 올립니다. 옷장 칸의 끝선은 `demote_closet_bay_ends`가 내립니다.
+- 문짝은 벽이 아니고 개구 양옆은 벽입니다. promote 이후에 `correct_walls_around_doors`로 개구를 끊습니다. 스윙 힌지에 붙은 얇은 문짝은 `demote_swing_hinge_door_leaves`가 보정 맨 마지막에 BASE로 내립니다. 그 문짝은 실 면적 경계가 되지 않습니다. 벽 두께 안의 X자 블록은 `correct_x_block_doors`가 문을 내리고 양옆 벽면만 올립니다. 양 끝 캡으로 닫힌 문짝은 `correct_capped_leaf_doors`가 개구를 내리고 양옆만 올립니다.
 
 ## 반환 통계
 

@@ -2,6 +2,7 @@ import logging
 import sys
 import json
 import traceback
+import unicodedata
 import boto3
 import os
 import re
@@ -136,8 +137,12 @@ def ensure_user_upload_dir(user_id: str | None) -> str:
 
 
 def sanitize_load_filename(filename: str) -> str:
-    """Validate Load-files extension and return a safe basename (overwrite-safe)."""
-    name = os.path.basename(filename or "").strip() or "upload.bin"
+    """Validate Load-files extension and return a safe basename (overwrite-safe).
+
+    macOS gives decomposed Hangul (NFD). Store the name as NFC so Linux and
+    the agent look up the same path.
+    """
+    name = unicodedata.normalize("NFC", os.path.basename(filename or "").strip()) or "upload.bin"
     if name in {".", ".."} or "/" in name or "\\" in name:
         name = "upload.bin"
     name = name.replace("\x00", "_") or "upload.bin"
@@ -202,9 +207,17 @@ def resolve_session_upload_path(user_id: str | None, filename: str) -> str | Non
     dest = os.path.abspath(os.path.join(upload_dir, safe_name))
     if os.path.commonpath([dest, upload_dir]) != upload_dir:
         return None
-    if not os.path.isfile(dest):
+    if os.path.isfile(dest):
+        return dest
+    import unicode_paths
+
+    resolved = unicode_paths.resolve_existing_path(dest)
+    resolved = os.path.abspath(resolved)
+    if os.path.commonpath([resolved, upload_dir]) != upload_dir:
         return None
-    return dest
+    if not os.path.isfile(resolved):
+        return None
+    return resolved
 
 
 def get_user_skills_dir(user_id: str | None) -> str:

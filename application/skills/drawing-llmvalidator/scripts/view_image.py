@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import inspect
 import json
 import math
 import os
@@ -55,7 +56,13 @@ _MAX_SIDE = 8000
 _PATCH = 32
 _MAX_PATCHES = 30_000
 _MAX_PNG_BYTES = int(3.75 * 1024 * 1024)
-_TLS = threading.local()
+# chat 를 가져오기 전에 둔다. import 가 UI_MODEL_NAME 을 모듈 기본값으로 덮는다.
+_UI_MODEL = os.environ.get("UI_MODEL_NAME", "").strip()
+_UI_GATEWAY = os.environ.get("UI_LLM_GATEWAY")
+_UI_GUARDRAIL = os.environ.get("UI_GUARDRAIL")
+_CHAT_LOCK = threading.Lock()
+_CHAT = None
+_CLIENT = None
 _PRINT = threading.Lock()
 
 
@@ -210,18 +217,75 @@ def _items_mm(items: object, tile: dict) -> list[dict]:
     return out
 
 
-def _chat():
-    client = getattr(_TLS, "llm", None)
-    if client is None:
-        root = str(Path(__file__).resolve().parents[3])
-        if root not in sys.path:
-            sys.path.insert(0, root)
-        import chat
+def _content_to_text(content: object) -> str:
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for item in content:
+            if isinstance(item, str):
+                parts.append(item)
+            elif isinstance(item, dict) and item.get("text"):
+                parts.append(str(item["text"]))
+            else:
+                text = getattr(item, "text", None)
+                if text:
+                    parts.append(str(text))
+        return "\n".join(parts).strip()
+    return str(content).strip()
 
-        client = chat.get_chat()
-        _TLS.llm = client
-        _TLS.chat = chat
-    return _TLS.chat, client
+
+def _import_chat():
+    root = str(Path(__file__).resolve().parents[3])
+    if root not in sys.path:
+        sys.path.insert(0, root)
+    import chat
+
+    if not hasattr(chat, "HumanMessage"):
+        from langchain_core.messages import HumanMessage
+
+        chat.HumanMessage = HumanMessage
+    if not hasattr(chat, "_content_to_text"):
+        chat._content_to_text = _content_to_text
+    return chat
+
+
+def _configure_chat():
+    """UI에서 고른 모델로 클라이언트를 한 번만 만든다.
+
+    워커가 동시에 chat.update 와 get_chat 을 호출하면 일부는 모듈 기본 모델로
+    남는다. 스레드 풀을 열기 전에 이 함수를 호출한다.
+    """
+    global _CHAT, _CLIENT
+    with _CHAT_LOCK:
+        if _CLIENT is not None:
+            return _CHAT, _CLIENT
+        chat = _import_chat()
+        name = _UI_MODEL or getattr(chat, "model_name", "") or "Claude 5.0 Sonnet"
+        params = inspect.signature(chat.update).parameters
+        kwargs: dict = {"modelName": name}
+        if _UI_GUARDRAIL is not None and "guardrailEnabled" in params:
+            kwargs["guardrailEnabled"] = _UI_GUARDRAIL == "1"
+        if _UI_GATEWAY is not None and "llmGatewayEnabled" in params:
+            kwargs["llmGatewayEnabled"] = _UI_GATEWAY == "1"
+        chat.update(**kwargs)
+        if getattr(chat, "model_name", None) != name:
+            raise SystemExit(f"알 수 없는 모델입니다: {name}")
+        get_params = inspect.signature(chat.get_chat).parameters
+        if "extended_thinking" in get_params:
+            client = chat.get_chat("Disable")
+        else:
+            client = chat.get_chat()
+        print(f"vision model={chat.model_name} id={getattr(chat, 'model_id', '')}", flush=True)
+        _CHAT = chat
+        _CLIENT = client
+        return chat, client
+
+
+def _chat():
+    return _configure_chat()
 
 
 def _invoke_tile(tile: dict, review_dir: Path, prompt: str) -> tuple[str, list[dict], list[dict]]:
@@ -283,6 +347,7 @@ def main() -> int:
     demote: list[dict] = []
     promote: list[dict] = []
     failed: list[str] = []
+    _configure_chat()
     print(f"tiles={len(tiles)} workers={args.workers}", flush=True)
     with ThreadPoolExecutor(max_workers=args.workers) as pool:
         futures = {

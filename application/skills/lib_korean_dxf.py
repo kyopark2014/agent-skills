@@ -44,6 +44,26 @@ def apply_korean_text(doc) -> None:
     style.set_xdata("ACAD", [(1000, KOREAN_FONT_FAMILY), (1071, KOREAN_FONT_FLAGS)])
 
 
+def read_dxf(path: str):
+    """Open a DXF even when the path's Hangul is NFD on disk and NFC in the call.
+
+    macOS uploads keep decomposed filenames. Linux ``open`` does not fold them,
+    so ``ezdxf.readfile`` fails inside ``is_binary_dxf_file`` with
+    FileNotFoundError.
+    """
+    import sys
+    from pathlib import Path
+
+    import ezdxf
+
+    root = str(Path(__file__).resolve().parents[1])
+    if root not in sys.path:
+        sys.path.insert(0, root)
+    from unicode_paths import resolve_existing_path
+
+    return ezdxf.readfile(resolve_existing_path(str(path)))
+
+
 def patch_korean_dxf_bytes(data: bytes) -> bytes | None:
     """ezdxf 기본 헤더로 저장된 DXF만 코드페이지와 Standard 글꼴을 고친다.
 

@@ -4434,17 +4434,6 @@ def _is_stair_nosing_seg(s: AxisSeg, segs: list[AxisSeg]) -> bool:
     return False
 
 
-def demote_stair_treads(segs: list[AxisSeg]) -> set[int]:
-    """계단 디딤판 WALL 은 벽이 아니다."""
-    out: set[int] = set()
-    for s in segs:
-        if s.layer != WALL_LAYER or s.entity is None:
-            continue
-        if _is_stair_tread_seg(s, segs) or _is_stair_nosing_seg(s, segs):
-            out.add(id(s.entity))
-    return out
-
-
 def _on_stair_shell(
     s: AxisSeg,
     boxes: list[dict[str, float]],
@@ -13329,115 +13318,6 @@ def correct_capped_leaf_doors(msp) -> tuple[int, int]:
     return (n_demote, n_promote)
 
 
-def demote_closet_bay_ends(msp) -> int:
-    """옷장 칸의 끝선은 벽이 아니다.
-
-    402호 화살표처럼, 약 1.75m 선반 두 개의 끝만 짧은 빨간 선이다.
-    같은 칸의 나머지 윤곽은 회색이고, 80–220mm 벽 두께의 짝도 없다.
-    """
-    segs: list[tuple[str, float, float, float, float, str, Any]] = []
-    columns: list[tuple[str, float, float, float]] = []
-    for e in msp:
-        layer = getattr(e.dxf, "layer", None)
-        if layer not in (WALL_LAYER, BASE_LAYER):
-            continue
-        if e.dxftype() == "LWPOLYLINE" and e.closed:
-            try:
-                pts = [(float(p[0]), float(p[1])) for p in e.get_points("xy")]
-            except Exception:  # noqa: BLE001
-                pts = []
-            if 4 <= len(pts) <= 6:
-                xs = [p[0] for p in pts]
-                ys = [p[1] for p in pts]
-                x0, x1 = min(xs), max(xs)
-                y0, y1 = min(ys), max(ys)
-                short, long = min(x1 - x0, y1 - y0), max(x1 - x0, y1 - y0)
-                if 350.0 <= short <= 750.0 and 500.0 <= long <= 850.0 and short / long >= 0.55:
-                    columns.append(("H", y0, x0, x1))
-                    columns.append(("H", y1, x0, x1))
-                    columns.append(("V", x0, y0, y1))
-                    columns.append(("V", x1, y0, y1))
-        axis = _axis_line(e) if e.dxftype() == "LINE" else None
-        if axis is None and e.dxftype() == "LWPOLYLINE":
-            try:
-                pts = [(float(p[0]), float(p[1])) for p in e.get_points("xy")]
-            except Exception:  # noqa: BLE001
-                pts = []
-            spans = list(zip(pts, pts[1:] + (pts[:1] if e.closed else [])))
-            for (x0, y0), (x1, y1) in spans:
-                dx, dy = abs(x1 - x0), abs(y1 - y0)
-                length = math.hypot(x1 - x0, y1 - y0)
-                if length < 40.0:
-                    continue
-                tol = max(20.0, 0.12 * length)
-                if dy <= tol and dx >= dy:
-                    segs.append(("H", (y0 + y1) * 0.5, min(x0, x1), max(x0, x1), length, layer, e))
-                elif dx <= tol and dy >= dx:
-                    segs.append(("V", (x0 + x1) * 0.5, min(y0, y1), max(y0, y1), length, layer, e))
-            continue
-        if axis is None:
-            continue
-        ori, coord, a, b, length = axis
-        segs.append((ori, coord, a, b, length, layer, e))
-
-    def _on_column(ori: str, coord: float, a: float, b: float) -> bool:
-        for cori, ccoord, ca, cb in columns:
-            if cori != ori or abs(ccoord - coord) > 30.0:
-                continue
-            if min(b, cb) - max(a, ca) >= (b - a) * 0.8:
-                return True
-        return False
-
-    n = 0
-    seen: set[int] = set()
-    for ori, coord, a, b, length, layer, ent in segs:
-        if layer != WALL_LAYER or not (480.0 <= length <= 780.0):
-            continue
-        if id(ent) in seen or _on_column(ori, coord, a, b):
-            continue
-        duplicated = any(
-            s_ori == ori
-            and s_layer == BASE_LAYER
-            and abs(s_coord - coord) <= 20.0
-            and min(b, s_b) - max(a, s_a) >= length * 0.75
-            for s_ori, s_coord, s_a, s_b, _s_len, s_layer, _s_ent in segs
-        )
-        if not duplicated:
-            continue
-        def _has_shelf(end: float) -> bool:
-            for s_ori, s_coord, s_a, s_b, s_len, s_layer, _s_ent in segs:
-                if s_layer != BASE_LAYER or s_ori == ori or not (1400.0 <= s_len <= 2200.0):
-                    continue
-                if abs(s_coord - end) > 40.0:
-                    continue
-                if not (s_a - 40.0 <= coord <= s_b + 40.0):
-                    continue
-                toward_min = coord - s_a
-                toward_max = s_b - coord
-                if toward_min >= 1200.0 and toward_max <= 400.0:
-                    return True
-                if toward_max >= 1200.0 and toward_min <= 400.0:
-                    return True
-            return False
-
-        # 위·아래 칸은 바깥 끝이 실 경계에 닿아 선반이 한쪽에만 있다.
-        if not (_has_shelf(a) or _has_shelf(b)):
-            continue
-        mate = any(
-            s_ori == ori
-            and s_layer == WALL_LAYER
-            and 80.0 <= abs(s_coord - coord) <= 220.0
-            and min(b, s_b) - max(a, s_a) >= length * 0.6
-            for s_ori, s_coord, s_a, s_b, _s_len, s_layer, _s_ent in segs
-        )
-        if mate:
-            continue
-        seen.add(id(ent))
-        msp.delete_entity(ent)
-        n += 1
-    return n
-
-
 def promote_zigzag_door_sides(msp) -> tuple[int, int]:
     """지그재그 X 문은 내리고, 문 끝에 닿은 양옆 이중벽은 올린다.
 
@@ -19860,7 +19740,6 @@ def apply_corrections(
     demote_ids |= review_demote
     # 오픈홀 중앙·엘리베이터 문/후면·가구·운동기구·정원은 protect보다 우선 demote
     demote_ids |= open_hall_demote
-    demote_ids |= demote_stair_treads(segs)
     promote = [
         s
         for s in promote
@@ -20078,7 +19957,6 @@ def apply_corrections(
     n_cap_demote, n_cap_promote = correct_capped_leaf_doors(msp)
     n_demoted += n_cap_demote
     n_promoted += n_cap_promote
-    n_demoted += demote_closet_bay_ends(msp)
     n_zig_demote, n_zig_promote = promote_zigzag_door_sides(msp)
     n_demoted += n_zig_demote
     n_promoted += n_zig_promote
