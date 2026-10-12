@@ -11,6 +11,7 @@ from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
+from weakref import WeakKeyDictionary
 
 import ezdxf
 from ezdxf.document import Drawing
@@ -32,6 +33,243 @@ _OPEN_HALL_SKIP_RE = re.compile(
     r"(AHU|설비|기계|덕트|FAN|ELEV|엘리베이터|조정실)",
     re.IGNORECASE,
 )
+
+
+# 한 층의 보정은 modelspace 를 백 번 넘게 다시 걷는다. 좌표와 종류는
+# 엔티티가 생기거나 지워지기 전까지 그대로이므로 엔티티에 붙여 둔다.
+# 레이어는 보정 중에 바뀌므로 캐시하지 않고 엔티티에서 읽는다.
+_ENTITY_LIST: WeakKeyDictionary = WeakKeyDictionary()
+_PENDING: WeakKeyDictionary = WeakKeyDictionary()
+_DIRTY: WeakKeyDictionary = WeakKeyDictionary()
+_DEAD: WeakKeyDictionary = WeakKeyDictionary()
+_HOOKED: WeakKeyDictionary = WeakKeyDictionary()
+
+
+def _ensure_scan_hooks(msp) -> None:
+    if msp in _HOOKED:
+        return
+
+    def _wrap_add(original):
+        def wrapped(*args, **kwargs):
+            entity = original(*args, **kwargs)
+            _remember_entity(entity)
+            pending = _PENDING.get(msp)
+            if pending is None:
+                pending = []
+                _PENDING[msp] = pending
+            pending.append(entity)
+            return entity
+
+        return wrapped
+
+    def _wrap_delete(original):
+        def wrapped(entity, *args, **kwargs):
+            result = original(entity, *args, **kwargs)
+            _DEAD[entity] = True
+            _DIRTY[msp] = True
+            return result
+
+        return wrapped
+
+    for name in (
+        "add_line",
+        "add_arc",
+        "add_circle",
+        "add_lwpolyline",
+        "add_polyline2d",
+        "add_point",
+        "add_text",
+        "add_mtext",
+    ):
+        original = getattr(msp, name, None)
+        if original is not None:
+            setattr(msp, name, _wrap_add(original))
+    msp.delete_entity = _wrap_delete(msp.delete_entity)
+    _HOOKED[msp] = True
+
+
+def _remember_entity(entity) -> None:
+    if getattr(entity, "_scan_type", None) is not None:
+        return
+    kind = entity.dxftype()
+    entity._scan_type = kind
+    try:
+        if kind == "LINE":
+            start = entity.dxf.start
+            end = entity.dxf.end
+            entity._scan_line = (
+                float(start.x),
+                float(start.y),
+                float(end.x),
+                float(end.y),
+            )
+        elif kind == "ARC":
+            center = entity.dxf.center
+            entity._scan_arc = (
+                float(center.x),
+                float(center.y),
+                float(entity.dxf.radius),
+                float(entity.dxf.start_angle),
+                float(entity.dxf.end_angle),
+            )
+        elif kind == "LWPOLYLINE":
+            entity._scan_poly = tuple(
+                (float(point[0]), float(point[1])) for point in entity.get_points("xy")
+            )
+    except Exception:  # noqa: BLE001
+        return
+
+
+def _entities(msp) -> list:
+    """modelspace 엔티티 목록. 도면이 그대로면 같은 리스트를 돌려준다.
+
+    선이 추가되면 그 선만 이어 붙이고, 지워진 선은 다음 조회에서 뺀다.
+    지금 돌고 있는 for 루프가 들고 있는 리스트는 바꾸지 않는다.
+    """
+    _ensure_scan_hooks(msp)
+    cached = _ENTITY_LIST.get(msp)
+    pending = _PENDING.pop(msp, None)
+    dirty = _DIRTY.pop(msp, False)
+    if cached is not None and not pending and not dirty:
+        return cached
+    if cached is not None:
+        merged = [entity for entity in cached if entity not in _DEAD]
+        if pending:
+            merged.extend(entity for entity in pending if entity not in _DEAD)
+        _ENTITY_LIST[msp] = merged
+        return merged
+    entities = [entity for entity in msp if entity not in _DEAD]
+    if pending:
+        known = set(entities)
+        entities.extend(entity for entity in pending if entity not in known and entity not in _DEAD)
+    for entity in entities:
+        _remember_entity(entity)
+    _ENTITY_LIST[msp] = entities
+    return entities
+
+
+def _dxftype(entity) -> str:
+    try:
+        return entity._scan_type
+    except AttributeError:
+        _remember_entity(entity)
+        kind = getattr(entity, "_scan_type", None)
+        if kind is None:
+            return entity.dxftype()
+        return kind
+
+
+def _line_xy(entity) -> tuple[float, float, float, float]:
+    try:
+        return entity._scan_line
+    except AttributeError:
+        _remember_entity(entity)
+        line = getattr(entity, "_scan_line", None)
+        if line is not None:
+            return line
+        return (
+            float(entity.dxf.start.x),
+            float(entity.dxf.start.y),
+            float(entity.dxf.end.x),
+            float(entity.dxf.end.y),
+        )
+
+
+def _lx0(entity) -> float:
+    try:
+        return entity._scan_line[0]
+    except AttributeError:
+        _remember_entity(entity)
+        line = getattr(entity, "_scan_line", None)
+        if line is None:
+            return float(entity.dxf.start.x)
+        return line[0]
+
+
+def _ly0(entity) -> float:
+    try:
+        return entity._scan_line[1]
+    except AttributeError:
+        _remember_entity(entity)
+        line = getattr(entity, "_scan_line", None)
+        if line is None:
+            return float(entity.dxf.start.y)
+        return line[1]
+
+
+def _lx1(entity) -> float:
+    try:
+        return entity._scan_line[2]
+    except AttributeError:
+        _remember_entity(entity)
+        line = getattr(entity, "_scan_line", None)
+        if line is None:
+            return float(entity.dxf.end.x)
+        return line[2]
+
+
+def _ly1(entity) -> float:
+    try:
+        return entity._scan_line[3]
+    except AttributeError:
+        _remember_entity(entity)
+        line = getattr(entity, "_scan_line", None)
+        if line is None:
+            return float(entity.dxf.end.y)
+        return line[3]
+
+
+def _arc_geom(entity) -> tuple[float, float, float, float, float] | None:
+    geom = getattr(entity, "_scan_arc", None)
+    if geom is None and getattr(entity, "_scan_type", None) is None:
+        _remember_entity(entity)
+        geom = getattr(entity, "_scan_arc", None)
+    return geom
+
+
+def _acx(entity) -> float:
+    geom = _arc_geom(entity)
+    if geom is None:
+        return float(entity.dxf.center.x)
+    return geom[0]
+
+
+def _acy(entity) -> float:
+    geom = _arc_geom(entity)
+    if geom is None:
+        return float(entity.dxf.center.y)
+    return geom[1]
+
+
+def _ar(entity) -> float:
+    geom = _arc_geom(entity)
+    if geom is None:
+        return float(entity.dxf.radius)
+    return geom[2]
+
+
+def _asa(entity) -> float:
+    geom = _arc_geom(entity)
+    if geom is None:
+        return float(entity.dxf.start_angle)
+    return geom[3]
+
+
+def _aea(entity) -> float:
+    geom = _arc_geom(entity)
+    if geom is None:
+        return float(entity.dxf.end_angle)
+    return geom[4]
+
+
+def _poly_xy(entity):
+    points = getattr(entity, "_scan_poly", None)
+    if points is None and getattr(entity, "_scan_type", None) is None:
+        _remember_entity(entity)
+        points = getattr(entity, "_scan_poly", None)
+    if points is None:
+        return entity.get_points("xy")
+    return points
 
 
 def normalize_bbox(raw: Any) -> dict[str, float] | None:
@@ -180,23 +418,21 @@ def _normalize_hv(
 
 def iter_axis_segs(msp, *, min_len_mm: float = 500.0) -> list[AxisSeg]:
     out: list[AxisSeg] = []
-    for e in msp:
+    for e in _entities(msp):
         layer = e.dxf.layer
         if layer not in (WALL_LAYER, BASE_LAYER):
             continue
-        t = e.dxftype()
+        kind = getattr(e, "_scan_type", None)
+        if kind is None:
+            _remember_entity(e)
+            kind = e._scan_type
         pairs: list[tuple[float, float, float, float]] = []
-        if t == "LINE":
-            pairs.append(
-                (
-                    float(e.dxf.start.x),
-                    float(e.dxf.start.y),
-                    float(e.dxf.end.x),
-                    float(e.dxf.end.y),
-                )
-            )
-        elif t == "LWPOLYLINE":
-            pts = [(float(p[0]), float(p[1])) for p in e.get_points("xy")]
+        if kind == "LINE":
+            pairs.append(_line_xy(e))
+        elif kind == "LWPOLYLINE":
+            pts = getattr(e, "_scan_poly", None)
+            if pts is None:
+                pts = _poly_xy(e)
             segs = list(zip(pts, pts[1:]))
             if e.closed and len(pts) >= 2 and pts[0] != pts[-1]:
                 segs.append((pts[-1], pts[0]))
@@ -423,14 +659,14 @@ def demote_closed_furniture_boxes(
     result: set[int] = set()
     furniture_edges: list[tuple[bool, float, float, float]] = []
     # (is_h, ortho, along0, along1)
-    for e in msp:
-        if e.dxftype() != "LWPOLYLINE":
+    for e in _entities(msp):
+        if _dxftype(e) != "LWPOLYLINE":
             continue
         if id(e) in exclude_ids:
             continue
         if not e.closed:
             continue
-        pts = [(float(p[0]), float(p[1])) for p in e.get_points("xy")]
+        pts = [(float(p[0]), float(p[1])) for p in _poly_xy(e)]
         if len(pts) < 3:
             continue
         xs = [p[0] for p in pts]
@@ -454,14 +690,14 @@ def demote_closed_furniture_boxes(
             furniture_edges.append((False, x0, y0, y1))
             furniture_edges.append((False, x1, y0, y1))
 
-    for e in msp:
-        if e.dxf.layer != WALL_LAYER or e.dxftype() != "LINE":
+    for e in _entities(msp):
+        if e.dxf.layer != WALL_LAYER or _dxftype(e) != "LINE":
             continue
         if id(e) in exclude_ids:
             continue
         try:
-            x0, y0 = float(e.dxf.start.x), float(e.dxf.start.y)
-            x1, y1 = float(e.dxf.end.x), float(e.dxf.end.y)
+            x0, y0 = _lx0(e), _ly0(e)
+            x1, y1 = _lx1(e), _ly1(e)
         except Exception:  # noqa: BLE001
             continue
         length = math.hypot(x1 - x0, y1 - y0)
@@ -668,10 +904,10 @@ def demote_conveyor_belt(
     """세척실 컨베이어벨트. 롤러가 늘어선 얇은 평행선 다발은 벽이 아니다."""
     exclude_ids = exclude_ids or set()
     ticks: list[tuple[bool, float, float, float]] = []
-    for e in msp:
-        if e.dxftype() != "LWPOLYLINE":
+    for e in _entities(msp):
+        if _dxftype(e) != "LWPOLYLINE":
             continue
-        pts = [(float(p[0]), float(p[1])) for p in e.get_points("xy")]
+        pts = [(float(p[0]), float(p[1])) for p in _poly_xy(e)]
         if len(pts) < 8:
             continue
         xs = [p[0] for p in pts]
@@ -745,10 +981,10 @@ def demote_coffee_machine_row(
     """구성원 식당 아래 커피머신 줄. 머신 위·아래 선은 벽이 아니고 H-Beam 만 남긴다."""
     exclude_ids = exclude_ids or set()
     boxes: list[tuple[float, float, float, float]] = []
-    for e in msp:
-        if e.dxftype() != "LWPOLYLINE" or e.dxf.layer != BASE_LAYER:
+    for e in _entities(msp):
+        if _dxftype(e) != "LWPOLYLINE" or e.dxf.layer != BASE_LAYER:
             continue
-        pts = [(float(p[0]), float(p[1])) for p in e.get_points("xy")]
+        pts = [(float(p[0]), float(p[1])) for p in _poly_xy(e)]
         if len(pts) < 4:
             continue
         xs = [p[0] for p in pts]
@@ -1035,12 +1271,12 @@ def demote_fitness_equipment(
         )
 
     plates: list[tuple[float, float]] = []
-    for e in msp:
-        if e.dxftype() not in ("ARC", "CIRCLE"):
+    for e in _entities(msp):
+        if _dxftype(e) not in ("ARC", "CIRCLE"):
             continue
         try:
-            r = float(e.dxf.radius)
-            cx, cy = float(e.dxf.center.x), float(e.dxf.center.y)
+            r = _ar(e)
+            cx, cy = _acx(e), _acy(e)
         except Exception:  # noqa: BLE001
             continue
         if not (plate_r_min <= r <= plate_r_max):
@@ -1126,12 +1362,12 @@ def demote_fitness_equipment(
 
     # 아령 플레이트(r 18–220)와, 기구 심볼의 짧은 BASE 밀도
     symbol_plates: list[tuple[float, float, int, int]] = []
-    for e in msp:
-        if e.dxftype() not in ("ARC", "CIRCLE"):
+    for e in _entities(msp):
+        if _dxftype(e) not in ("ARC", "CIRCLE"):
             continue
         try:
-            r = float(e.dxf.radius)
-            cx, cy = float(e.dxf.center.x), float(e.dxf.center.y)
+            r = _ar(e)
+            cx, cy = _acx(e), _acy(e)
         except Exception:  # noqa: BLE001
             continue
         if not (18.0 <= r <= 220.0) or not _near_fitness(cx, cy):
@@ -1145,12 +1381,12 @@ def demote_fitness_equipment(
 
     ink_cell = 500.0
     ink: dict[tuple[int, int], int] = defaultdict(int)
-    for e in msp:
-        if e.dxftype() != "LINE" or getattr(e.dxf, "layer", None) != BASE_LAYER:
+    for e in _entities(msp):
+        if _dxftype(e) != "LINE" or getattr(e.dxf, "layer", None) != BASE_LAYER:
             continue
         try:
-            x0, y0 = float(e.dxf.start.x), float(e.dxf.start.y)
-            x1, y1 = float(e.dxf.end.x), float(e.dxf.end.y)
+            x0, y0 = _lx0(e), _ly0(e)
+            x1, y1 = _lx1(e), _ly1(e)
         except Exception:  # noqa: BLE001
             continue
         length = math.hypot(x1 - x0, y1 - y0)
@@ -1230,9 +1466,9 @@ def demote_fitness_equipment(
 
 def _is_organic_landscape_polyline(e) -> bool:
     """짧은 다변·넓은 물결형 BASE 폴리라인 ≈ 조경 윤곽."""
-    if e.dxftype() != "LWPOLYLINE":
+    if _dxftype(e) != "LWPOLYLINE":
         return False
-    pts = [(float(p[0]), float(p[1])) for p in e.get_points("xy")]
+    pts = [(float(p[0]), float(p[1])) for p in _poly_xy(e)]
     if len(pts) < 10:
         return False
     pairs = list(zip(pts, pts[1:]))
@@ -1262,12 +1498,12 @@ def _landscape_wave_bboxes(
 ) -> list[tuple[float, float, float, float]]:
     """대형 유기 조경(물결) 폴리라인 bbox 목록."""
     out: list[tuple[float, float, float, float]] = []
-    for e in msp:
+    for e in _entities(msp):
         if getattr(e.dxf, "layer", None) != BASE_LAYER:
             continue
         if not _is_organic_landscape_polyline(e):
             continue
-        pts = [(float(p[0]), float(p[1])) for p in e.get_points("xy")]
+        pts = [(float(p[0]), float(p[1])) for p in _poly_xy(e)]
         pairs = list(zip(pts, pts[1:]))
         if e.closed and pts[0] != pts[-1]:
             pairs.append((pts[-1], pts[0]))
@@ -1293,12 +1529,12 @@ def _landscape_rock_centers(
 ) -> list[tuple[float, float]]:
     """바위·식재 등 비정형 닫힌 소형 조경 윤곽 중심점."""
     out: list[tuple[float, float]] = []
-    for e in msp:
-        if e.dxftype() != "LWPOLYLINE":
+    for e in _entities(msp):
+        if _dxftype(e) != "LWPOLYLINE":
             continue
         if getattr(e.dxf, "layer", None) != BASE_LAYER:
             continue
-        pts = [(float(p[0]), float(p[1])) for p in e.get_points("xy")]
+        pts = [(float(p[0]), float(p[1])) for p in _poly_xy(e)]
         if not (8 <= len(pts) <= 40):
             continue
         closed = bool(e.closed) or (
@@ -1371,7 +1607,7 @@ def demote_landscape_walls(
         # 사실상 단일 선분인 조경 오검출 PL
         if t == "LWPOLYLINE":
             try:
-                pts = list(ent.get_points("xy"))
+                pts = list(_poly_xy(ent))
             except Exception:  # noqa: BLE001
                 return False
             return len(pts) <= 3 and not bool(getattr(ent, "closed", False))
@@ -1403,10 +1639,10 @@ def _iter_closed_boxes(
 ) -> list[tuple[float, float, float, float, float, float, float, float, Any]]:
     """닫힌 사각/직사각 LWPOLYLINE → (cx, cy, w, h, x0, x1, y0, y1, entity)."""
     out: list[tuple[float, float, float, float, float, float, float, float, Any]] = []
-    for e in msp:
-        if e.dxftype() != "LWPOLYLINE":
+    for e in _entities(msp):
+        if _dxftype(e) != "LWPOLYLINE":
             continue
-        pts = [(float(p[0]), float(p[1])) for p in e.get_points("xy")]
+        pts = [(float(p[0]), float(p[1])) for p in _poly_xy(e)]
         if len(pts) < 4 or len(pts) > max_pts:
             continue
         closed = bool(e.closed) or (
@@ -1446,12 +1682,12 @@ def _iter_closed_squares(
 def _iter_hbeam_dashes(msp) -> list[tuple[float, float, float, Any]]:
     """H-Beam 내부 '_' 대시 — 짧은 직교 LINE → (mx, my, length, entity)."""
     dashes: list[tuple[float, float, float, Any]] = []
-    for e in msp:
-        if e.dxftype() != "LINE":
+    for e in _entities(msp):
+        if _dxftype(e) != "LINE":
             continue
         try:
-            x0, y0 = float(e.dxf.start.x), float(e.dxf.start.y)
-            x1, y1 = float(e.dxf.end.x), float(e.dxf.end.y)
+            x0, y0 = _lx0(e), _ly0(e)
+            x1, y1 = _lx1(e), _ly1(e)
         except Exception:  # noqa: BLE001
             continue
         length = math.hypot(x1 - x0, y1 - y0)
@@ -1469,11 +1705,11 @@ def _iter_hbeam_dashes(msp) -> list[tuple[float, float, float, Any]]:
 def _pictogram_arc_points(msp) -> list[tuple[float, float]]:
     """ARC/CIRCLE 중심. 휠체어 바퀴처럼 사각 안에 있으면 기둥이 아니다."""
     pts: list[tuple[float, float]] = []
-    for e in msp:
-        if e.dxftype() not in ("ARC", "CIRCLE"):
+    for e in _entities(msp):
+        if _dxftype(e) not in ("ARC", "CIRCLE"):
             continue
         try:
-            pts.append((float(e.dxf.center.x), float(e.dxf.center.y)))
+            pts.append((_acx(e), _acy(e)))
         except Exception:  # noqa: BLE001
             continue
     return pts
@@ -1511,19 +1747,19 @@ def demote_pictogram_columns(msp) -> set[int]:
     arc_grid: dict[tuple[int, int], list[tuple[float, float]]] = defaultdict(list)
     line_grid: dict[tuple[int, int], list[tuple[float, float, float, Any]]] = defaultdict(list)
     boxes: list[tuple[float, float, float, float, float, float, Any]] = []
-    for e in msp:
-        t = e.dxftype()
+    for e in _entities(msp):
+        t = _dxftype(e)
         if t in ("ARC", "CIRCLE"):
             try:
-                cx, cy = float(e.dxf.center.x), float(e.dxf.center.y)
+                cx, cy = _acx(e), _acy(e)
             except Exception:  # noqa: BLE001
                 continue
             arc_grid[bucket(cx, cy)].append((cx, cy))
             continue
         if t == "LINE":
             try:
-                x0, y0 = float(e.dxf.start.x), float(e.dxf.start.y)
-                x1, y1 = float(e.dxf.end.x), float(e.dxf.end.y)
+                x0, y0 = _lx0(e), _ly0(e)
+                x1, y1 = _lx1(e), _ly1(e)
             except Exception:  # noqa: BLE001
                 continue
             length = math.hypot(x1 - x0, y1 - y0)
@@ -1534,7 +1770,7 @@ def demote_pictogram_columns(msp) -> set[int]:
             continue
         if t != "LWPOLYLINE":
             continue
-        pts = [(float(p[0]), float(p[1])) for p in e.get_points("xy")]
+        pts = [(float(p[0]), float(p[1])) for p in _poly_xy(e)]
         if len(pts) < 4 or len(pts) > 8:
             continue
         closed = bool(e.closed) or (
@@ -1706,12 +1942,12 @@ def promote_hbeam_sleeves(msp) -> int:
     if not boxes:
         return 0
     n = 0
-    for e in msp:
-        if e.dxftype() != "LWPOLYLINE" or not e.closed:
+    for e in _entities(msp):
+        if _dxftype(e) != "LWPOLYLINE" or not e.closed:
             continue
         if getattr(e.dxf, "layer", None) != BASE_LAYER:
             continue
-        pts = [(float(p[0]), float(p[1])) for p in e.get_points("xy")]
+        pts = [(float(p[0]), float(p[1])) for p in _poly_xy(e)]
         if len(pts) < 4 or len(pts) > 5:
             continue
         xs = [p[0] for p in pts]
@@ -1753,14 +1989,14 @@ def promote_wall_square_columns(msp) -> int:
     v_all: list[tuple[float, float, float, str, float, Any]] = []
     arcs: list[tuple[float, float]] = []
     swings: list[tuple[float, float, float]] = []
-    for e in msp:
-        kind = e.dxftype()
+    for e in _entities(msp):
+        kind = _dxftype(e)
         if kind in ("ARC", "CIRCLE"):
             try:
-                cx, cy = float(e.dxf.center.x), float(e.dxf.center.y)
+                cx, cy = _acx(e), _acy(e)
                 arcs.append((cx, cy))
                 if kind == "ARC":
-                    radius = float(e.dxf.radius)
+                    radius = _ar(e)
                     if radius >= 400.0:
                         swings.append((cx, cy, radius))
             except Exception:  # noqa: BLE001
@@ -2237,11 +2473,11 @@ def _promote_column_adjacent_doubles(
 
 def _axis_line(e) -> tuple[str, float, float, float, float] | None:
     """축정렬 LINE → (H|V, coord, a, b, length). coord 는 고정축 좌표."""
-    if e.dxftype() != "LINE":
+    if _dxftype(e) != "LINE":
         return None
     try:
-        x0, y0 = float(e.dxf.start.x), float(e.dxf.start.y)
-        x1, y1 = float(e.dxf.end.x), float(e.dxf.end.y)
+        x0, y0 = _lx0(e), _ly0(e)
+        x1, y1 = _lx1(e), _ly1(e)
     except Exception:  # noqa: BLE001
         return None
     length = math.hypot(x1 - x0, y1 - y0)
@@ -2264,7 +2500,7 @@ def promote_hbeam_columns(msp) -> int:
     if not ids:
         return 0
     n = 0
-    for e in msp:
+    for e in _entities(msp):
         if id(e) not in ids:
             continue
         if e.dxf.layer == WALL_LAYER:
@@ -2311,7 +2547,7 @@ def _mark_column(ent) -> None:
 
 def _fold_class_layers(msp) -> None:
     """재검증 때 창·기둥을 잠시 WALL로 되돌린다. 저장 직전에 다시 나눈다."""
-    for entity in msp:
+    for entity in _entities(msp):
         if getattr(entity.dxf, "layer", None) not in (WINDOW_LAYER, COLUMN_LAYER):
             continue
         entity.dxf.layer = WALL_LAYER
@@ -2323,7 +2559,7 @@ def _fold_class_layers(msp) -> None:
 
 def _polyline_xy(ent) -> list[tuple[float, float]]:
     try:
-        return [(float(p[0]), float(p[1])) for p in ent.get_points("xy")]
+        return [(float(p[0]), float(p[1])) for p in _poly_xy(ent)]
     except Exception:  # noqa: BLE001
         return []
 
@@ -2336,8 +2572,8 @@ def promote_h_symbol_columns(msp) -> tuple[int, list[tuple[float, float, float, 
     """
     boxes: list[tuple[float, float, float, float]] = []
     n = 0
-    for ent in msp:
-        if ent.dxftype() != "LWPOLYLINE" or not ent.closed:
+    for ent in _entities(msp):
+        if _dxftype(ent) != "LWPOLYLINE" or not ent.closed:
             continue
         pts = _polyline_xy(ent)
         if len(pts) < 12:
@@ -2371,19 +2607,19 @@ def promote_h_symbol_columns(msp) -> tuple[int, list[tuple[float, float, float, 
 def _x_door_openings(msp) -> list[tuple[bool, float, float, float, float]]:
     """X자 문 개구. (is_h, face0, face1, a0, a1). is_h 면 벽이 수평."""
     pieces: list[tuple[float, float, float, float]] = []
-    for ent in msp:
+    for ent in _entities(msp):
         if getattr(ent.dxf, "layer", None) not in (WALL_LAYER, BASE_LAYER):
             continue
         spans: list[tuple[tuple[float, float], tuple[float, float]]] = []
-        if ent.dxftype() == "LINE":
+        if _dxftype(ent) == "LINE":
             try:
                 spans = [(
-                    (float(ent.dxf.start.x), float(ent.dxf.start.y)),
-                    (float(ent.dxf.end.x), float(ent.dxf.end.y)),
+                    (_lx0(ent), _ly0(ent)),
+                    (_lx1(ent), _ly1(ent)),
                 )]
             except Exception:  # noqa: BLE001
                 continue
-        elif ent.dxftype() == "LWPOLYLINE":
+        elif _dxftype(ent) == "LWPOLYLINE":
             pts = _polyline_xy(ent)
             spans = list(zip(pts, pts[1:]))
             if ent.closed and pts:
@@ -2477,20 +2713,20 @@ def promote_column_adjacent_wall_pairs(
         return 0
     doors = _x_door_openings(msp)
     segs: list[tuple[bool, float, float, float, str, Any]] = []
-    for ent in msp:
+    for ent in _entities(msp):
         layer = getattr(ent.dxf, "layer", None)
         if layer not in (WALL_LAYER, BASE_LAYER):
             continue
         spans: list[tuple[tuple[float, float], tuple[float, float]]] = []
-        if ent.dxftype() == "LINE":
+        if _dxftype(ent) == "LINE":
             try:
                 spans = [(
-                    (float(ent.dxf.start.x), float(ent.dxf.start.y)),
-                    (float(ent.dxf.end.x), float(ent.dxf.end.y)),
+                    (_lx0(ent), _ly0(ent)),
+                    (_lx1(ent), _ly1(ent)),
                 )]
             except Exception:  # noqa: BLE001
                 continue
-        elif ent.dxftype() == "LWPOLYLINE":
+        elif _dxftype(ent) == "LWPOLYLINE":
             pts = _polyline_xy(ent)
             spans = list(zip(pts, pts[1:]))
             if ent.closed and len(pts) <= 5:
@@ -2590,20 +2826,20 @@ def correct_door_leaves_and_flanks(msp) -> tuple[int, int]:
 
     segs: list[tuple[bool, float, float, float, Any]] = []
     diagonals: list[tuple[float, float, float, float, Any]] = []
-    for ent in msp:
+    for ent in _entities(msp):
         layer = getattr(ent.dxf, "layer", None)
         if layer not in (WALL_LAYER, BASE_LAYER):
             continue
         spans: list[tuple[tuple[float, float], tuple[float, float]]] = []
-        if ent.dxftype() == "LINE":
+        if _dxftype(ent) == "LINE":
             try:
                 spans = [(
-                    (float(ent.dxf.start.x), float(ent.dxf.start.y)),
-                    (float(ent.dxf.end.x), float(ent.dxf.end.y)),
+                    (_lx0(ent), _ly0(ent)),
+                    (_lx1(ent), _ly1(ent)),
                 )]
             except Exception:  # noqa: BLE001
                 continue
-        elif ent.dxftype() == "LWPOLYLINE":
+        elif _dxftype(ent) == "LWPOLYLINE":
             pts = _polyline_xy(ent)
             spans = list(zip(pts, pts[1:]))
             if ent.closed and pts:
@@ -2747,18 +2983,18 @@ def demote_in_bboxes(
     boxes = normalize_bbox_list(list(bboxes), field="demote_bboxes")
     if not boxes:
         return result
-    for e in msp:
+    for e in _entities(msp):
         if e.dxf.layer != WALL_LAYER:
             continue
-        t = e.dxftype()
+        t = _dxftype(e)
         pts: list[tuple[float, float]] = []
         if t == "LINE":
             pts = [
-                (float(e.dxf.start.x), float(e.dxf.start.y)),
-                (float(e.dxf.end.x), float(e.dxf.end.y)),
+                (_lx0(e), _ly0(e)),
+                (_lx1(e), _ly1(e)),
             ]
         elif t == "LWPOLYLINE":
-            pts = [(float(p[0]), float(p[1])) for p in e.get_points("xy")]
+            pts = [(float(p[0]), float(p[1])) for p in _poly_xy(e)]
         if not pts:
             continue
         mx = sum(p[0] for p in pts) / len(pts)
@@ -2862,8 +3098,8 @@ def protect_corridor_wall_entities(
 def _iter_text_labels(msp) -> list[tuple[float, float, str]]:
     """TEXT/MTEXT → (x, y, plain_text)."""
     out: list[tuple[float, float, str]] = []
-    for e in msp:
-        t = e.dxftype()
+    for e in _entities(msp):
+        t = _dxftype(e)
         try:
             if t == "TEXT":
                 s = str(e.dxf.text or "").strip()
@@ -2953,10 +3189,10 @@ def _seat_door_wall_orthos(segs: list[AxisSeg]) -> set[float]:
         except Exception:  # noqa: BLE001
             continue
     if msp is not None:
-        for e in msp:
-            if e.dxftype() != "ARC":
+        for e in _entities(msp):
+            if _dxftype(e) != "ARC":
                 continue
-            r = float(e.dxf.radius)
+            r = _ar(e)
             if 650.0 <= r <= 1400.0:
                 c = e.dxf.center
                 hinges.append((float(c.x), float(c.y), r))
@@ -4614,12 +4850,12 @@ def protect_stair_enclosure_entities(
 def find_elevator_shafts(msp) -> list[dict[str, float]]:
     """엘리베이터 샤프트 — 교차 대각선(X) 쌍 → 중심·반폭·반높이."""
     diags: list[tuple[float, float, float, float, float, float, float, float]] = []
-    for e in msp:
-        if e.dxftype() != "LINE":
+    for e in _entities(msp):
+        if _dxftype(e) != "LINE":
             continue
         try:
-            x0, y0 = float(e.dxf.start.x), float(e.dxf.start.y)
-            x1, y1 = float(e.dxf.end.x), float(e.dxf.end.y)
+            x0, y0 = _lx0(e), _ly0(e)
+            x1, y1 = _lx1(e), _ly1(e)
         except Exception:  # noqa: BLE001
             continue
         length = math.hypot(x1 - x0, y1 - y0)
@@ -5931,13 +6167,13 @@ def find_double_door_openings(
     반환: (세로문인가, 벽 ortho, 개구 along0, along1). 문짝 구간이며 벽이 아니다.
     """
     centers: list[list[float]] = []
-    for e in msp:
-        if e.dxftype() != "ARC":
+    for e in _entities(msp):
+        if _dxftype(e) != "ARC":
             continue
         try:
-            r = float(e.dxf.radius)
-            cx, cy = float(e.dxf.center.x), float(e.dxf.center.y)
-            sweep = (float(e.dxf.end_angle) - float(e.dxf.start_angle)) % 360.0
+            r = _ar(e)
+            cx, cy = _acx(e), _acy(e)
+            sweep = (_aea(e) - _asa(e)) % 360.0
         except Exception:  # noqa: BLE001
             continue
         if not (650.0 <= r <= 1600.0) or not (20.0 <= sweep <= 200.0):
@@ -5996,13 +6232,13 @@ def find_single_door_openings(
     스윙 방향은 개구와 같은 순서다. +1 은 ortho 가 큰 쪽, 0 이면 방향을 쓰지 않는다.
     """
     swings: list[tuple[float, float, float, float, float]] = []
-    for e in msp:
-        if e.dxftype() != "ARC":
+    for e in _entities(msp):
+        if _dxftype(e) != "ARC":
             continue
         try:
-            r = float(e.dxf.radius)
-            cx, cy = float(e.dxf.center.x), float(e.dxf.center.y)
-            sa, ea = float(e.dxf.start_angle), float(e.dxf.end_angle)
+            r = _ar(e)
+            cx, cy = _acx(e), _acy(e)
+            sa, ea = _asa(e), _aea(e)
         except Exception:  # noqa: BLE001
             continue
         sweep = (ea - sa) % 360.0
@@ -6019,21 +6255,21 @@ def find_single_door_openings(
     # 문 양옆처럼 1400 mm 보다 짧아도 개구에 맞닿는 면.
     jamb_h: list[tuple[float, float, float]] = []
     jamb_v: list[tuple[float, float, float]] = []
-    for e in msp:
-        t = e.dxftype()
+    for e in _entities(msp):
+        t = _dxftype(e)
         pairs: list[tuple[float, float, float, float]] = []
         try:
             if t == "LINE":
                 pairs.append(
                     (
-                        float(e.dxf.start.x),
-                        float(e.dxf.start.y),
-                        float(e.dxf.end.x),
-                        float(e.dxf.end.y),
+                        _lx0(e),
+                        _ly0(e),
+                        _lx1(e),
+                        _ly1(e),
                     )
                 )
             elif t == "LWPOLYLINE":
-                pts = [(float(p[0]), float(p[1])) for p in e.get_points("xy")]
+                pts = [(float(p[0]), float(p[1])) for p in _poly_xy(e)]
                 pairs.extend(
                     (a[0], a[1], b[0], b[1]) for a, b in zip(pts, pts[1:])
                 )
@@ -6317,17 +6553,17 @@ def find_narrow_leaf_openings(
     """
     walls_h: list[tuple[float, float, float]] = []
     walls_v: list[tuple[float, float, float]] = []
-    for e in msp:
-        t = e.dxftype()
+    for e in _entities(msp):
+        t = _dxftype(e)
         pairs: list[tuple[float, float, float, float]] = []
         try:
             if t == "LINE":
                 pairs.append((
-                    float(e.dxf.start.x), float(e.dxf.start.y),
-                    float(e.dxf.end.x), float(e.dxf.end.y),
+                    _lx0(e), _ly0(e),
+                    _lx1(e), _ly1(e),
                 ))
             elif t == "LWPOLYLINE":
-                pts = [(float(p[0]), float(p[1])) for p in e.get_points("xy")]
+                pts = [(float(p[0]), float(p[1])) for p in _poly_xy(e)]
                 pairs.extend((a[0], a[1], b[0], b[1]) for a, b in zip(pts, pts[1:]))
         except Exception:  # noqa: BLE001
             continue
@@ -6342,14 +6578,14 @@ def find_narrow_leaf_openings(
                 walls_h.append(((y0 + y1) * 0.5, min(x0, x1), max(x0, x1)))
     out: list[tuple[bool, float, float, float]] = []
     seen: set[tuple[int, int]] = set()
-    for e in msp:
-        if e.dxftype() != "ARC":
+    for e in _entities(msp):
+        if _dxftype(e) != "ARC":
             continue
         try:
-            r = float(e.dxf.radius)
-            cx, cy = float(e.dxf.center.x), float(e.dxf.center.y)
-            sweep = (float(e.dxf.end_angle) - float(e.dxf.start_angle)) % 360.0
-            sa, ea = float(e.dxf.start_angle), float(e.dxf.end_angle)
+            r = _ar(e)
+            cx, cy = _acx(e), _acy(e)
+            sweep = (_aea(e) - _asa(e)) % 360.0
+            sa, ea = _asa(e), _aea(e)
         except Exception:  # noqa: BLE001
             continue
         if not (700.0 <= r <= 1200.0) or not (20.0 <= sweep <= 45.0):
@@ -6458,22 +6694,22 @@ def correct_walls_around_doors(msp) -> tuple[int, int]:
 
     # 같은 방향 선. 쌍이 있는 BASE만 양옆 벽으로 올린다.
     raw: list[tuple[bool, float, float, float, str]] = []
-    for e in msp:
+    for e in _entities(msp):
         layer = getattr(e.dxf, "layer", None)
         if layer not in (WALL_LAYER, BASE_LAYER):
             continue
         spans: list[tuple[tuple[float, float], tuple[float, float]]] = []
-        if e.dxftype() == "LINE":
+        if _dxftype(e) == "LINE":
             try:
                 spans = [(
-                    (float(e.dxf.start.x), float(e.dxf.start.y)),
-                    (float(e.dxf.end.x), float(e.dxf.end.y)),
+                    (_lx0(e), _ly0(e)),
+                    (_lx1(e), _ly1(e)),
                 )]
             except Exception:  # noqa: BLE001
                 continue
-        elif e.dxftype() == "LWPOLYLINE":
+        elif _dxftype(e) == "LWPOLYLINE":
             try:
-                pts = [(float(p[0]), float(p[1])) for p in e.get_points("xy")]
+                pts = [(float(p[0]), float(p[1])) for p in _poly_xy(e)]
             except Exception:  # noqa: BLE001
                 continue
             spans = list(zip(pts, pts[1:]))
@@ -6567,17 +6803,17 @@ def correct_walls_around_doors(msp) -> tuple[int, int]:
     seat_segs = iter_axis_segs(msp, min_len_mm=70.0)
     wall_ents = [
         e
-        for e in list(msp)
-        if e.dxftype() in ("LINE", "LWPOLYLINE") and getattr(e.dxf, "layer", None) == WALL_LAYER
+        for e in _entities(msp)
+        if _dxftype(e) in ("LINE", "LWPOLYLINE") and getattr(e.dxf, "layer", None) == WALL_LAYER
     ]
     for e in wall_ents:
-        if e.dxftype() == "LINE":
+        if _dxftype(e) == "LINE":
             spans = [(
-                (float(e.dxf.start.x), float(e.dxf.start.y)),
-                (float(e.dxf.end.x), float(e.dxf.end.y)),
+                (_lx0(e), _ly0(e)),
+                (_lx1(e), _ly1(e)),
             )]
         else:
-            pts = [(float(p[0]), float(p[1])) for p in e.get_points("xy")]
+            pts = [(float(p[0]), float(p[1])) for p in _poly_xy(e)]
             spans = list(zip(pts, pts[1:]))
             if e.closed and len(pts) > 2:
                 spans.append((pts[-1], pts[0]))
@@ -6692,7 +6928,7 @@ def correct_control_room_bottom_door(msp) -> tuple[int, int]:
     if not labels:
         return 0, 0
     parsed: list[tuple[str, float, float, float, float, Any]] = []
-    for e in msp:
+    for e in _entities(msp):
         axis = _axis_line(e)
         if axis is None:
             continue
@@ -6833,7 +7069,7 @@ def correct_leaf_span_door(msp) -> tuple[int, int]:
     같은 형태는 가로·세로 모두, 층 전체에서 찾는다.
     """
     parsed: list[tuple[str, float, float, float, float, str, Any]] = []
-    for e in msp:
+    for e in _entities(msp):
         axis = _axis_line(e)
         if axis is None:
             continue
@@ -7059,11 +7295,11 @@ def promote_angled_door_flanks(msp) -> tuple[int, int]:
     """
     lines: list[tuple[float, float, float, float, float, float, Any]] = []
     arcs: list[tuple[float, float, float]] = []
-    for e in msp:
-        if e.dxftype() == "LINE":
+    for e in _entities(msp):
+        if _dxftype(e) == "LINE":
             try:
-                x0, y0 = float(e.dxf.start.x), float(e.dxf.start.y)
-                x1, y1 = float(e.dxf.end.x), float(e.dxf.end.y)
+                x0, y0 = _lx0(e), _ly0(e)
+                x1, y1 = _lx1(e), _ly1(e)
             except Exception:  # noqa: BLE001
                 continue
             length = math.hypot(x1 - x0, y1 - y0)
@@ -7074,9 +7310,9 @@ def promote_angled_door_flanks(msp) -> tuple[int, int]:
                 lines.append((x0, y0, x1, y1, length, ang, e))
                 continue
             lines.append((x0, y0, x1, y1, length, ang, e))
-        elif e.dxftype() == "ARC":
+        elif _dxftype(e) == "ARC":
             try:
-                arcs.append((float(e.dxf.center.x), float(e.dxf.center.y), float(e.dxf.radius)))
+                arcs.append((_acx(e), _acy(e), _ar(e)))
             except Exception:  # noqa: BLE001
                 continue
 
@@ -7170,7 +7406,7 @@ def promote_angled_door_flanks(msp) -> tuple[int, int]:
         if not any(side == 0 for side, _e in flanks) or not any(side == 1 for side, _e in flanks):
             continue
         seen.append((cx, cy))
-        for ent in msp:
+        for ent in _entities(msp):
             if id(ent) not in leaf_ids:
                 continue
             if getattr(ent.dxf, "layer", None) != WALL_LAYER:
@@ -7202,7 +7438,7 @@ def correct_split_wall_door(msp) -> tuple[int, int]:
     투시영상 검사실7 왼쪽처럼 문 구간에만 속 선이 있고, 위·아래(또는 좌·우)는 빈 이중벽이다.
     """
     lines: list[tuple[str, float, float, float, float, str, Any]] = []
-    for e in msp:
+    for e in _entities(msp):
         axis = _axis_line(e)
         if axis is None:
             continue
@@ -7317,12 +7553,12 @@ def promote_room_door_sides(msp) -> tuple[int, int]:
     그리고 중앙의 사선 문처럼 양끝이 짧은 벽으로 이어진 경우.
     """
     lines: list[tuple[float, float, float, float, float, float, bool, str, Any]] = []
-    for e in msp:
-        if e.dxftype() != "LINE":
+    for e in _entities(msp):
+        if _dxftype(e) != "LINE":
             continue
         try:
-            x0, y0 = float(e.dxf.start.x), float(e.dxf.start.y)
-            x1, y1 = float(e.dxf.end.x), float(e.dxf.end.y)
+            x0, y0 = _lx0(e), _ly0(e)
+            x1, y1 = _lx1(e), _ly1(e)
         except Exception:  # noqa: BLE001
             continue
         length = math.hypot(x1 - x0, y1 - y0)
@@ -7505,8 +7741,8 @@ def correct_inwall_swing_doors(msp) -> tuple[int, int]:
     """
     parsed: list[tuple[str, float, float, float, float, str, Any]] = []
     arcs: list[tuple[float, float, float]] = []
-    for e in msp:
-        if e.dxftype() == "LINE":
+    for e in _entities(msp):
+        if _dxftype(e) == "LINE":
             a, b = e.dxf.start, e.dxf.end
             dx, dy = abs(b.x - a.x), abs(b.y - a.y)
             length = math.hypot(b.x - a.x, b.y - a.y)
@@ -7517,10 +7753,10 @@ def correct_inwall_swing_doors(msp) -> tuple[int, int]:
                 parsed.append(("H", (a.y + b.y) / 2.0, min(a.x, b.x), max(a.x, b.x), length, e.dxf.layer, e))
             elif dx <= tol:
                 parsed.append(("V", (a.x + b.x) / 2.0, min(a.y, b.y), max(a.y, b.y), length, e.dxf.layer, e))
-        elif e.dxftype() == "ARC":
-            radius = float(e.dxf.radius)
+        elif _dxftype(e) == "ARC":
+            radius = _ar(e)
             if 650.0 <= radius <= 950.0:
-                arcs.append((float(e.dxf.center.x), float(e.dxf.center.y), radius))
+                arcs.append((_acx(e), _acy(e), radius))
 
     doors: list[tuple[str, float, float, float, float, list[Any]]] = []
     seen: set[tuple] = set()
@@ -7670,8 +7906,8 @@ def correct_return_sided_doors(msp) -> tuple[int, int]:
     """
     parsed: list[tuple[str, float, float, float, float, str, Any]] = []
     arcs: list[tuple[float, float, float]] = []
-    for e in msp:
-        if e.dxftype() == "LINE":
+    for e in _entities(msp):
+        if _dxftype(e) == "LINE":
             a, b = e.dxf.start, e.dxf.end
             dx, dy = abs(b.x - a.x), abs(b.y - a.y)
             length = math.hypot(b.x - a.x, b.y - a.y)
@@ -7682,10 +7918,10 @@ def correct_return_sided_doors(msp) -> tuple[int, int]:
                 parsed.append(("H", (a.y + b.y) / 2.0, min(a.x, b.x), max(a.x, b.x), length, e.dxf.layer, e))
             elif dx <= tol:
                 parsed.append(("V", (a.x + b.x) / 2.0, min(a.y, b.y), max(a.y, b.y), length, e.dxf.layer, e))
-        elif e.dxftype() == "ARC":
-            radius = float(e.dxf.radius)
+        elif _dxftype(e) == "ARC":
+            radius = _ar(e)
             if 800.0 <= radius <= 1000.0:
-                arcs.append((float(e.dxf.center.x), float(e.dxf.center.y), radius))
+                arcs.append((_acx(e), _acy(e), radius))
 
     n_demote = 0
     n_promote = 0
@@ -7884,8 +8120,8 @@ def correct_band_leaf_doors(msp) -> tuple[int, int]:
     양끝은 별도 벽으로 이어진다. 면 바로 바깥의 통과선도 문이다.
     """
     parsed: list[tuple[str, float, float, float, float, str, Any]] = []
-    for e in msp:
-        if e.dxftype() != "LINE":
+    for e in _entities(msp):
+        if _dxftype(e) != "LINE":
             continue
         a, b = e.dxf.start, e.dxf.end
         dx, dy = abs(b.x - a.x), abs(b.y - a.y)
@@ -7995,8 +8231,8 @@ def correct_narrow_face_doors(msp) -> tuple[int, int]:
     내리고 두 문 사이는 벽으로 둔다. 조정실 기둥에서 이어진 세로 이중면은 벽이다.
     """
     parsed: list[tuple[str, float, float, float, float, str, Any]] = []
-    for e in msp:
-        if e.dxftype() != "LINE":
+    for e in _entities(msp):
+        if _dxftype(e) != "LINE":
             continue
         a, b = e.dxf.start, e.dxf.end
         dx, dy = abs(b.x - a.x), abs(b.y - a.y)
@@ -8219,8 +8455,8 @@ def correct_filled_opening_doors(msp) -> tuple[int, int]:
     정사각 기둥의 남은 변도 벽으로 둔다.
     """
     parsed: list[tuple[str, float, float, float, float, str, Any]] = []
-    for e in msp:
-        if e.dxftype() != "LINE":
+    for e in _entities(msp):
+        if _dxftype(e) != "LINE":
             continue
         a, b = e.dxf.start, e.dxf.end
         dx, dy = abs(b.x - a.x), abs(b.y - a.y)
@@ -8361,10 +8597,10 @@ def correct_filled_opening_doors(msp) -> tuple[int, int]:
                             n_promote += 1
 
     arcs: list[tuple[float, float, float]] = []
-    for e in msp:
-        if e.dxftype() != "ARC":
+    for e in _entities(msp):
+        if _dxftype(e) != "ARC":
             continue
-        radius = float(e.dxf.radius)
+        radius = _ar(e)
         if 900.0 <= radius <= 1600.0:
             center = e.dxf.center
             arcs.append((center.x, center.y, radius))
@@ -8495,14 +8731,14 @@ def promote_angled_end_door_jambs(msp) -> tuple[int, int]:
     parsed: list[tuple[str, float, float, float, float, str, Any]] = []
     arcs: list[tuple[float, float, float]] = []
     diags: list[tuple[float, float, float, float]] = []
-    for e in msp:
-        if e.dxftype() == "ARC":
-            radius = float(e.dxf.radius)
+    for e in _entities(msp):
+        if _dxftype(e) == "ARC":
+            radius = _ar(e)
             if 800.0 <= radius <= 1100.0:
                 center = e.dxf.center
                 arcs.append((center.x, center.y, radius))
             continue
-        if e.dxftype() != "LINE":
+        if _dxftype(e) != "LINE":
             continue
         a, b = e.dxf.start, e.dxf.end
         dx, dy = b.x - a.x, b.y - a.y
@@ -8611,14 +8847,14 @@ def correct_offset_swing_opening(msp) -> tuple[int, int]:
     """
     parsed: list[tuple[str, float, float, float, float, str, Any]] = []
     arcs: list[tuple[float, float, float]] = []
-    for e in msp:
-        if e.dxftype() == "ARC":
-            radius = float(e.dxf.radius)
+    for e in _entities(msp):
+        if _dxftype(e) == "ARC":
+            radius = _ar(e)
             if 900.0 <= radius <= 1600.0:
                 center = e.dxf.center
                 arcs.append((center.x, center.y, radius))
             continue
-        if e.dxftype() != "LINE":
+        if _dxftype(e) != "LINE":
             continue
         a, b = e.dxf.start, e.dxf.end
         dx, dy = abs(b.x - a.x), abs(b.y - a.y)
@@ -8721,8 +8957,8 @@ def correct_runthrough_frame_doors(msp) -> tuple[int, int]:
     25mm 밖 벽이 문 한가운데에서 시작해 문 끝을 40–500mm만 넘긴다.
     """
     parsed: list[tuple[str, float, float, float, float, str, Any]] = []
-    for e in msp:
-        if e.dxftype() != "LINE":
+    for e in _entities(msp):
+        if _dxftype(e) != "LINE":
             continue
         a, b = e.dxf.start, e.dxf.end
         dx, dy = abs(b.x - a.x), abs(b.y - a.y)
@@ -8828,14 +9064,14 @@ def correct_room_header_doors(msp) -> tuple[int, int]:
     """
     parsed: list[tuple[str, float, float, float, float, str, Any]] = []
     arcs: list[tuple[float, float, float]] = []
-    for e in msp:
-        if e.dxftype() == "ARC":
-            radius = float(e.dxf.radius)
+    for e in _entities(msp):
+        if _dxftype(e) == "ARC":
+            radius = _ar(e)
             if 850.0 <= radius <= 1050.0:
                 center = e.dxf.center
                 arcs.append((center.x, center.y, radius))
             continue
-        if e.dxftype() != "LINE":
+        if _dxftype(e) != "LINE":
             continue
         a, b = e.dxf.start, e.dxf.end
         dx, dy = abs(b.x - a.x), abs(b.y - a.y)
@@ -9007,13 +9243,13 @@ def correct_split_face_doors(msp) -> tuple[int, int]:
     """
     parsed: list[tuple[str, float, float, float, float, str, Any]] = []
     arcs: list[tuple[float, float, float]] = []
-    for e in msp:
-        if e.dxftype() == "ARC":
-            radius = float(e.dxf.radius)
+    for e in _entities(msp):
+        if _dxftype(e) == "ARC":
+            radius = _ar(e)
             if 900.0 <= radius <= 1600.0:
                 center = e.dxf.center
                 arcs.append((center.x, center.y, radius))
-        if e.dxftype() != "LINE":
+        if _dxftype(e) != "LINE":
             continue
         a, b = e.dxf.start, e.dxf.end
         dx, dy = abs(b.x - a.x), abs(b.y - a.y)
@@ -9190,14 +9426,14 @@ def correct_hinge_panel_doors(msp) -> tuple[int, int]:
     """
     parsed: list[tuple[str, float, float, float, float, str, Any]] = []
     arcs: list[tuple[float, float, float]] = []
-    for e in msp:
-        if e.dxftype() == "ARC":
-            radius = float(e.dxf.radius)
+    for e in _entities(msp):
+        if _dxftype(e) == "ARC":
+            radius = _ar(e)
             if 850.0 <= radius <= 1050.0:
                 center = e.dxf.center
                 arcs.append((center.x, center.y, radius))
             continue
-        if e.dxftype() != "LINE":
+        if _dxftype(e) != "LINE":
             continue
         a, b = e.dxf.start, e.dxf.end
         dx, dy = abs(b.x - a.x), abs(b.y - a.y)
@@ -9278,14 +9514,14 @@ def correct_radius_jamb_doors(msp) -> tuple[int, int]:
     """
     parsed: list[tuple[str, float, float, float, float, str, Any]] = []
     arcs: list[tuple[float, float, float]] = []
-    for e in msp:
-        if e.dxftype() == "ARC":
-            radius = float(e.dxf.radius)
+    for e in _entities(msp):
+        if _dxftype(e) == "ARC":
+            radius = _ar(e)
             if 850.0 <= radius <= 1600.0:
                 center = e.dxf.center
                 arcs.append((center.x, center.y, radius))
             continue
-        if e.dxftype() != "LINE":
+        if _dxftype(e) != "LINE":
             continue
         a, b = e.dxf.start, e.dxf.end
         dx, dy = abs(b.x - a.x), abs(b.y - a.y)
@@ -9400,14 +9636,14 @@ def promote_partition_extensions(msp) -> int:
     """
     parsed: list[tuple[str, float, float, float, float, str, Any]] = []
     arcs: list[tuple[float, float, float]] = []
-    for e in msp:
-        if e.dxftype() == "ARC":
-            radius = float(e.dxf.radius)
+    for e in _entities(msp):
+        if _dxftype(e) == "ARC":
+            radius = _ar(e)
             if 700.0 <= radius <= 1200.0:
                 center = e.dxf.center
                 arcs.append((center.x, center.y, radius))
             continue
-        if e.dxftype() != "LINE":
+        if _dxftype(e) != "LINE":
             continue
         a, b = e.dxf.start, e.dxf.end
         dx, dy = abs(b.x - a.x), abs(b.y - a.y)
@@ -9503,14 +9739,14 @@ def promote_one_sided_swing_gaps(msp) -> int:
     """
     parsed: list[tuple[str, float, float, float, float, str, Any]] = []
     arcs: list[tuple[float, float, float]] = []
-    for e in msp:
-        if e.dxftype() == "ARC":
-            radius = float(e.dxf.radius)
+    for e in _entities(msp):
+        if _dxftype(e) == "ARC":
+            radius = _ar(e)
             if 900.0 <= radius <= 1600.0:
                 center = e.dxf.center
                 arcs.append((center.x, center.y, radius))
             continue
-        if e.dxftype() != "LINE":
+        if _dxftype(e) != "LINE":
             continue
         a, b = e.dxf.start, e.dxf.end
         dx, dy = abs(b.x - a.x), abs(b.y - a.y)
@@ -9596,8 +9832,8 @@ def promote_opposed_door_sides(msp) -> tuple[int, int]:
     그 회색 벽과 짧은 문설주는 올리고, 개구 안의 문짝은 내린다.
     """
     parsed: list[tuple[str, float, float, float, float, str, Any]] = []
-    for e in msp:
-        if e.dxftype() != "LINE":
+    for e in _entities(msp):
+        if _dxftype(e) != "LINE":
             continue
         a, b = e.dxf.start, e.dxf.end
         dx, dy = abs(b.x - a.x), abs(b.y - a.y)
@@ -9706,8 +9942,8 @@ def promote_aligned_wall_gaps(msp) -> int:
     조혈모세포 처치보관실 왼쪽처럼 긴 이중벽의 회색 틈이 양쪽 면에서 맞는다.
     """
     parsed: list[tuple[str, float, float, float, float, str, Any]] = []
-    for e in msp:
-        if e.dxftype() != "LINE":
+    for e in _entities(msp):
+        if _dxftype(e) != "LINE":
             continue
         a, b = e.dxf.start, e.dxf.end
         dx, dy = abs(b.x - a.x), abs(b.y - a.y)
@@ -9791,14 +10027,14 @@ def promote_return_door_sides(msp) -> tuple[int, int]:
     """
     parsed: list[tuple[str, float, float, float, float, str, Any]] = []
     arcs: list[tuple[float, float, float]] = []
-    for e in msp:
-        if e.dxftype() == "ARC":
-            radius = float(e.dxf.radius)
+    for e in _entities(msp):
+        if _dxftype(e) == "ARC":
+            radius = _ar(e)
             if 850.0 <= radius <= 1050.0:
                 center = e.dxf.center
                 arcs.append((center.x, center.y, radius))
             continue
-        if e.dxftype() != "LINE":
+        if _dxftype(e) != "LINE":
             continue
         a, b = e.dxf.start, e.dxf.end
         dx, dy = abs(b.x - a.x), abs(b.y - a.y)
@@ -9906,16 +10142,16 @@ def promote_corner_wall_squares(msp) -> int:
     """벽이 한 변에서 끊기는 회색 정사각은 기둥이다. 네 변을 벽으로 둔다."""
     parsed: list[tuple[str, float, float, float, float, str, Any]] = []
     arcs: list[tuple[float, float, float]] = []
-    for e in msp:
-        if e.dxftype() == "ARC":
-            start = float(e.dxf.start_angle)
-            end = float(e.dxf.end_angle)
+    for e in _entities(msp):
+        if _dxftype(e) == "ARC":
+            start = _asa(e)
+            end = _aea(e)
             sweep = (end - start) % 360.0
             if 60.0 <= sweep <= 120.0:
                 center = e.dxf.center
                 arcs.append((center.x, center.y, sweep))
             continue
-        if e.dxftype() != "LINE":
+        if _dxftype(e) != "LINE":
             continue
         a, b = e.dxf.start, e.dxf.end
         dx, dy = abs(b.x - a.x), abs(b.y - a.y)
@@ -9997,15 +10233,15 @@ def promote_collinear_swing_sides(msp) -> tuple[int, int]:
     """
     parsed: list[tuple[str, float, float, float, float, str, Any]] = []
     arcs: list[tuple[float, float, float]] = []
-    for e in msp:
-        if e.dxftype() == "ARC":
-            radius = float(e.dxf.radius)
-            sweep = (float(e.dxf.end_angle) - float(e.dxf.start_angle)) % 360.0
+    for e in _entities(msp):
+        if _dxftype(e) == "ARC":
+            radius = _ar(e)
+            sweep = (_aea(e) - _asa(e)) % 360.0
             if 850.0 <= radius <= 1050.0 and 70.0 <= sweep <= 110.0:
                 center = e.dxf.center
                 arcs.append((center.x, center.y, radius))
             continue
-        if e.dxftype() != "LINE":
+        if _dxftype(e) != "LINE":
             continue
         a, b = e.dxf.start, e.dxf.end
         dx, dy = abs(b.x - a.x), abs(b.y - a.y)
@@ -10129,15 +10365,15 @@ def promote_wall_face_continuations(msp) -> int:
     """
     parsed: list[tuple[str, float, float, float, float, str, Any]] = []
     arcs: list[tuple[float, float, float]] = []
-    for e in msp:
-        if e.dxftype() == "ARC":
-            radius = float(e.dxf.radius)
-            sweep = (float(e.dxf.end_angle) - float(e.dxf.start_angle)) % 360.0
+    for e in _entities(msp):
+        if _dxftype(e) == "ARC":
+            radius = _ar(e)
+            sweep = (_aea(e) - _asa(e)) % 360.0
             if 800.0 <= radius <= 1600.0 and 60.0 <= sweep <= 120.0:
                 center = e.dxf.center
                 arcs.append((center.x, center.y, radius))
             continue
-        if e.dxftype() != "LINE":
+        if _dxftype(e) != "LINE":
             continue
         a, b = e.dxf.start, e.dxf.end
         dx, dy = abs(b.x - a.x), abs(b.y - a.y)
@@ -10243,15 +10479,15 @@ def correct_offset_hinge_leaves(msp) -> tuple[int, int]:
     """
     parsed: list[tuple[str, float, float, float, float, str, Any]] = []
     arcs: list[tuple[float, float, float]] = []
-    for e in msp:
-        if e.dxftype() == "ARC":
-            radius = float(e.dxf.radius)
-            sweep = (float(e.dxf.end_angle) - float(e.dxf.start_angle)) % 360.0
+    for e in _entities(msp):
+        if _dxftype(e) == "ARC":
+            radius = _ar(e)
+            sweep = (_aea(e) - _asa(e)) % 360.0
             if 850.0 <= radius <= 1050.0 and 70.0 <= sweep <= 110.0:
                 center = e.dxf.center
                 arcs.append((center.x, center.y, radius))
             continue
-        if e.dxftype() != "LINE":
+        if _dxftype(e) != "LINE":
             continue
         a, b = e.dxf.start, e.dxf.end
         dx, dy = abs(b.x - a.x), abs(b.y - a.y)
@@ -10363,8 +10599,8 @@ def correct_locker_partition(msp) -> tuple[int, int]:
     짧은 빨간 구간 양옆의 회색 면은 벽이다. 문 높이의 빨간 면은 문짝이다.
     """
     parsed: list[tuple[str, float, float, float, float, str, Any]] = []
-    for e in msp:
-        if e.dxftype() != "LINE":
+    for e in _entities(msp):
+        if _dxftype(e) != "LINE":
             continue
         a, b = e.dxf.start, e.dxf.end
         dx, dy = abs(b.x - a.x), abs(b.y - a.y)
@@ -10533,8 +10769,8 @@ def correct_panel_face_doors(msp) -> tuple[int, int]:
     투시영상 검사실7 오른쪽처럼, 이중벽 안의 문짝을 따라 빨간 면이 이어진다.
     """
     parsed: list[tuple[str, float, float, float, float, str, Any]] = []
-    for e in msp:
-        if e.dxftype() != "LINE":
+    for e in _entities(msp):
+        if _dxftype(e) != "LINE":
             continue
         a, b = e.dxf.start, e.dxf.end
         dx, dy = abs(b.x - a.x), abs(b.y - a.y)
@@ -10629,8 +10865,8 @@ def promote_locker_floor_walls(msp) -> int:
     긴 바닥 벽에서 올라온 선이다.
     """
     parsed: list[tuple[str, float, float, float, float, str, Any]] = []
-    for e in msp:
-        if e.dxftype() != "LINE":
+    for e in _entities(msp):
+        if _dxftype(e) != "LINE":
             continue
         a, b = e.dxf.start, e.dxf.end
         dx, dy = abs(b.x - a.x), abs(b.y - a.y)
@@ -10733,7 +10969,7 @@ def promote_grid_door_flanks(msp) -> int:
     전사실 아래처럼 스윙 호 없이, 이중벽 두께 안에 긴 평행선이 겹쳐 있다.
     """
     parsed: list[tuple[str, float, float, float, float, str, Any]] = []
-    for e in msp:
+    for e in _entities(msp):
         axis = _axis_line(e)
         if axis is None:
             continue
@@ -10839,12 +11075,12 @@ def promote_marked_door_flanks(msp) -> int:
     hors = [s for s in segs if not s.is_v]
     diags: list[tuple[float, float, float, float]] = []
     seen_d: set[tuple[int, int]] = set()
-    for e in msp:
-        if e.dxftype() != "LINE":
+    for e in _entities(msp):
+        if _dxftype(e) != "LINE":
             continue
         try:
-            x0, y0 = float(e.dxf.start.x), float(e.dxf.start.y)
-            x1, y1 = float(e.dxf.end.x), float(e.dxf.end.y)
+            x0, y0 = _lx0(e), _ly0(e)
+            x1, y1 = _lx1(e), _ly1(e)
         except Exception:  # noqa: BLE001
             continue
         dx, dy = abs(x1 - x0), abs(y1 - y0)
@@ -10952,14 +11188,14 @@ def promote_serving_end_door_flanks(msp) -> int:
     hors = [s for s in segs if not s.is_v]
     swings: list[tuple[float, float, float, float, float]] = []
     seen_h: set[tuple[int, int]] = set()
-    for e in msp:
-        if e.dxftype() != "ARC":
+    for e in _entities(msp):
+        if _dxftype(e) != "ARC":
             continue
         try:
-            r = float(e.dxf.radius)
-            cx, cy = float(e.dxf.center.x), float(e.dxf.center.y)
-            sweep = (float(e.dxf.end_angle) - float(e.dxf.start_angle)) % 360.0
-            sa, ea = float(e.dxf.start_angle), float(e.dxf.end_angle)
+            r = _ar(e)
+            cx, cy = _acx(e), _acy(e)
+            sweep = (_aea(e) - _asa(e)) % 360.0
+            sa, ea = _asa(e), _aea(e)
         except Exception:  # noqa: BLE001
             continue
         if not (900.0 <= r <= 1200.0) or not (70.0 <= sweep <= 110.0):
@@ -11127,14 +11363,14 @@ def open_serving_corner_door(msp) -> int:
         return 0
     swings: list[tuple[float, float, float, float, float]] = []
     seen_h: set[tuple[int, int]] = set()
-    for e in msp:
-        if e.dxftype() != "ARC":
+    for e in _entities(msp):
+        if _dxftype(e) != "ARC":
             continue
         try:
-            r = float(e.dxf.radius)
-            cx, cy = float(e.dxf.center.x), float(e.dxf.center.y)
-            sweep = (float(e.dxf.end_angle) - float(e.dxf.start_angle)) % 360.0
-            sa, ea = float(e.dxf.start_angle), float(e.dxf.end_angle)
+            r = _ar(e)
+            cx, cy = _acx(e), _acy(e)
+            sweep = (_aea(e) - _asa(e)) % 360.0
+            sa, ea = _asa(e), _aea(e)
         except Exception:  # noqa: BLE001
             continue
         if not (900.0 <= r <= 1200.0) or not (70.0 <= sweep <= 110.0):
@@ -11162,7 +11398,7 @@ def open_serving_corner_door(msp) -> int:
             y0, y1 = (cy, up) if cy < up else (up, cy)
             hits = [
                 s for s in iter_axis_segs(msp, min_len_mm=80.0)
-                if s.is_v and s.layer == WALL_LAYER and s.entity.dxftype() == "LINE"
+                if s.is_v and s.layer == WALL_LAYER and _dxftype(s.entity) == "LINE"
                 and abs(s.ortho - cx) <= 280.0
                 and min(s.along1, y1) - max(s.along0, y0) > 80.0
             ]
@@ -11266,7 +11502,7 @@ def promote_control_booth_bottom(msp) -> int:
             full = abs((s.along1 - s.along0) - (a1 - a0)) < 30.0
             if (
                 e is not None
-                and e.dxftype() == "LINE"
+                and _dxftype(e) == "LINE"
                 and getattr(e.dxf, "layer", None) == BASE_LAYER
                 and full
             ):
@@ -11357,7 +11593,7 @@ def promote_stair_eps_party_wall(msp) -> int:
                 full = abs((s.along1 - s.along0) - (a1 - a0)) < 30.0
                 if (
                     e is not None
-                    and e.dxftype() == "LINE"
+                    and _dxftype(e) == "LINE"
                     and getattr(e.dxf, "layer", None) == BASE_LAYER
                     and full
                 ):
@@ -11448,7 +11684,7 @@ def promote_waiting_store_wall(msp) -> int:
                 full = abs((s.along1 - s.along0) - (a1 - a0)) < 30.0
                 if (
                     e is not None
-                    and e.dxftype() == "LINE"
+                    and _dxftype(e) == "LINE"
                     and getattr(e.dxf, "layer", None) == BASE_LAYER
                     and full
                 ):
@@ -11777,15 +12013,15 @@ def promote_bottom_column_run(msp) -> int:
         seen.add(key)
         extra.append((s.ortho, s.along0, s.along1))
         e = s.entity
-        if e is not None and e.dxftype() == "LINE" and getattr(e.dxf, "layer", None) == BASE_LAYER:
+        if e is not None and _dxftype(e) == "LINE" and getattr(e.dxf, "layer", None) == BASE_LAYER:
             e.dxf.layer = WALL_LAYER
             try:
                 e.dxf.color = WALL_COLOR
             except Exception:  # noqa: BLE001
                 pass
-        elif e is not None and e.dxftype() == "LWPOLYLINE":
+        elif e is not None and _dxftype(e) == "LWPOLYLINE":
             try:
-                pts = list(e.get_points("xy"))
+                pts = list(_poly_xy(e))
             except Exception:  # noqa: BLE001
                 pts = []
             if len(pts) == 2 and getattr(e.dxf, "layer", None) == BASE_LAYER:
@@ -11820,14 +12056,14 @@ def open_waiting_room_top_door(msp) -> int:
         return 0
     swings: list[tuple[float, float, float, float]] = []
     seen_h: set[tuple[int, int]] = set()
-    for e in msp:
-        if e.dxftype() != "ARC":
+    for e in _entities(msp):
+        if _dxftype(e) != "ARC":
             continue
         try:
-            r = float(e.dxf.radius)
-            cx, cy = float(e.dxf.center.x), float(e.dxf.center.y)
-            sweep = (float(e.dxf.end_angle) - float(e.dxf.start_angle)) % 360.0
-            sa, ea = float(e.dxf.start_angle), float(e.dxf.end_angle)
+            r = _ar(e)
+            cx, cy = _acx(e), _acy(e)
+            sweep = (_aea(e) - _asa(e)) % 360.0
+            sa, ea = _asa(e), _aea(e)
         except Exception:  # noqa: BLE001
             continue
         if not (900.0 <= r <= 1200.0) or not (70.0 <= sweep <= 110.0):
@@ -11913,14 +12149,14 @@ def open_waiting_room_top_door(msp) -> int:
                     continue
                 seen_e.add(eid)
                 e = s.entity
-                if e.dxftype() == "LWPOLYLINE":
+                if _dxftype(e) == "LWPOLYLINE":
                     try:
-                        pts = list(e.get_points("xy"))
+                        pts = list(_poly_xy(e))
                     except Exception:  # noqa: BLE001
                         continue
                     if len(pts) != 2:
                         continue
-                elif e.dxftype() != "LINE":
+                elif _dxftype(e) != "LINE":
                     continue
                 a0, a1, y = s.along0, s.along1, s.ortho
                 msp.delete_entity(e)
@@ -11948,7 +12184,7 @@ def open_waiting_room_top_door(msp) -> int:
                 e = s.entity
                 if (
                     e is not None
-                    and e.dxftype() == "LINE"
+                    and _dxftype(e) == "LINE"
                     and getattr(e.dxf, "layer", None) == BASE_LAYER
                 ):
                     e.dxf.layer = WALL_LAYER
@@ -11993,12 +12229,12 @@ def promote_wash_room_edges(msp) -> int:
         e = s.entity
         if (
             e is not None
-            and e.dxftype() in ("LINE", "LWPOLYLINE")
+            and _dxftype(e) in ("LINE", "LWPOLYLINE")
             and getattr(e.dxf, "layer", None) == BASE_LAYER
         ):
-            if e.dxftype() == "LWPOLYLINE":
+            if _dxftype(e) == "LWPOLYLINE":
                 try:
-                    pts = list(e.get_points("xy"))
+                    pts = list(_poly_xy(e))
                 except Exception:  # noqa: BLE001
                     pts = []
                 if len(pts) != 2:
@@ -12091,15 +12327,15 @@ def promote_equipment_store_walls(msp) -> int:
             return
         seen.add(key)
         e = s.entity
-        if e is not None and e.dxftype() == "LINE" and getattr(e.dxf, "layer", None) == BASE_LAYER:
+        if e is not None and _dxftype(e) == "LINE" and getattr(e.dxf, "layer", None) == BASE_LAYER:
             e.dxf.layer = WALL_LAYER
             try:
                 e.dxf.color = WALL_COLOR
             except Exception:  # noqa: BLE001
                 pass
-        elif e is not None and e.dxftype() == "LWPOLYLINE" and getattr(e.dxf, "layer", None) == BASE_LAYER:
+        elif e is not None and _dxftype(e) == "LWPOLYLINE" and getattr(e.dxf, "layer", None) == BASE_LAYER:
             try:
-                pts = list(e.get_points("xy"))
+                pts = list(_poly_xy(e))
             except Exception:  # noqa: BLE001
                 pts = []
             if len(pts) == 2:
@@ -12220,15 +12456,15 @@ def promote_small_meeting_bottom(msp) -> int:
                 continue
             seen.add(key)
             e = s.entity
-            if e.dxftype() == "LINE" and getattr(e.dxf, "layer", None) == BASE_LAYER:
+            if _dxftype(e) == "LINE" and getattr(e.dxf, "layer", None) == BASE_LAYER:
                 e.dxf.layer = WALL_LAYER
                 try:
                     e.dxf.color = WALL_COLOR
                 except Exception:  # noqa: BLE001
                     pass
-            elif e.dxftype() == "LWPOLYLINE" and getattr(e.dxf, "layer", None) == BASE_LAYER:
+            elif _dxftype(e) == "LWPOLYLINE" and getattr(e.dxf, "layer", None) == BASE_LAYER:
                 try:
-                    pts = list(e.get_points("xy"))
+                    pts = list(_poly_xy(e))
                 except Exception:  # noqa: BLE001
                     pts = []
                 if len(pts) == 2:
@@ -12308,13 +12544,13 @@ def promote_exec_meeting_right(msp) -> int:
                 continue
             seen.add(eid)
             e = s.entity
-            if e.dxftype() in ("LINE", "LWPOLYLINE") and getattr(e.dxf, "layer", None) == BASE_LAYER:
+            if _dxftype(e) in ("LINE", "LWPOLYLINE") and getattr(e.dxf, "layer", None) == BASE_LAYER:
                 try:
-                    pts = list(e.get_points("xy")) if e.dxftype() == "LWPOLYLINE" else []
+                    pts = list(_poly_xy(e)) if _dxftype(e) == "LWPOLYLINE" else []
                 except Exception:  # noqa: BLE001
                     pts = []
                 xs = [p[0] for p in pts]
-                if e.dxftype() == "LINE" or (pts and max(xs) - min(xs) <= 400.0):
+                if _dxftype(e) == "LINE" or (pts and max(xs) - min(xs) <= 400.0):
                     e.dxf.layer = WALL_LAYER
                     try:
                         e.dxf.color = WALL_COLOR
@@ -12343,11 +12579,11 @@ def demote_bay_panel_sills(msp) -> int:
     벽 두께로 오인된 것이다. 같은 줄의 이웃 실도 내린다.
     """
     panels: list[tuple[float, float, float, float]] = []
-    for e in msp:
-        if e.dxftype() != "LWPOLYLINE":
+    for e in _entities(msp):
+        if _dxftype(e) != "LWPOLYLINE":
             continue
         try:
-            pts = [(float(p[0]), float(p[1])) for p in e.get_points("xy")]
+            pts = [(float(p[0]), float(p[1])) for p in _poly_xy(e)]
         except Exception:  # noqa: BLE001
             continue
         if len(pts) < 4:
@@ -12386,8 +12622,8 @@ def demote_bay_panel_sills(msp) -> int:
         rows.append((x0, x1, y0))
 
     n = 0
-    for e in list(msp):
-        if e.dxftype() != "LINE" or getattr(e.dxf, "layer", None) != WALL_LAYER:
+    for e in _entities(msp):
+        if _dxftype(e) != "LINE" or getattr(e.dxf, "layer", None) != WALL_LAYER:
             continue
         axis = _axis_line(e)
         if axis is None or axis[0] != "H":
@@ -12408,7 +12644,7 @@ def demote_bay_panel_sills(msp) -> int:
             continue
         # 패널 반대편(아래)에 진짜 이중벽 면이 있으면 벽으로 둔다.
         mate = False
-        for other in msp:
+        for other in _entities(msp):
             if other is e or getattr(other.dxf, "layer", None) != WALL_LAYER:
                 continue
             other_axis = _axis_line(other)
@@ -12434,13 +12670,13 @@ def promote_end_wall_columns(msp) -> int:
     정사각 최소 변(450mm)보다 좁아 벽면 정사각 규칙에 안 걸린다.
     """
     boxes: list[tuple[float, float, float, float, Any]] = []
-    for e in msp:
-        if e.dxftype() != "LWPOLYLINE" or not e.closed:
+    for e in _entities(msp):
+        if _dxftype(e) != "LWPOLYLINE" or not e.closed:
             continue
         if getattr(e.dxf, "layer", None) not in (WALL_LAYER, BASE_LAYER):
             continue
         try:
-            pts = [(float(p[0]), float(p[1])) for p in e.get_points("xy")]
+            pts = [(float(p[0]), float(p[1])) for p in _poly_xy(e)]
         except Exception:  # noqa: BLE001
             continue
         if not (4 <= len(pts) <= 6):
@@ -12458,7 +12694,7 @@ def promote_end_wall_columns(msp) -> int:
 
     # 404·405호 아래쪽처럼 윤곽이 닫힌 폴리선이 아니라 선 네 개인 기둥.
     axis_segs: list[tuple[str, float, float, float, float, str, Any]] = []
-    for e in msp:
+    for e in _entities(msp):
         axis = _axis_line(e)
         if axis is None:
             continue
@@ -12496,11 +12732,11 @@ def promote_end_wall_columns(msp) -> int:
                 continue
             # 대각선이 있는 사각은 R.E.F 표식이다.
             diag = False
-            for e in msp:
-                if e.dxftype() != "LINE":
+            for e in _entities(msp):
+                if _dxftype(e) != "LINE":
                     continue
-                ax, ay = float(e.dxf.start.x), float(e.dxf.start.y)
-                bx, by = float(e.dxf.end.x), float(e.dxf.end.y)
+                ax, ay = _lx0(e), _ly0(e)
+                bx, by = _lx1(e), _ly1(e)
                 if abs(bx - ax) < 80.0 or abs(by - ay) < 80.0:
                     continue
                 if (
@@ -12523,7 +12759,7 @@ def promote_end_wall_columns(msp) -> int:
 
     v_walls: list[tuple[float, float, float]] = []
     h_walls: list[tuple[float, float, float]] = []
-    for e in msp:
+    for e in _entities(msp):
         if getattr(e.dxf, "layer", None) != WALL_LAYER:
             continue
         axis = _axis_line(e)
@@ -12594,7 +12830,7 @@ def promote_end_wall_columns(msp) -> int:
             n += 1
         else:
             seen.add(id(ent))
-    for e in msp:
+    for e in _entities(msp):
         if id(e) in seen or getattr(e.dxf, "layer", None) != BASE_LAYER:
             continue
         axis = _axis_line(e)
@@ -12645,7 +12881,7 @@ def promote_end_wall_columns(msp) -> int:
         return found
 
     leaving: list[tuple[str, float, float, float, Any, int]] = []
-    for e in msp:
+    for e in _entities(msp):
         if id(e) in seen or getattr(e.dxf, "layer", None) != BASE_LAYER:
             continue
         axis = _axis_line(e)
@@ -12692,17 +12928,17 @@ def promote_end_wall_columns(msp) -> int:
     # 기둥 폭 안쪽에 박힌 평행 쌍이 기둥 밖으로 이어지면 벽이다.
     # 409호 오른쪽 끝 600mm 기둥 위의 1500mm 쌍. X 대각선이 있는 문 구간은 제외.
     diags: list[tuple[float, float, float, float]] = []
-    for e in msp:
-        if e.dxftype() != "LINE":
+    for e in _entities(msp):
+        if _dxftype(e) != "LINE":
             continue
-        ax, ay = float(e.dxf.start.x), float(e.dxf.start.y)
-        bx, by = float(e.dxf.end.x), float(e.dxf.end.y)
+        ax, ay = _lx0(e), _ly0(e)
+        bx, by = _lx1(e), _ly1(e)
         if abs(bx - ax) < 80.0 or abs(by - ay) < 80.0:
             continue
         diags.append((min(ax, bx), max(ax, bx), min(ay, by), max(ay, by)))
 
     inset: list[tuple[str, float, float, float, Any, int]] = []
-    for e in msp:
+    for e in _entities(msp):
         if id(e) in seen or id(e) in used_leave or getattr(e.dxf, "layer", None) != BASE_LAYER:
             continue
         axis = _axis_line(e)
@@ -12773,21 +13009,21 @@ def correct_x_block_doors(msp) -> tuple[int, int]:
     같은 면으로 이어진 양옆은 WALL로 둔다.
     """
     pieces: list[tuple[float, float, float, float, Any]] = []
-    for e in msp:
+    for e in _entities(msp):
         layer = getattr(e.dxf, "layer", None)
         if layer not in (WALL_LAYER, BASE_LAYER):
             continue
-        if e.dxftype() == "LINE":
+        if _dxftype(e) == "LINE":
             try:
                 spans = [(
-                    (float(e.dxf.start.x), float(e.dxf.start.y)),
-                    (float(e.dxf.end.x), float(e.dxf.end.y)),
+                    (_lx0(e), _ly0(e)),
+                    (_lx1(e), _ly1(e)),
                 )]
             except Exception:  # noqa: BLE001
                 continue
-        elif e.dxftype() == "LWPOLYLINE":
+        elif _dxftype(e) == "LWPOLYLINE":
             try:
-                pts = [(float(p[0]), float(p[1])) for p in e.get_points("xy")]
+                pts = [(float(p[0]), float(p[1])) for p in _poly_xy(e)]
             except Exception:  # noqa: BLE001
                 continue
             spans = list(zip(pts, pts[1:]))
@@ -12894,7 +13130,7 @@ def correct_x_block_doors(msp) -> tuple[int, int]:
         return [(p0, p1) for p0, p1 in pieces_out if p1 - p0 >= 80.0]
 
     segs: list[tuple[Any, bool, float, float, float]] = []
-    for e in msp:
+    for e in _entities(msp):
         axis = _axis_line(e)
         if axis is None:
             continue
@@ -12979,7 +13215,7 @@ def correct_x_block_doors(msp) -> tuple[int, int]:
 
     seen_diag: set[int] = set()
     diag_ids = {ent_id for door in doors for ent_id in door["diag_ids"]}
-    for ent in msp:
+    for ent in _entities(msp):
         if id(ent) not in diag_ids or id(ent) in seen_diag:
             continue
         seen_diag.add(id(ent))
@@ -13081,7 +13317,7 @@ def correct_x_block_doors(msp) -> tuple[int, int]:
             for ent, seg_h, ortho, s0, s1 in segs:
                 if seg_h == door["is_h"] or id(ent) in closed or id(ent) in demoted:
                     continue
-                if ent.dxftype() != "LINE":
+                if _dxftype(ent) != "LINE":
                     continue
                 if abs(ortho - edge) > 25.0:
                     continue
@@ -13105,11 +13341,11 @@ def correct_capped_leaf_doors(msp) -> tuple[int, int]:
     개구에 바로 닿은 양옆 면은 벽으로 둔다.
     """
     caps: list[tuple[float, float, float, float]] = []
-    for e in msp:
-        if e.dxftype() != "LWPOLYLINE" or not e.closed:
+    for e in _entities(msp):
+        if _dxftype(e) != "LWPOLYLINE" or not e.closed:
             continue
         try:
-            pts = [(float(p[0]), float(p[1])) for p in e.get_points("xy")]
+            pts = [(float(p[0]), float(p[1])) for p in _poly_xy(e)]
         except Exception:  # noqa: BLE001
             continue
         if len(pts) < 4:
@@ -13124,7 +13360,7 @@ def correct_capped_leaf_doors(msp) -> tuple[int, int]:
         return (0, 0)
 
     segs: list[tuple[Any, bool, float, float, float]] = []
-    for e in msp:
+    for e in _entities(msp):
         axis = _axis_line(e)
         if axis is None:
             continue
@@ -13302,7 +13538,7 @@ def correct_capped_leaf_doors(msp) -> tuple[int, int]:
             for ent, seg_h, ortho, s0, s1 in segs:
                 if seg_h == door["is_h"] or id(ent) in closed or id(ent) in demoted:
                     continue
-                if ent.dxftype() != "LINE":
+                if _dxftype(ent) != "LINE":
                     continue
                 if abs(ortho - edge) > 25.0:
                     continue
@@ -13326,13 +13562,13 @@ def promote_zigzag_door_sides(msp) -> tuple[int, int]:
     문 끝에서 좌우로 이어지고 대각선이 없는 이중선만 벽으로 둔다.
     """
     doors: list[tuple[float, float, float, float, bool, Any]] = []
-    for e in msp:
-        if e.dxftype() != "LWPOLYLINE" or e.closed:
+    for e in _entities(msp):
+        if _dxftype(e) != "LWPOLYLINE" or e.closed:
             continue
         if getattr(e.dxf, "layer", None) not in (WALL_LAYER, BASE_LAYER):
             continue
         try:
-            pts = [(float(p[0]), float(p[1])) for p in e.get_points("xy")]
+            pts = [(float(p[0]), float(p[1])) for p in _poly_xy(e)]
         except Exception:  # noqa: BLE001
             continue
         if len(pts) != 5:
@@ -13360,15 +13596,15 @@ def promote_zigzag_door_sides(msp) -> tuple[int, int]:
         return (0, 0)
 
     diags: list[tuple[float, float, float, float]] = []
-    for e in msp:
-        if e.dxftype() == "LINE":
+    for e in _entities(msp):
+        if _dxftype(e) == "LINE":
             spans = [(
-                (float(e.dxf.start.x), float(e.dxf.start.y)),
-                (float(e.dxf.end.x), float(e.dxf.end.y)),
+                (_lx0(e), _ly0(e)),
+                (_lx1(e), _ly1(e)),
             )]
-        elif e.dxftype() == "LWPOLYLINE":
+        elif _dxftype(e) == "LWPOLYLINE":
             try:
-                pts = [(float(p[0]), float(p[1])) for p in e.get_points("xy")]
+                pts = [(float(p[0]), float(p[1])) for p in _poly_xy(e)]
             except Exception:  # noqa: BLE001
                 continue
             spans = list(zip(pts, pts[1:]))
@@ -13380,7 +13616,7 @@ def promote_zigzag_door_sides(msp) -> tuple[int, int]:
             diags.append((min(ax, bx), max(ax, bx), min(ay, by), max(ay, by)))
 
     lines: list[tuple[str, float, float, float, Any]] = []
-    for e in msp:
+    for e in _entities(msp):
         if getattr(e.dxf, "layer", None) != BASE_LAYER:
             continue
         axis = _axis_line(e)
@@ -13485,7 +13721,7 @@ def promote_outside_band_face(msp) -> int:
     윗변과 짧은 끝, 안의 X 표식은 벽이 아니다.
     """
     walls: list[tuple[str, float, float, float]] = []
-    for e in msp:
+    for e in _entities(msp):
         if getattr(e.dxf, "layer", None) != WALL_LAYER:
             continue
         axis = _axis_line(e)
@@ -13497,13 +13733,13 @@ def promote_outside_band_face(msp) -> int:
         walls.append((ori, coord, a, b))
 
     n = 0
-    for e in list(msp):
-        if e.dxftype() != "LWPOLYLINE" or not e.closed:
+    for e in _entities(msp):
+        if _dxftype(e) != "LWPOLYLINE" or not e.closed:
             continue
         if getattr(e.dxf, "layer", None) != BASE_LAYER:
             continue
         try:
-            pts = [(float(p[0]), float(p[1])) for p in e.get_points("xy")]
+            pts = [(float(p[0]), float(p[1])) for p in _poly_xy(e)]
         except Exception:  # noqa: BLE001
             continue
         if len(pts) != 4:
@@ -13543,17 +13779,17 @@ def correct_tall_opening_doors(msp) -> tuple[int, int]:
     개구 안의 선은 BASE로 두고, 개구 밖에서 같은 면으로 이어진 벽만 WALL로 둔다.
     """
     pieces: list[tuple[float, float, float, float]] = []
-    for e in msp:
+    for e in _entities(msp):
         if getattr(e.dxf, "layer", None) not in (WALL_LAYER, BASE_LAYER):
             continue
-        if e.dxftype() == "LINE":
+        if _dxftype(e) == "LINE":
             spans = [(
-                (float(e.dxf.start.x), float(e.dxf.start.y)),
-                (float(e.dxf.end.x), float(e.dxf.end.y)),
+                (_lx0(e), _ly0(e)),
+                (_lx1(e), _ly1(e)),
             )]
-        elif e.dxftype() == "LWPOLYLINE":
+        elif _dxftype(e) == "LWPOLYLINE":
             try:
-                pts = [(float(p[0]), float(p[1])) for p in e.get_points("xy")]
+                pts = [(float(p[0]), float(p[1])) for p in _poly_xy(e)]
             except Exception:  # noqa: BLE001
                 continue
             spans = list(zip(pts, pts[1:]))
@@ -13618,7 +13854,7 @@ def correct_tall_opening_doors(msp) -> tuple[int, int]:
 
     n_demote = 0
     seen_demote: set[int] = set()
-    for e in msp:
+    for e in _entities(msp):
         if id(e) in seen_demote or getattr(e.dxf, "layer", None) != WALL_LAYER:
             continue
         axis = _axis_line(e)
@@ -13636,13 +13872,13 @@ def correct_tall_opening_doors(msp) -> tuple[int, int]:
             break
 
     n_promote = 0
-    for e in msp:
-        if e.dxftype() != "LWPOLYLINE" or e.closed:
+    for e in _entities(msp):
+        if _dxftype(e) != "LWPOLYLINE" or e.closed:
             continue
         if getattr(e.dxf, "layer", None) != BASE_LAYER:
             continue
         try:
-            pts = [(float(p[0]), float(p[1])) for p in e.get_points("xy")]
+            pts = [(float(p[0]), float(p[1])) for p in _poly_xy(e)]
         except Exception:  # noqa: BLE001
             continue
         if len(pts) != 6:
@@ -13689,7 +13925,7 @@ def correct_louver_doors(msp) -> tuple[int, int]:
     살대는 BASE로 두고, 개구 끝에서 밖으로 이어진 양면만 WALL로 둔다.
     """
     segs: list[tuple[str, float, float, float, float, str, Any]] = []
-    for e in msp:
+    for e in _entities(msp):
         layer = getattr(e.dxf, "layer", None)
         if layer not in (WALL_LAYER, BASE_LAYER):
             continue
@@ -13816,7 +14052,7 @@ def correct_header_slat_doors(msp) -> tuple[int, int]:
     한쪽 면이 이미 벽이면 맞은편 같은 높이의 회색 면도 벽이다.
     """
     segs: list[tuple[str, float, float, float, float, str, Any]] = []
-    for e in msp:
+    for e in _entities(msp):
         layer = getattr(e.dxf, "layer", None)
         if layer not in (WALL_LAYER, BASE_LAYER):
             continue
@@ -13988,17 +14224,17 @@ def promote_swing_opposite_walls(msp) -> int:
     문짝(호 반지름 길이)은 올리지 않는다.
     """
     swings: list[tuple[float, float, float, float]] = []
-    for entity in msp:
-        if entity.dxftype() != "ARC":
+    for entity in _entities(msp):
+        if _dxftype(entity) != "ARC":
             continue
         try:
-            radius = float(entity.dxf.radius)
-            cx = float(entity.dxf.center.x)
-            cy = float(entity.dxf.center.y)
-            start_angle = float(entity.dxf.start_angle)
+            radius = _ar(entity)
+            cx = _acx(entity)
+            cy = _acy(entity)
+            start_angle = _asa(entity)
         except Exception:  # noqa: BLE001
             continue
-        sweep = (float(entity.dxf.end_angle) - start_angle) % 360.0
+        sweep = (_aea(entity) - start_angle) % 360.0
         if not (400.0 <= radius <= 1400.0) or not (70.0 <= sweep <= 110.0):
             continue
         rad = math.radians(start_angle)
@@ -14008,15 +14244,15 @@ def promote_swing_opposite_walls(msp) -> int:
         return 0
 
     def _pts(entity) -> list[tuple[float, float]]:
-        kind = entity.dxftype()
+        kind = _dxftype(entity)
         try:
             if kind == "LINE":
                 return [
-                    (float(entity.dxf.start.x), float(entity.dxf.start.y)),
-                    (float(entity.dxf.end.x), float(entity.dxf.end.y)),
+                    (_lx0(entity), _ly0(entity)),
+                    (_lx1(entity), _ly1(entity)),
                 ]
             if kind == "LWPOLYLINE":
-                return [(float(p[0]), float(p[1])) for p in entity.get_points("xy")]
+                return [(float(p[0]), float(p[1])) for p in _poly_xy(entity)]
         except Exception:  # noqa: BLE001
             return []
         return []
@@ -14039,7 +14275,7 @@ def promote_swing_opposite_walls(msp) -> int:
 
     changed = 0
     seen: set[int] = set()
-    for entity in msp:
+    for entity in _entities(msp):
         if id(entity) in seen:
             continue
         layer = getattr(entity.dxf, "layer", None)
@@ -14084,15 +14320,15 @@ def promote_swing_opposite_walls(msp) -> int:
 def _promote_closed_door_flanks(msp, edges, x0: float, y0: float, x1: float, y1: float) -> int:
     """닫힘선 끝에 붙은 평행 이중선을 WALL로 올린다. 문짝은 두지 않는다."""
     swings: list[tuple[float, float, float, tuple]] = []
-    for entity in msp:
-        if entity.dxftype() != "ARC":
+    for entity in _entities(msp):
+        if _dxftype(entity) != "ARC":
             continue
         try:
-            radius = float(entity.dxf.radius)
-            hx = float(entity.dxf.center.x)
-            hy = float(entity.dxf.center.y)
-            start_angle = float(entity.dxf.start_angle)
-            end_angle = float(entity.dxf.end_angle)
+            radius = _ar(entity)
+            hx = _acx(entity)
+            hy = _acy(entity)
+            start_angle = _asa(entity)
+            end_angle = _aea(entity)
         except Exception:  # noqa: BLE001
             continue
         sweep = (end_angle - start_angle) % 360.0
@@ -14136,7 +14372,7 @@ def _promote_closed_door_flanks(msp, edges, x0: float, y0: float, x1: float, y1:
 
     def _paint(ent) -> None:
         nonlocal promoted
-        if ent is None or ent.dxftype() != "LINE" or id(ent) in seen:
+        if ent is None or _dxftype(ent) != "LINE" or id(ent) in seen:
             return
         if getattr(ent.dxf, "layer", None) != BASE_LAYER:
             return
@@ -14289,7 +14525,7 @@ def _promote_swing_continuation_doubles(
             continue
         overlap = min(a1, c1) - max(a0, c0)
         if overlap <= 40.0:
-            if length > 1600.0 or id(ent) in seen or ent.dxftype() != "LINE":
+            if length > 1600.0 or id(ent) in seen or _dxftype(ent) != "LINE":
                 continue
             if _paint_layer(ent, WALL_LAYER, WALL_COLOR):
                 promoted += 1
@@ -14326,19 +14562,19 @@ def add_closed_door_wall_lines(msp) -> int:
     """
     # (x0, y0, x1, y1, layer, entity) — 문 맞은편 끝이 아직 BASE여도 개구로 본다.
     edges: list[tuple] = []
-    for entity in msp:
+    for entity in _entities(msp):
         layer = getattr(entity.dxf, "layer", None)
         if layer not in (WALL_LAYER, BASE_LAYER):
             continue
-        kind = entity.dxftype()
+        kind = _dxftype(entity)
         try:
             if kind == "LINE":
                 pairs = [(
-                    (float(entity.dxf.start.x), float(entity.dxf.start.y)),
-                    (float(entity.dxf.end.x), float(entity.dxf.end.y)),
+                    (_lx0(entity), _ly0(entity)),
+                    (_lx1(entity), _ly1(entity)),
                 )]
             elif kind == "LWPOLYLINE":
-                pts = [(float(p[0]), float(p[1])) for p in entity.get_points("xy")]
+                pts = [(float(p[0]), float(p[1])) for p in _poly_xy(entity)]
                 pairs = list(zip(pts, pts[1:]))
                 if entity.closed and len(pts) >= 2:
                     pairs.append((pts[-1], pts[0]))
@@ -14388,15 +14624,15 @@ def add_closed_door_wall_lines(msp) -> int:
         return total
 
     added = 0
-    for entity in list(msp):
-        if entity.dxftype() != "ARC":
+    for entity in _entities(msp):
+        if _dxftype(entity) != "ARC":
             continue
         try:
-            radius = float(entity.dxf.radius)
-            hx = float(entity.dxf.center.x)
-            hy = float(entity.dxf.center.y)
-            start_angle = float(entity.dxf.start_angle)
-            end_angle = float(entity.dxf.end_angle)
+            radius = _ar(entity)
+            hx = _acx(entity)
+            hy = _acy(entity)
+            start_angle = _asa(entity)
+            end_angle = _aea(entity)
         except Exception:  # noqa: BLE001
             continue
         sweep = (end_angle - start_angle) % 360.0
@@ -14479,7 +14715,7 @@ def add_closed_door_wall_lines(msp) -> int:
                 continue
             promoted_line = False
             for ax, ay, bx, by, layer, ent in edges:
-                if layer != BASE_LAYER or ent is None or ent.dxftype() != "LINE":
+                if layer != BASE_LAYER or ent is None or _dxftype(ent) != "LINE":
                     continue
                 same = (
                     math.hypot(ax - x0, ay - y0) <= 20.0 and math.hypot(bx - x1, by - y1) <= 20.0
@@ -14512,17 +14748,14 @@ def add_closed_door_wall_lines(msp) -> int:
 def _axis_lines(msp) -> list[dict]:
     """WALL/BASE/DOOR의 축정렬 선분. 미닫이 레일 판정에 쓴다."""
     lines: list[dict] = []
-    for entity in msp:
-        if entity.dxftype() != "LINE":
+    for entity in _entities(msp):
+        if _dxftype(entity) != "LINE":
             continue
         layer = getattr(entity.dxf, "layer", None)
         if layer not in (WALL_LAYER, BASE_LAYER, DOOR_LAYER):
             continue
         try:
-            x0 = float(entity.dxf.start.x)
-            y0 = float(entity.dxf.start.y)
-            x1 = float(entity.dxf.end.x)
-            y1 = float(entity.dxf.end.y)
+            x0, y0, x1, y1 = _line_xy(entity)
         except Exception:  # noqa: BLE001
             continue
         length = math.hypot(x1 - x0, y1 - y0)
@@ -14756,17 +14989,14 @@ def separate_track_sliding_doors(msp) -> tuple[int, int]:
     """
     lines = _axis_lines(msp)
     raw_lines: list[tuple] = []
-    for entity in msp:
-        if entity.dxftype() != "LINE":
+    for entity in _entities(msp):
+        if _dxftype(entity) != "LINE":
             continue
         layer = getattr(entity.dxf, "layer", None)
         if layer not in (WALL_LAYER, BASE_LAYER, DOOR_LAYER):
             continue
         try:
-            x0 = float(entity.dxf.start.x)
-            y0 = float(entity.dxf.start.y)
-            x1 = float(entity.dxf.end.x)
-            y1 = float(entity.dxf.end.y)
+            x0, y0, x1, y1 = _line_xy(entity)
         except Exception:  # noqa: BLE001
             continue
         raw_lines.append((x0, y0, x1, y1, entity))
@@ -14863,17 +15093,14 @@ def _find_stacked_sliding_panels(msp) -> list[dict]:
     그 바깥의 긴 벽면은 포함하지 않는다.
     """
     lines: list[dict] = []
-    for entity in msp:
-        if entity.dxftype() != "LINE":
+    for entity in _entities(msp):
+        if _dxftype(entity) != "LINE":
             continue
         layer = getattr(entity.dxf, "layer", None)
         if layer not in (WALL_LAYER, BASE_LAYER, DOOR_LAYER):
             continue
         try:
-            x0 = float(entity.dxf.start.x)
-            y0 = float(entity.dxf.start.y)
-            x1 = float(entity.dxf.end.x)
-            y1 = float(entity.dxf.end.y)
+            x0, y0, x1, y1 = _line_xy(entity)
         except Exception:  # noqa: BLE001
             continue
         length = math.hypot(x1 - x0, y1 - y0)
@@ -15020,17 +15247,14 @@ def separate_stacked_sliding_panels(msp) -> tuple[int, int]:
         horizontal = panel["horizontal"]
         open0, open1 = panel["a0"], panel["a1"]
         face0, face1 = panel["p0"], panel["p1"]
-        for entity in msp:
-            if entity.dxftype() != "LINE" or id(entity) in demoted:
+        for entity in _entities(msp):
+            if _dxftype(entity) != "LINE" or id(entity) in demoted:
                 continue
             layer = getattr(entity.dxf, "layer", None)
             if layer not in (WALL_LAYER, BASE_LAYER, DOOR_LAYER):
                 continue
             try:
-                x0 = float(entity.dxf.start.x)
-                y0 = float(entity.dxf.start.y)
-                x1 = float(entity.dxf.end.x)
-                y1 = float(entity.dxf.end.y)
+                x0, y0, x1, y1 = _line_xy(entity)
             except Exception:  # noqa: BLE001
                 continue
             length = math.hypot(x1 - x0, y1 - y0)
@@ -15083,14 +15307,11 @@ def finish_pocket_sliding_doors(msp) -> tuple[int, int]:
     선도 문짝이다. 뒤 단계가 문짝을 벽으로 올려도 여기서 되돌린다.
     """
     segs: list[tuple] = []
-    for entity in msp:
-        if entity.dxftype() != "LINE":
+    for entity in _entities(msp):
+        if _dxftype(entity) != "LINE":
             continue
         try:
-            x0 = float(entity.dxf.start.x)
-            y0 = float(entity.dxf.start.y)
-            x1 = float(entity.dxf.end.x)
-            y1 = float(entity.dxf.end.y)
+            x0, y0, x1, y1 = _line_xy(entity)
         except Exception:  # noqa: BLE001
             continue
         length = math.hypot(x1 - x0, y1 - y0)
@@ -15217,8 +15438,8 @@ def separate_stepped_sliding_doors(msp) -> tuple[int, int]:
     문짝은 BASE로 두고, 문 끝에 닿아 밖으로 이어진 벽만 WALL로 올린다.
     """
     panels: list[tuple] = []
-    for entity in msp:
-        if entity.dxftype() != "LWPOLYLINE" or not entity.closed:
+    for entity in _entities(msp):
+        if _dxftype(entity) != "LWPOLYLINE" or not entity.closed:
             continue
         pts = _polyline_xy(entity)
         if len(pts) < 4:
@@ -15264,15 +15485,12 @@ def separate_stepped_sliding_doors(msp) -> tuple[int, int]:
             runs.append(run)
 
     def _end_meets_wall(at_along: float, perp0: float, perp1: float, horizontal: bool) -> bool:
-        for entity in msp:
-            if entity.dxftype() != "LINE":
+        for entity in _entities(msp):
+            if _dxftype(entity) != "LINE":
                 continue
             if getattr(entity.dxf, "layer", None) != WALL_LAYER:
                 continue
-            x0 = float(entity.dxf.start.x)
-            y0 = float(entity.dxf.start.y)
-            x1 = float(entity.dxf.end.x)
-            y1 = float(entity.dxf.end.y)
+            x0, y0, x1, y1 = _line_xy(entity)
             length = math.hypot(x1 - x0, y1 - y0)
             if length < 200.0:
                 continue
@@ -15314,11 +15532,11 @@ def separate_stepped_sliding_doors(msp) -> tuple[int, int]:
             else:
                 x0, y0, x1, y1 = mid, along0, mid, along1
             covered = False
-            for entity in msp:
-                if entity.dxftype() != "LINE" or getattr(entity.dxf, "layer", None) != WALL_LAYER:
+            for entity in _entities(msp):
+                if _dxftype(entity) != "LINE" or getattr(entity.dxf, "layer", None) != WALL_LAYER:
                     continue
-                ax, ay = float(entity.dxf.start.x), float(entity.dxf.start.y)
-                bx, by = float(entity.dxf.end.x), float(entity.dxf.end.y)
+                ax, ay = _lx0(entity), _ly0(entity)
+                bx, by = _lx1(entity), _ly1(entity)
                 vx, vy = bx - ax, by - ay
                 length2 = vx * vx + vy * vy
                 if length2 < 1.0:
@@ -15339,15 +15557,12 @@ def separate_stepped_sliding_doors(msp) -> tuple[int, int]:
             if _paint_layer(ent, BASE_LAYER, BASE_COLOR):
                 n_demote += 1
 
-        for entity in msp:
-            if entity.dxftype() != "LINE":
+        for entity in _entities(msp):
+            if _dxftype(entity) != "LINE":
                 continue
             if getattr(entity.dxf, "layer", None) != BASE_LAYER:
                 continue
-            x0 = float(entity.dxf.start.x)
-            y0 = float(entity.dxf.start.y)
-            x1 = float(entity.dxf.end.x)
-            y1 = float(entity.dxf.end.y)
+            x0, y0, x1, y1 = _line_xy(entity)
             length = math.hypot(x1 - x0, y1 - y0)
             if horizontal:
                 line_along = (x0 + x1) / 2.0
@@ -15398,19 +15613,19 @@ def add_corner_closed_door_walls(msp) -> int:
     힌지 벽이 확정된 뒤에 호출한다.
     """
     edges: list[tuple] = []
-    for entity in msp:
+    for entity in _entities(msp):
         layer = getattr(entity.dxf, "layer", None)
         if layer not in (WALL_LAYER, BASE_LAYER):
             continue
-        kind = entity.dxftype()
+        kind = _dxftype(entity)
         try:
             if kind == "LINE":
                 pairs = [(
-                    (float(entity.dxf.start.x), float(entity.dxf.start.y)),
-                    (float(entity.dxf.end.x), float(entity.dxf.end.y)),
+                    (_lx0(entity), _ly0(entity)),
+                    (_lx1(entity), _ly1(entity)),
                 )]
             elif kind == "LWPOLYLINE":
-                pts = [(float(p[0]), float(p[1])) for p in entity.get_points("xy")]
+                pts = [(float(p[0]), float(p[1])) for p in _poly_xy(entity)]
                 pairs = list(zip(pts, pts[1:]))
                 if entity.closed and len(pts) >= 2:
                     pairs.append((pts[-1], pts[0]))
@@ -15440,15 +15655,15 @@ def add_corner_closed_door_walls(msp) -> int:
         return False
 
     added = 0
-    for entity in list(msp):
-        if entity.dxftype() != "ARC":
+    for entity in _entities(msp):
+        if _dxftype(entity) != "ARC":
             continue
         try:
-            radius = float(entity.dxf.radius)
-            hx = float(entity.dxf.center.x)
-            hy = float(entity.dxf.center.y)
-            start_angle = float(entity.dxf.start_angle)
-            end_angle = float(entity.dxf.end_angle)
+            radius = _ar(entity)
+            hx = _acx(entity)
+            hy = _acy(entity)
+            start_angle = _asa(entity)
+            end_angle = _aea(entity)
         except Exception:  # noqa: BLE001
             continue
         sweep = (end_angle - start_angle) % 360.0
@@ -15544,27 +15759,27 @@ def add_corner_closed_door_walls(msp) -> int:
 def remove_swing_squares(msp) -> int:
     """문 스윙 힌지에 붙은 작은 네모(한 변 약 100 mm)를 지운다."""
     hinges: list[tuple[float, float]] = []
-    for entity in msp:
-        if entity.dxftype() != "ARC":
+    for entity in _entities(msp):
+        if _dxftype(entity) != "ARC":
             continue
         try:
-            radius = float(entity.dxf.radius)
-            start_angle = float(entity.dxf.start_angle)
-            end_angle = float(entity.dxf.end_angle)
+            radius = _ar(entity)
+            start_angle = _asa(entity)
+            end_angle = _aea(entity)
         except Exception:  # noqa: BLE001
             continue
         sweep = (end_angle - start_angle) % 360.0
         if not (400.0 <= radius <= 1400.0) or not (70.0 <= sweep <= 110.0):
             continue
-        hinges.append((float(entity.dxf.center.x), float(entity.dxf.center.y)))
+        hinges.append((_acx(entity), _acy(entity)))
     if not hinges:
         return 0
     removed = 0
-    for entity in list(msp):
-        if entity.dxftype() != "LWPOLYLINE" or not entity.closed:
+    for entity in _entities(msp):
+        if _dxftype(entity) != "LWPOLYLINE" or not entity.closed:
             continue
         try:
-            pts = [(float(p[0]), float(p[1])) for p in entity.get_points("xy")]
+            pts = [(float(p[0]), float(p[1])) for p in _poly_xy(entity)]
         except Exception:  # noqa: BLE001
             continue
         if len(pts) < 4:
@@ -15593,14 +15808,11 @@ def separate_sliding_door_panels(msp) -> int:
     그 묶음 바깥으로 이어진 벽면은 올린다.
     """
     segs: list[tuple] = []
-    for entity in msp:
-        if entity.dxftype() != "LINE":
+    for entity in _entities(msp):
+        if _dxftype(entity) != "LINE":
             continue
         try:
-            x0 = float(entity.dxf.start.x)
-            y0 = float(entity.dxf.start.y)
-            x1 = float(entity.dxf.end.x)
-            y1 = float(entity.dxf.end.y)
+            x0, y0, x1, y1 = _line_xy(entity)
         except Exception:  # noqa: BLE001
             continue
         length = math.hypot(x1 - x0, y1 - y0)
@@ -15749,15 +15961,15 @@ def promote_swing_attached_doubles(msp) -> int:
     문짝(힌지에서 호 끝까지 반지름 길이로 이어진 선)은 올리지 않는다.
     """
     swings: list[tuple[float, float, float, float, float, float]] = []
-    for entity in msp:
-        if entity.dxftype() != "ARC":
+    for entity in _entities(msp):
+        if _dxftype(entity) != "ARC":
             continue
         try:
-            radius = float(entity.dxf.radius)
-            hx = float(entity.dxf.center.x)
-            hy = float(entity.dxf.center.y)
-            start_angle = float(entity.dxf.start_angle)
-            end_angle = float(entity.dxf.end_angle)
+            radius = _ar(entity)
+            hx = _acx(entity)
+            hy = _acy(entity)
+            start_angle = _asa(entity)
+            end_angle = _aea(entity)
         except Exception:  # noqa: BLE001
             continue
         sweep = (end_angle - start_angle) % 360.0
@@ -15774,18 +15986,18 @@ def promote_swing_attached_doubles(msp) -> int:
         return 0
 
     segs: list[tuple[float, float, float, float, object]] = []
-    for entity in msp:
+    for entity in _entities(msp):
         if getattr(entity.dxf, "layer", None) != BASE_LAYER:
             continue
-        kind = entity.dxftype()
+        kind = _dxftype(entity)
         try:
             if kind == "LINE":
                 pairs = [(
-                    (float(entity.dxf.start.x), float(entity.dxf.start.y)),
-                    (float(entity.dxf.end.x), float(entity.dxf.end.y)),
+                    (_lx0(entity), _ly0(entity)),
+                    (_lx1(entity), _ly1(entity)),
                 )]
             elif kind == "LWPOLYLINE":
-                pts = [(float(p[0]), float(p[1])) for p in entity.get_points("xy")]
+                pts = [(float(p[0]), float(p[1])) for p in _poly_xy(entity)]
                 pairs = list(zip(pts, pts[1:]))
                 if entity.closed and len(pts) >= 2:
                     pairs.append((pts[-1], pts[0]))
@@ -15815,15 +16027,15 @@ def promote_swing_attached_doubles(msp) -> int:
     promoted = 0
     seen: set[int] = set()
     wall_lines = [
-        e for e in msp
-        if e.dxftype() == "LINE" and getattr(e.dxf, "layer", None) == WALL_LAYER
+        e for e in _entities(msp)
+        if _dxftype(e) == "LINE" and getattr(e.dxf, "layer", None) == WALL_LAYER
     ]
     for hx, hy, radius, sx, sy, ex, ey in swings:
         dirs = ((sx, sy), (ex, ey))
         for entity in wall_lines:
             if _leaf(
-                float(entity.dxf.start.x), float(entity.dxf.start.y),
-                float(entity.dxf.end.x), float(entity.dxf.end.y),
+                _lx0(entity), _ly0(entity),
+                _lx1(entity), _ly1(entity),
                 hx, hy, radius, dirs,
             ):
                 _paint_layer(entity, BASE_LAYER, BASE_COLOR)
@@ -15862,7 +16074,7 @@ def promote_swing_attached_doubles(msp) -> int:
                 if min(a1, c1) - max(a0, c0) < 80.0:
                     continue
                 for ent in (ent_a, ent_b):
-                    if id(ent) in seen or ent.dxftype() != "LINE":
+                    if id(ent) in seen or _dxftype(ent) != "LINE":
                         continue
                     if _paint_layer(ent, WALL_LAYER, WALL_COLOR):
                         promoted += 1
@@ -15893,15 +16105,15 @@ def close_leaking_wall_ends(msp) -> int:
     base_walls = ev.wall_segments(msp, boxes)
 
     def _hv_parts(entity, layer: str) -> list[dict]:
-        kind = entity.dxftype()
+        kind = _dxftype(entity)
         pairs: list[tuple[tuple[float, float], tuple[float, float]]] = []
         if kind == "LINE":
             pairs.append((
-                (float(entity.dxf.start.x), float(entity.dxf.start.y)),
-                (float(entity.dxf.end.x), float(entity.dxf.end.y)),
+                (_lx0(entity), _ly0(entity)),
+                (_lx1(entity), _ly1(entity)),
             ))
         elif kind == "LWPOLYLINE":
-            pts = [(float(p[0]), float(p[1])) for p in entity.get_points("xy")]
+            pts = [(float(p[0]), float(p[1])) for p in _poly_xy(entity)]
             pairs = list(zip(pts, pts[1:]))
             if entity.closed and len(pts) >= 2:
                 pairs.append((pts[-1], pts[0]))
@@ -15920,21 +16132,21 @@ def close_leaking_wall_ends(msp) -> int:
 
     walls: list[dict] = []
     bases: list[dict] = []
-    for entity in msp:
+    for entity in _entities(msp):
         layer = getattr(entity.dxf, "layer", None)
         if layer == WALL_LAYER:
             walls.extend(_hv_parts(entity, layer))
         elif layer == BASE_LAYER:
             bases.extend(_hv_parts(entity, layer))
     arcs: list[tuple[float, float, float]] = []
-    for entity in msp:
-        if entity.dxftype() != "ARC":
+    for entity in _entities(msp):
+        if _dxftype(entity) != "ARC":
             continue
         try:
             arcs.append((
-                float(entity.dxf.center.x),
-                float(entity.dxf.center.y),
-                float(entity.dxf.radius),
+                _acx(entity),
+                _acy(entity),
+                _ar(entity),
             ))
         except Exception:  # noqa: BLE001
             continue
@@ -16165,7 +16377,7 @@ def close_leaking_wall_ends(msp) -> int:
     promoted = 0
     for seg in chosen:
         entity = seg["ent"]
-        if entity.dxftype() == "LINE" and getattr(entity.dxf, "layer", None) == BASE_LAYER:
+        if _dxftype(entity) == "LINE" and getattr(entity.dxf, "layer", None) == BASE_LAYER:
             if _paint_layer(entity, WALL_LAYER, WALL_COLOR):
                 promoted += 1
             continue
@@ -16186,8 +16398,8 @@ def promote_line_swing_door_jambs(msp) -> int:
     """
     squares: list[tuple[float, float, float, float]] = []
     segs: list[tuple[tuple[float, float], tuple[float, float], float, object]] = []
-    for ent in msp:
-        kind = ent.dxftype()
+    for ent in _entities(msp):
+        kind = _dxftype(ent)
         if kind == "LWPOLYLINE" and ent.closed:
             pts = _polyline_xy(ent)
             if len(pts) < 4:
@@ -16201,8 +16413,8 @@ def promote_line_swing_door_jambs(msp) -> int:
             continue
         if kind == "LINE":
             pairs = [(
-                (float(ent.dxf.start.x), float(ent.dxf.start.y)),
-                (float(ent.dxf.end.x), float(ent.dxf.end.y)),
+                (_lx0(ent), _ly0(ent)),
+                (_lx1(ent), _ly1(ent)),
             )]
         else:
             pts = _polyline_xy(ent)
@@ -16242,7 +16454,7 @@ def promote_line_swing_door_jambs(msp) -> int:
                 lo, hi = min(y0, y2), max(y1, y3)
                 leaf = None
                 for a, b, length, ent in segs:
-                    if ent.dxftype() != "LINE":
+                    if _dxftype(ent) != "LINE":
                         continue
                     if abs(a[0] - b[0]) > 25.0:
                         continue
@@ -16258,7 +16470,7 @@ def promote_line_swing_door_jambs(msp) -> int:
                 lo, hi = min(x0, x2), max(x1, x3)
                 leaf = None
                 for a, b, length, ent in segs:
-                    if ent.dxftype() != "LINE":
+                    if _dxftype(ent) != "LINE":
                         continue
                     if abs(a[1] - b[1]) > 25.0:
                         continue
@@ -16334,7 +16546,7 @@ def promote_line_swing_door_jambs(msp) -> int:
         for a, b, length, ent in segs:
             if getattr(ent.dxf, "layer", None) != BASE_LAYER:
                 continue
-            if ent.dxftype() != "LINE":
+            if _dxftype(ent) != "LINE":
                 continue
             dx, dy = b[0] - a[0], b[1] - a[1]
             if kind == "V":
@@ -16389,7 +16601,7 @@ def promote_line_swing_door_jambs(msp) -> int:
         for a, b, length, ent in segs:
             if getattr(ent.dxf, "layer", None) != BASE_LAYER:
                 continue
-            if ent.dxftype() != "LINE":
+            if _dxftype(ent) != "LINE":
                 continue
             if not (80.0 <= length <= 280.0):
                 continue
@@ -16428,11 +16640,11 @@ def promote_thick_wall_mates(msp) -> int:
     길이가 같은 평행 쌍만 본다. 그 두께 안에 있고 양끝으로 이어진 짧은 꺾임도 벽이다.
     """
     rows: list[tuple[str, float, float, float, float, object]] = []
-    for ent in msp:
-        if ent.dxftype() != "LINE":
+    for ent in _entities(msp):
+        if _dxftype(ent) != "LINE":
             continue
-        a = (float(ent.dxf.start.x), float(ent.dxf.start.y))
-        b = (float(ent.dxf.end.x), float(ent.dxf.end.y))
+        a = (_lx0(ent), _ly0(ent))
+        b = (_lx1(ent), _ly1(ent))
         dx, dy = abs(b[0] - a[0]), abs(b[1] - a[1])
         length = math.hypot(b[0] - a[0], b[1] - a[1])
         if length < 80.0:
@@ -16506,8 +16718,8 @@ def correct_inline_swing_doors(msp) -> tuple[int, int]:
     """
     squares: list[tuple[float, float, float, float, object]] = []
     segs: list[tuple[float, float, float, float, float, object]] = []
-    for entity in msp:
-        kind = entity.dxftype()
+    for entity in _entities(msp):
+        kind = _dxftype(entity)
         if kind == "LWPOLYLINE" and entity.closed:
             pts = _polyline_xy(entity)
             if len(pts) >= 4:
@@ -16518,8 +16730,8 @@ def correct_inline_swing_doors(msp) -> tuple[int, int]:
                     squares.append((min(xs), min(ys), max(xs), max(ys), entity))
         if kind == "LINE":
             pairs = [(
-                (float(entity.dxf.start.x), float(entity.dxf.start.y)),
-                (float(entity.dxf.end.x), float(entity.dxf.end.y)),
+                (_lx0(entity), _ly0(entity)),
+                (_lx1(entity), _ly1(entity)),
             )]
         elif kind == "LWPOLYLINE":
             pts = _polyline_xy(entity)
@@ -16766,8 +16978,8 @@ def promote_leaf_side_walls(msp) -> int:
     """
     leaves: list[tuple[float, float, float, bool, object]] = []
     segs: list[tuple[float, float, float, float, float, str, object]] = []
-    for entity in msp:
-        kind = entity.dxftype()
+    for entity in _entities(msp):
+        kind = _dxftype(entity)
         layer = getattr(entity.dxf, "layer", None)
         if kind == "LWPOLYLINE" and entity.closed:
             pts = _polyline_xy(entity)
@@ -16783,8 +16995,8 @@ def promote_leaf_side_walls(msp) -> int:
                     leaves.append((along0, along1, ortho, horizontal, entity))
         if kind != "LINE" or layer not in (WALL_LAYER, BASE_LAYER):
             continue
-        x0, y0 = float(entity.dxf.start.x), float(entity.dxf.start.y)
-        x1, y1 = float(entity.dxf.end.x), float(entity.dxf.end.y)
+        x0, y0 = _lx0(entity), _ly0(entity)
+        x1, y1 = _lx1(entity), _ly1(entity)
         length = math.hypot(x1 - x0, y1 - y0)
         if length >= 200.0:
             segs.append((x0, y0, x1, y1, length, layer, entity))
@@ -16852,18 +17064,18 @@ def promote_projection_junctions(msp) -> int:
     """
     walls: list[tuple[tuple[float, float], tuple[float, float], float]] = []
     bases: list[tuple[object, tuple[float, float], tuple[float, float], float]] = []
-    for entity in msp:
+    for entity in _entities(msp):
         layer = entity.dxf.layer
         if layer not in (WALL_LAYER, BASE_LAYER):
             continue
-        if entity.dxftype() == "LINE":
+        if _dxftype(entity) == "LINE":
             pairs = [
                 (
-                    (float(entity.dxf.start.x), float(entity.dxf.start.y)),
-                    (float(entity.dxf.end.x), float(entity.dxf.end.y)),
+                    (_lx0(entity), _ly0(entity)),
+                    (_lx1(entity), _ly1(entity)),
                 )
             ]
-        elif entity.dxftype() == "LWPOLYLINE":
+        elif _dxftype(entity) == "LWPOLYLINE":
             pts = _polyline_xy(entity)
             span = len(pts) if entity.closed else len(pts) - 1
             pairs = [
@@ -16962,18 +17174,18 @@ def promote_shifted_corner_faces(msp) -> int:
     """
     walls: list[tuple[tuple[float, float], tuple[float, float], float]] = []
     bases: list[tuple[object, tuple[float, float], tuple[float, float], float]] = []
-    for entity in msp:
+    for entity in _entities(msp):
         layer = entity.dxf.layer
         if layer not in (WALL_LAYER, BASE_LAYER):
             continue
-        if entity.dxftype() == "LINE":
+        if _dxftype(entity) == "LINE":
             pairs = [
                 (
-                    (float(entity.dxf.start.x), float(entity.dxf.start.y)),
-                    (float(entity.dxf.end.x), float(entity.dxf.end.y)),
+                    (_lx0(entity), _ly0(entity)),
+                    (_lx1(entity), _ly1(entity)),
                 )
             ]
-        elif entity.dxftype() == "LWPOLYLINE":
+        elif _dxftype(entity) == "LWPOLYLINE":
             pts = _polyline_xy(entity)
             span = len(pts) if entity.closed else len(pts) - 1
             pairs = [(pts[i], pts[(i + 1) % len(pts)]) for i in range(span)]
@@ -17061,8 +17273,8 @@ def promote_shifted_corner_faces(msp) -> int:
 def promote_bay_window_outlines(msp) -> int:
     """45° 볼살과 바깥면으로 된 돌출창 윤곽을 WALL로 올린다."""
     changed = 0
-    for entity in msp:
-        if entity.dxftype() != "LWPOLYLINE":
+    for entity in _entities(msp):
+        if _dxftype(entity) != "LWPOLYLINE":
             continue
         pts = _polyline_xy(entity)
         if len(pts) < 4:
@@ -17126,10 +17338,10 @@ def demote_thin_swing_leaf_lines(msp) -> int:
     문끝에 붙은 짧은 벽(60–800 mm)은 그대로 둔다.
     """
     leaves: list[dict] = []
-    for entity in msp:
-        if entity.dxftype() != "LWPOLYLINE" or not entity.closed:
+    for entity in _entities(msp):
+        if _dxftype(entity) != "LWPOLYLINE" or not entity.closed:
             continue
-        pts = [(float(p[0]), float(p[1])) for p in entity.get_points("xy")]
+        pts = [(float(p[0]), float(p[1])) for p in _poly_xy(entity)]
         if len(pts) < 4:
             continue
         xs = [p[0] for p in pts]
@@ -17161,13 +17373,13 @@ def demote_thin_swing_leaf_lines(msp) -> int:
         if id(ent) not in seen and _paint_layer(ent, BASE_LAYER, BASE_COLOR):
             seen.add(id(ent))
             changed += 1
-    for entity in msp:
-        if id(entity) in seen or entity.dxftype() != "LINE":
+    for entity in _entities(msp):
+        if id(entity) in seen or _dxftype(entity) != "LINE":
             continue
         if getattr(entity.dxf, "layer", None) != WALL_LAYER:
             continue
-        x0, y0 = float(entity.dxf.start.x), float(entity.dxf.start.y)
-        x1, y1 = float(entity.dxf.end.x), float(entity.dxf.end.y)
+        x0, y0 = _lx0(entity), _ly0(entity)
+        x1, y1 = _lx1(entity), _ly1(entity)
         length = math.hypot(x1 - x0, y1 - y0)
         if not (600.0 <= length <= 1600.0):
             continue
@@ -17197,8 +17409,8 @@ def promote_aligned_door_mates(msp) -> int:
     squares: list[tuple[float, float, float, float]] = []
     doors: list[tuple[float, float]] = []
     lines: list[tuple[str, float, float, float, float, str, object]] = []
-    for entity in msp:
-        kind = entity.dxftype()
+    for entity in _entities(msp):
+        kind = _dxftype(entity)
         layer = getattr(entity.dxf, "layer", None)
         if kind == "LWPOLYLINE" and entity.closed:
             pts = _polyline_xy(entity)
@@ -17213,8 +17425,8 @@ def promote_aligned_door_mates(msp) -> int:
                     doors.append(((min(xs) + max(xs)) / 2.0, (min(ys) + max(ys)) / 2.0))
         if kind != "LINE" or layer not in (WALL_LAYER, BASE_LAYER):
             continue
-        x0, y0 = float(entity.dxf.start.x), float(entity.dxf.start.y)
-        x1, y1 = float(entity.dxf.end.x), float(entity.dxf.end.y)
+        x0, y0 = _lx0(entity), _ly0(entity)
+        x1, y1 = _lx1(entity), _ly1(entity)
         length = math.hypot(x1 - x0, y1 - y0)
         if length < 200.0 or length > 2500.0:
             continue
@@ -17270,8 +17482,8 @@ def promote_leaf_jambs(msp) -> int:
     leaves: list[tuple[float, float, float, bool]] = []
     records: list[dict] = []
     polylines: list[tuple[object, list[tuple[float, float]]]] = []
-    for entity in msp:
-        kind = entity.dxftype()
+    for entity in _entities(msp):
+        kind = _dxftype(entity)
         layer = getattr(entity.dxf, "layer", None)
         if kind == "LWPOLYLINE":
             pts = _polyline_xy(entity)
@@ -17290,8 +17502,8 @@ def promote_leaf_jambs(msp) -> int:
                     polylines.append((entity, pts))
         if kind != "LINE" or layer not in (WALL_LAYER, BASE_LAYER):
             continue
-        x0, y0 = float(entity.dxf.start.x), float(entity.dxf.start.y)
-        x1, y1 = float(entity.dxf.end.x), float(entity.dxf.end.y)
+        x0, y0 = _lx0(entity), _ly0(entity)
+        x1, y1 = _lx1(entity), _ly1(entity)
         length = math.hypot(x1 - x0, y1 - y0)
         if length < 40.0:
             continue
@@ -17403,20 +17615,20 @@ def promote_swing_side_walls(msp) -> int:
     """
     arcs: list[tuple[float, float, float]] = []
     records: list[dict] = []
-    for entity in msp:
-        kind = entity.dxftype()
+    for entity in _entities(msp):
+        kind = _dxftype(entity)
         layer = getattr(entity.dxf, "layer", None)
         if kind == "ARC":
-            sweep = abs(float(entity.dxf.end_angle) - float(entity.dxf.start_angle)) % 360.0
+            sweep = abs(_aea(entity) - _asa(entity)) % 360.0
             sweep = min(sweep, 360.0 - sweep)
-            radius = float(entity.dxf.radius)
+            radius = _ar(entity)
             if 70.0 <= sweep <= 110.0 and 500.0 <= radius <= 1500.0:
                 center = entity.dxf.center
                 arcs.append((float(center.x), float(center.y), radius))
         if kind != "LINE" or layer not in (WALL_LAYER, BASE_LAYER):
             continue
-        x0, y0 = float(entity.dxf.start.x), float(entity.dxf.start.y)
-        x1, y1 = float(entity.dxf.end.x), float(entity.dxf.end.y)
+        x0, y0 = _lx0(entity), _ly0(entity)
+        x1, y1 = _lx1(entity), _ly1(entity)
         length = math.hypot(x1 - x0, y1 - y0)
         if length < 80.0:
             continue
@@ -17618,16 +17830,16 @@ def promote_short_connected_doubles(msp) -> int:
     # 두 면이 모두 기존 벽과 한 줄이고 두께도 같으면, 500–1000 mm 칸도 벽이다.
     # 한 줄만 이어진 선은 500 mm를 넘기지 않는다. 스윙 안의 문짝은 올리지 않는다.
     swings: list[tuple[float, float, float]] = []
-    for entity in msp:
-        if entity.dxftype() != "ARC":
+    for entity in _entities(msp):
+        if _dxftype(entity) != "ARC":
             continue
         try:
-            radius = float(entity.dxf.radius)
+            radius = _ar(entity)
         except Exception:  # noqa: BLE001
             continue
         if not (400.0 <= radius <= 1400.0):
             continue
-        swings.append((float(entity.dxf.center.x), float(entity.dxf.center.y), radius))
+        swings.append((_acx(entity), _acy(entity), radius))
 
     def _inside_swing(seg: AxisSeg) -> bool:
         mx = (seg.x0 + seg.x1) * 0.5
@@ -17901,10 +18113,10 @@ def promote_short_connected_doubles(msp) -> int:
     painted: set[int] = set()
 
     def _same_line(entity, seg: AxisSeg) -> bool:
-        if entity.dxftype() != "LINE":
+        if _dxftype(entity) != "LINE":
             return False
-        ax, ay = float(entity.dxf.start.x), float(entity.dxf.start.y)
-        bx, by = float(entity.dxf.end.x), float(entity.dxf.end.y)
+        ax, ay = _lx0(entity), _ly0(entity)
+        bx, by = _lx1(entity), _ly1(entity)
 
         def _near(px: float, py: float, qx: float, qy: float) -> bool:
             return math.hypot(px - qx, py - qy) <= 5.0
@@ -17917,11 +18129,11 @@ def promote_short_connected_doubles(msp) -> int:
         entity = seg.entity
         if entity is None:
             continue
-        if entity.dxftype() == "LINE" or id(entity) in panel_ids:
+        if _dxftype(entity) == "LINE" or id(entity) in panel_ids:
             if id(entity) not in painted and _paint_layer(entity, WALL_LAYER, WALL_COLOR):
                 painted.add(id(entity))
                 changed += 1
-            if entity.dxftype() == "LINE":
+            if _dxftype(entity) == "LINE":
                 continue
         else:
             msp.add_line(
@@ -17930,7 +18142,7 @@ def promote_short_connected_doubles(msp) -> int:
                 dxfattribs={"layer": WALL_LAYER, "color": WALL_COLOR},
             )
             changed += 1
-        for other in msp:
+        for other in _entities(msp):
             if other is entity or id(other) in painted:
                 continue
             if getattr(other.dxf, "layer", None) != BASE_LAYER:
@@ -17947,20 +18159,20 @@ def add_swing_closed_chords(msp) -> int:
     열리는 문짝은 그대로 둔다. 이미 벽인 선은 내리지 않는다.
     """
     segments: list[tuple[float, float, float, float, str, object | None]] = []
-    for entity in msp:
+    for entity in _entities(msp):
         layer = getattr(entity.dxf, "layer", None)
         if layer not in (WALL_LAYER, BASE_LAYER):
             continue
-        kind = entity.dxftype()
+        kind = _dxftype(entity)
         try:
             if kind == "LINE":
                 pairs = [(
-                    (float(entity.dxf.start.x), float(entity.dxf.start.y)),
-                    (float(entity.dxf.end.x), float(entity.dxf.end.y)),
+                    (_lx0(entity), _ly0(entity)),
+                    (_lx1(entity), _ly1(entity)),
                     entity,
                 )]
             elif kind == "LWPOLYLINE":
-                pts = [(float(p[0]), float(p[1])) for p in entity.get_points("xy")]
+                pts = [(float(p[0]), float(p[1])) for p in _poly_xy(entity)]
                 pairs = [(*pair, None) for pair in zip(pts, pts[1:])]
                 if entity.closed and len(pts) >= 2:
                     pairs.append((pts[-1], pts[0], None))
@@ -18044,15 +18256,15 @@ def add_swing_closed_chords(msp) -> int:
         return best[1], best[2]
 
     added = 0
-    for entity in msp:
-        if entity.dxftype() != "ARC":
+    for entity in _entities(msp):
+        if _dxftype(entity) != "ARC":
             continue
         try:
-            radius = float(entity.dxf.radius)
-            hx = float(entity.dxf.center.x)
-            hy = float(entity.dxf.center.y)
-            start_angle = float(entity.dxf.start_angle)
-            end_angle = float(entity.dxf.end_angle)
+            radius = _ar(entity)
+            hx = _acx(entity)
+            hy = _acy(entity)
+            start_angle = _asa(entity)
+            end_angle = _aea(entity)
         except Exception:  # noqa: BLE001
             continue
         sweep = (end_angle - start_angle) % 360.0
@@ -18154,13 +18366,13 @@ def _find_diagonal_swing_doors(msp) -> list[dict]:
     """
     swings: list[dict] = []
     lines: list[dict] = []
-    for entity in msp:
-        kind = entity.dxftype()
+    for entity in _entities(msp):
+        kind = _dxftype(entity)
         if kind == "ARC":
             try:
-                radius = float(entity.dxf.radius)
-                start_angle = float(entity.dxf.start_angle)
-                end_angle = float(entity.dxf.end_angle)
+                radius = _ar(entity)
+                start_angle = _asa(entity)
+                end_angle = _aea(entity)
                 center = entity.dxf.center
             except Exception:  # noqa: BLE001
                 continue
@@ -18190,10 +18402,7 @@ def _find_diagonal_swing_doors(msp) -> list[dict]:
         if getattr(entity.dxf, "layer", None) not in (WALL_LAYER, BASE_LAYER, DOOR_LAYER):
             continue
         try:
-            x0 = float(entity.dxf.start.x)
-            y0 = float(entity.dxf.start.y)
-            x1 = float(entity.dxf.end.x)
-            y1 = float(entity.dxf.end.y)
+            x0, y0, x1, y1 = _line_xy(entity)
         except Exception:  # noqa: BLE001
             continue
         length = math.hypot(x1 - x0, y1 - y0)
@@ -18324,16 +18533,13 @@ def _find_pocket_face_doors(msp) -> list[dict]:
     일반영상 검사실3 왼쪽 입구가 그 예다.
     """
     records: list[dict] = []
-    for entity in msp:
-        if entity.dxftype() != "LINE":
+    for entity in _entities(msp):
+        if _dxftype(entity) != "LINE":
             continue
         if getattr(entity.dxf, "layer", None) not in (WALL_LAYER, BASE_LAYER, DOOR_LAYER):
             continue
         try:
-            x0 = float(entity.dxf.start.x)
-            y0 = float(entity.dxf.start.y)
-            x1 = float(entity.dxf.end.x)
-            y1 = float(entity.dxf.end.y)
+            x0, y0, x1, y1 = _line_xy(entity)
         except Exception:  # noqa: BLE001
             continue
         length = math.hypot(x1 - x0, y1 - y0)
@@ -18489,16 +18695,13 @@ def _find_short_staggered_doors(msp) -> list[dict]:
     물품창고 아래 출입구가 그 예다.
     """
     records: list[dict] = []
-    for entity in msp:
-        if entity.dxftype() != "LINE":
+    for entity in _entities(msp):
+        if _dxftype(entity) != "LINE":
             continue
         if getattr(entity.dxf, "layer", None) not in (WALL_LAYER, BASE_LAYER, DOOR_LAYER):
             continue
         try:
-            x0 = float(entity.dxf.start.x)
-            y0 = float(entity.dxf.start.y)
-            x1 = float(entity.dxf.end.x)
-            y1 = float(entity.dxf.end.y)
+            x0, y0, x1, y1 = _line_xy(entity)
         except Exception:  # noqa: BLE001
             continue
         length = math.hypot(x1 - x0, y1 - y0)
@@ -18707,16 +18910,13 @@ def _find_locker_entrance_doors(msp) -> list[dict]:
     문으로 내리고, 양옆 벽면과 문 끝의 벽 두께는 벽으로 올린다.
     """
     records: list[dict] = []
-    for entity in msp:
-        if entity.dxftype() != "LINE":
+    for entity in _entities(msp):
+        if _dxftype(entity) != "LINE":
             continue
         if getattr(entity.dxf, "layer", None) not in (WALL_LAYER, BASE_LAYER, DOOR_LAYER):
             continue
         try:
-            x0 = float(entity.dxf.start.x)
-            y0 = float(entity.dxf.start.y)
-            x1 = float(entity.dxf.end.x)
-            y1 = float(entity.dxf.end.y)
+            x0, y0, x1, y1 = _line_xy(entity)
         except Exception:  # noqa: BLE001
             continue
         length = math.hypot(x1 - x0, y1 - y0)
@@ -18910,16 +19110,13 @@ def _find_wide_staggered_doors(msp) -> list[dict]:
     골밀도영상 검사실6 아래 내부 문이 그 예다.
     """
     records: list[dict] = []
-    for entity in msp:
-        if entity.dxftype() != "LINE":
+    for entity in _entities(msp):
+        if _dxftype(entity) != "LINE":
             continue
         if getattr(entity.dxf, "layer", None) not in (WALL_LAYER, BASE_LAYER, DOOR_LAYER):
             continue
         try:
-            x0 = float(entity.dxf.start.x)
-            y0 = float(entity.dxf.start.y)
-            x1 = float(entity.dxf.end.x)
-            y1 = float(entity.dxf.end.y)
+            x0, y0, x1, y1 = _line_xy(entity)
         except Exception:  # noqa: BLE001
             continue
         length = math.hypot(x1 - x0, y1 - y0)
@@ -19059,16 +19256,13 @@ def _find_observation_windows(msp) -> list[dict]:
     조정실과 일반영상 검사실3 사이가 그 예다.
     """
     records: list[dict] = []
-    for entity in msp:
-        if entity.dxftype() != "LINE":
+    for entity in _entities(msp):
+        if _dxftype(entity) != "LINE":
             continue
         if getattr(entity.dxf, "layer", None) not in (WALL_LAYER, BASE_LAYER, DOOR_LAYER, WINDOW_LAYER):
             continue
         try:
-            x0 = float(entity.dxf.start.x)
-            y0 = float(entity.dxf.start.y)
-            x1 = float(entity.dxf.end.x)
-            y1 = float(entity.dxf.end.y)
+            x0, y0, x1, y1 = _line_xy(entity)
         except Exception:  # noqa: BLE001
             continue
         length = math.hypot(x1 - x0, y1 - y0)
@@ -19227,16 +19421,13 @@ def _find_diagonal_observation_windows(msp) -> list[dict]:
     일반영상검사실4 안쪽 창이 그 예다.
     """
     records: list[dict] = []
-    for entity in msp:
-        if entity.dxftype() != "LINE":
+    for entity in _entities(msp):
+        if _dxftype(entity) != "LINE":
             continue
         if getattr(entity.dxf, "layer", None) not in (WALL_LAYER, BASE_LAYER, DOOR_LAYER, WINDOW_LAYER):
             continue
         try:
-            x0 = float(entity.dxf.start.x)
-            y0 = float(entity.dxf.start.y)
-            x1 = float(entity.dxf.end.x)
-            y1 = float(entity.dxf.end.y)
+            x0, y0, x1, y1 = _line_xy(entity)
         except Exception:  # noqa: BLE001
             continue
         dx, dy = x1 - x0, y1 - y0
@@ -19400,13 +19591,13 @@ def demote_swing_hinge_door_leaves(msp) -> int:
     스윙이 열리는 반대편의 벽면은 내리지 않는다.
     """
     leaves: list[tuple[float, float, float, float, float, float]] = []
-    for entity in msp:
-        if entity.dxftype() != "ARC":
+    for entity in _entities(msp):
+        if _dxftype(entity) != "ARC":
             continue
         try:
-            radius = float(entity.dxf.radius)
-            start_angle = float(entity.dxf.start_angle)
-            end_angle = float(entity.dxf.end_angle)
+            radius = _ar(entity)
+            start_angle = _asa(entity)
+            end_angle = _aea(entity)
             center = entity.dxf.center
         except Exception:  # noqa: BLE001
             continue
@@ -19447,8 +19638,8 @@ def demote_swing_hinge_door_leaves(msp) -> int:
     changed = 0
     seen: set[int] = set()
     leaf_boxes: list[tuple[float, float, float, float, bool]] = []
-    for entity in list(msp):
-        if entity.dxftype() != "LWPOLYLINE" or not getattr(entity, "closed", False):
+    for entity in _entities(msp):
+        if _dxftype(entity) != "LWPOLYLINE" or not getattr(entity, "closed", False):
             continue
         if getattr(entity.dxf, "layer", None) != WALL_LAYER:
             continue
@@ -19493,13 +19684,13 @@ def demote_swing_hinge_door_leaves(msp) -> int:
             leaf_boxes.append((min(xs) - 15.0, min(ys) - 15.0, max(xs) + 15.0, max(ys) + 15.0, horizontal))
             break
 
-    for entity in list(msp):
-        if id(entity) in seen or entity.dxftype() != "LINE":
+    for entity in _entities(msp):
+        if id(entity) in seen or _dxftype(entity) != "LINE":
             continue
         if getattr(entity.dxf, "layer", None) != WALL_LAYER:
             continue
-        x0, y0 = float(entity.dxf.start.x), float(entity.dxf.start.y)
-        x1, y1 = float(entity.dxf.end.x), float(entity.dxf.end.y)
+        x0, y0 = _lx0(entity), _ly0(entity)
+        x1, y1 = _lx1(entity), _ly1(entity)
         length = math.hypot(x1 - x0, y1 - y0)
         if length < 400.0:
             continue
@@ -19552,11 +19743,11 @@ def promote_door_side_doubles(msp) -> int:
     긴 선이 짧은 변을 덮는 것은 이중선이 아니다.
     """
     doors: list[tuple[bool, float, float, float, float]] = []
-    for entity in msp:
-        if getattr(entity.dxf, "layer", None) != DOOR_LAYER or entity.dxftype() != "LWPOLYLINE":
+    for entity in _entities(msp):
+        if getattr(entity.dxf, "layer", None) != DOOR_LAYER or _dxftype(entity) != "LWPOLYLINE":
             continue
         try:
-            pts = [(float(p[0]), float(p[1])) for p in entity.get_points("xy")]
+            pts = [(float(p[0]), float(p[1])) for p in _poly_xy(entity)]
         except Exception:  # noqa: BLE001
             continue
         if len(pts) < 4:
@@ -19580,7 +19771,7 @@ def promote_door_side_doubles(msp) -> int:
         return 0
 
     lines: list[tuple[str, float, float, float, float, Any]] = []
-    for entity in msp:
+    for entity in _entities(msp):
         if getattr(entity.dxf, "layer", None) not in (BASE_LAYER, WALL_LAYER):
             continue
         axis = _axis_line(entity)
@@ -19754,7 +19945,7 @@ def apply_corrections(
     demote_ids |= landscape_demote
 
     n_demoted = 0
-    for e in list(msp):
+    for e in _entities(msp):
         if e.dxf.layer == WALL_LAYER and id(e) in demote_ids:
             msp.delete_entity(e)
             n_demoted += 1
@@ -19792,7 +19983,7 @@ def apply_corrections(
     if do_open_hall_demote:
         segs_after = iter_axis_segs(msp)
         post_demote = demote_open_hall_center_walls(msp, segs_after)
-        for e in list(msp):
+        for e in _entities(msp):
             if e.dxf.layer == WALL_LAYER and id(e) in post_demote:
                 msp.delete_entity(e)
                 n_demoted += 1
@@ -19803,7 +19994,7 @@ def apply_corrections(
     if do_elevator_promote:
         segs_after = iter_axis_segs(msp, min_len_mm=70.0)
         post_elev = demote_elevator_door_back_faces(msp, segs_after)
-        for e in list(msp):
+        for e in _entities(msp):
             if e.dxf.layer == WALL_LAYER and id(e) in post_elev:
                 msp.delete_entity(e)
                 n_demoted += 1
@@ -19818,7 +20009,7 @@ def apply_corrections(
         post_furn |= demote_meeting_room_interiors(msp, segs_after, exclude_ids=hbeam_ids)
         post_furn |= demote_serving_counter_walls(msp, segs_after, exclude_ids=hbeam_ids)
         post_furn |= demote_landscape_walls(msp, segs_after, exclude_ids=hbeam_ids)
-        for e in list(msp):
+        for e in _entities(msp):
             if e.dxf.layer == WALL_LAYER and id(e) in post_furn:
                 msp.delete_entity(e)
                 n_demoted += 1
@@ -19831,7 +20022,7 @@ def apply_corrections(
     # 승격으로 다시 빨개진 픽토그램(장애인 표식) 제거
     n_pictogram = len(pictogram_demote)
     post_pic = demote_pictogram_columns(msp)
-    for e in list(msp):
+    for e in _entities(msp):
         if e.dxf.layer == WALL_LAYER and id(e) in post_pic:
             msp.delete_entity(e)
             n_demoted += 1
@@ -19846,7 +20037,7 @@ def apply_corrections(
         post_serving = demote_serving_counter_walls(
             msp, segs_serving, exclude_ids=hbeam_ids
         )
-        for e in list(msp):
+        for e in _entities(msp):
             if e.dxf.layer == WALL_LAYER and id(e) in post_serving:
                 msp.delete_entity(e)
                 n_demoted += 1
@@ -19977,8 +20168,8 @@ def apply_corrections(
     n_column_promoted += n_h_sym
     n_promoted += n_h_sym
     square_boxes: list[tuple[float, float, float, float]] = []
-    for ent in msp:
-        if ent.dxftype() != "LWPOLYLINE" or not ent.closed:
+    for ent in _entities(msp):
+        if _dxftype(ent) != "LWPOLYLINE" or not ent.closed:
             continue
         if getattr(ent.dxf, "layer", None) != WALL_LAYER:
             continue
@@ -20072,8 +20263,8 @@ def apply_corrections(
     marked = mark_doors_and_columns(msp)
     n_promoted += promote_door_side_doubles(msp)
 
-    n_wall = sum(1 for e in msp if e.dxf.layer == WALL_LAYER)
-    n_base = sum(1 for e in msp if e.dxf.layer == BASE_LAYER)
+    n_wall = sum(1 for e in _entities(msp) if e.dxf.layer == WALL_LAYER)
+    n_base = sum(1 for e in _entities(msp) if e.dxf.layer == BASE_LAYER)
     return {
         "n_demoted": n_demoted,
         "n_promoted": n_promoted,
@@ -20107,17 +20298,17 @@ def _mark_sliding_doors_and_windows(msp) -> tuple[list[dict[str, Any]], list[dic
     벽 선 위에 그대로 겹친 칸은 어느 쪽도 아니다.
     """
     walls: list[tuple[str, float, float, float]] = []
-    for entity in msp:
+    for entity in _entities(msp):
         if getattr(entity.dxf, "layer", None) != WALL_LAYER:
             continue
         pairs: list[tuple[tuple[float, float], tuple[float, float]]] = []
-        if entity.dxftype() == "LINE":
+        if _dxftype(entity) == "LINE":
             pairs = [(
-                (float(entity.dxf.start.x), float(entity.dxf.start.y)),
-                (float(entity.dxf.end.x), float(entity.dxf.end.y)),
+                (_lx0(entity), _ly0(entity)),
+                (_lx1(entity), _ly1(entity)),
             )]
-        elif entity.dxftype() == "LWPOLYLINE":
-            pts = [(float(p[0]), float(p[1])) for p in entity.get_points("xy")]
+        elif _dxftype(entity) == "LWPOLYLINE":
+            pts = [(float(p[0]), float(p[1])) for p in _poly_xy(entity)]
             if entity.closed and pts and pts[0] != pts[-1]:
                 pts = pts + [pts[0]]
             pairs = list(zip(pts, pts[1:]))
@@ -20128,13 +20319,13 @@ def _mark_sliding_doors_and_windows(msp) -> tuple[list[dict[str, Any]], list[dic
                 walls.append(("V", (x0 + x1) / 2.0, min(y0, y1), max(y0, y1)))
 
     panels: list[dict[str, Any]] = []
-    for entity in msp:
-        if entity.dxftype() != "LWPOLYLINE" or not entity.closed:
+    for entity in _entities(msp):
+        if _dxftype(entity) != "LWPOLYLINE" or not entity.closed:
             continue
         layer = getattr(entity.dxf, "layer", None)
         if layer == DOOR_LAYER:
             continue
-        pts = [(float(p[0]), float(p[1])) for p in entity.get_points("xy")]
+        pts = [(float(p[0]), float(p[1])) for p in _poly_xy(entity)]
         if len(pts) < 4:
             continue
         xs = [p[0] for p in pts]
@@ -20282,8 +20473,8 @@ def promote_capped_windows(msp) -> tuple[int, int]:
     캡 좌우로 이어진 인접 면과, 끝에서 벽 두께만 막는 짧은 선은 WALL로 둔다.
     """
     caps: list[tuple[float, float, float, float]] = []
-    for entity in msp:
-        if entity.dxftype() != "LWPOLYLINE" or not entity.closed:
+    for entity in _entities(msp):
+        if _dxftype(entity) != "LWPOLYLINE" or not entity.closed:
             continue
         pts = _polyline_xy(entity)
         if len(pts) < 4:
@@ -20298,7 +20489,7 @@ def promote_capped_windows(msp) -> tuple[int, int]:
         return (0, 0)
 
     segs: list[tuple[Any, bool, float, float, float]] = []
-    for entity in msp:
+    for entity in _entities(msp):
         axis = _axis_line(entity)
         if axis is None:
             continue
@@ -20409,8 +20600,8 @@ def promote_capped_windows(msp) -> tuple[int, int]:
                     n_wall += 1
                 painted.add(id(entity))
                 break
-    for entity in msp:
-        if id(entity) in painted or entity.dxftype() != "LWPOLYLINE" or not entity.closed:
+    for entity in _entities(msp):
+        if id(entity) in painted or _dxftype(entity) != "LWPOLYLINE" or not entity.closed:
             continue
         pts = _polyline_xy(entity)
         if len(pts) < 4:
@@ -20443,8 +20634,8 @@ def promote_double_sash_windows(msp) -> tuple[int, int]:
     창짝은 벽처럼 올리되 레이어는 WINDOW. 개구 양끝에서 이어진 인접 면은 WALL.
     """
     sashes: list[dict[str, float | bool | object]] = []
-    for entity in msp:
-        if entity.dxftype() != "LWPOLYLINE" or not entity.closed:
+    for entity in _entities(msp):
+        if _dxftype(entity) != "LWPOLYLINE" or not entity.closed:
             continue
         pts = _polyline_xy(entity)
         if len(pts) < 4:
@@ -20504,7 +20695,7 @@ def promote_double_sash_windows(msp) -> tuple[int, int]:
         return (0, 0)
 
     segs: list[tuple[object, bool, float, float, float]] = []
-    for entity in msp:
+    for entity in _entities(msp):
         axis = _axis_line(entity)
         if axis is None:
             continue
@@ -20583,8 +20774,8 @@ def promote_double_sash_windows(msp) -> tuple[int, int]:
             touches = min(abs(s0 - along0), abs(s1 - along0), abs(s0 - along1), abs(s1 - along1)) <= 80.0
             if outside and touches and cover <= 80.0:
                 _as_wall(entity)
-        for entity in msp:
-            if id(entity) in painted or entity.dxftype() != "LWPOLYLINE" or not entity.closed:
+        for entity in _entities(msp):
+            if id(entity) in painted or _dxftype(entity) != "LWPOLYLINE" or not entity.closed:
                 continue
             pts = _polyline_xy(entity)
             if len(pts) < 4:
@@ -20616,8 +20807,8 @@ def promote_line_sash_windows(msp) -> tuple[int, int]:
     """
     closed: list[tuple[float, float, float, float]] = []
     lines: list[tuple[object, str, float, float, float, float]] = []
-    for entity in msp:
-        if entity.dxftype() == "LWPOLYLINE" and entity.closed:
+    for entity in _entities(msp):
+        if _dxftype(entity) == "LWPOLYLINE" and entity.closed:
             pts = _polyline_xy(entity)
             if len(pts) >= 4:
                 xs = [p[0] for p in pts]
@@ -20727,7 +20918,7 @@ def promote_line_sash_windows(msp) -> tuple[int, int]:
         return (0, 0)
 
     segs: list[tuple[object, bool, float, float, float]] = []
-    for entity in msp:
+    for entity in _entities(msp):
         axis = _axis_line(entity)
         if axis is None:
             continue
@@ -20781,8 +20972,8 @@ def promote_line_sash_windows(msp) -> tuple[int, int]:
             near_band = perp0 - 80.0 <= coord <= perp1 + 80.0
             if near_band and outside and touches and 400.0 <= length <= 2600.0 and cover <= 80.0:
                 _as_wall(entity)
-        for entity in msp:
-            if id(entity) in painted or entity.dxftype() != "LWPOLYLINE" or not entity.closed:
+        for entity in _entities(msp):
+            if id(entity) in painted or _dxftype(entity) != "LWPOLYLINE" or not entity.closed:
                 continue
             pts = _polyline_xy(entity)
             if len(pts) < 4:
@@ -20815,8 +21006,8 @@ def promote_strip_windows(msp) -> tuple[int, int]:
     """
     caps: list[tuple[float, float, float, float, object]] = []
     sashes: list[tuple[float, float, float, float]] = []
-    for entity in msp:
-        if entity.dxftype() != "LWPOLYLINE" or not entity.closed:
+    for entity in _entities(msp):
+        if _dxftype(entity) != "LWPOLYLINE" or not entity.closed:
             continue
         pts = _polyline_xy(entity)
         if len(pts) < 4:
@@ -20834,7 +21025,7 @@ def promote_strip_windows(msp) -> tuple[int, int]:
         return (0, 0)
 
     segs: list[tuple[object, str, float, float, float]] = []
-    for entity in msp:
+    for entity in _entities(msp):
         axis = _axis_line(entity)
         if axis is None:
             continue
@@ -20993,13 +21184,13 @@ def mark_doors_and_columns(msp) -> dict[str, Any]:
             doc.layers.add(name, color=color)
 
     swings: list[tuple[float, float, float, float, float, float]] = []
-    for entity in msp:
-        if entity.dxftype() != "ARC":
+    for entity in _entities(msp):
+        if _dxftype(entity) != "ARC":
             continue
         try:
-            radius = float(entity.dxf.radius)
-            start_angle = float(entity.dxf.start_angle)
-            end_angle = float(entity.dxf.end_angle)
+            radius = _ar(entity)
+            start_angle = _asa(entity)
+            end_angle = _aea(entity)
             center = entity.dxf.center
         except Exception:  # noqa: BLE001
             continue
@@ -21096,12 +21287,12 @@ def mark_doors_and_columns(msp) -> dict[str, Any]:
             "bbox_mm": [round(value, 1) for value in box],
         })
 
-    for entity in msp:
+    for entity in _entities(msp):
         layer = getattr(entity.dxf, "layer", None)
         if layer == WALL_LAYER:
             continue
-        if entity.dxftype() == "LWPOLYLINE" and entity.closed:
-            pts = [(float(p[0]), float(p[1])) for p in entity.get_points("xy")]
+        if _dxftype(entity) == "LWPOLYLINE" and entity.closed:
+            pts = [(float(p[0]), float(p[1])) for p in _poly_xy(entity)]
             if len(pts) < 4:
                 continue
             xs = [p[0] for p in pts]
@@ -21121,10 +21312,10 @@ def mark_doors_and_columns(msp) -> dict[str, Any]:
             entity.dxf.color = DOOR_COLOR
             doors.append({"kind": "leaf", "bbox_mm": _bbox(xs, ys)})
             continue
-        if entity.dxftype() != "LINE" or layer != BASE_LAYER:
+        if _dxftype(entity) != "LINE" or layer != BASE_LAYER:
             continue
-        x0, y0 = float(entity.dxf.start.x), float(entity.dxf.start.y)
-        x1, y1 = float(entity.dxf.end.x), float(entity.dxf.end.y)
+        x0, y0 = _lx0(entity), _ly0(entity)
+        x1, y1 = _lx1(entity), _ly1(entity)
         length = math.hypot(x1 - x0, y1 - y0)
         if length < 400.0:
             continue
@@ -21184,13 +21375,13 @@ def mark_doors_and_columns(msp) -> dict[str, Any]:
 
     column_ids = find_hbeam_column_entities(msp)
     columns: list[dict[str, Any]] = []
-    for entity in msp:
+    for entity in _entities(msp):
         if getattr(entity.dxf, "layer", None) not in (WALL_LAYER, COLUMN_LAYER):
             continue
         mark = id(entity) in column_ids
         box: list[float] | None = None
-        if entity.dxftype() == "LWPOLYLINE" and entity.closed:
-            pts = [(float(p[0]), float(p[1])) for p in entity.get_points("xy")]
+        if _dxftype(entity) == "LWPOLYLINE" and entity.closed:
+            pts = [(float(p[0]), float(p[1])) for p in _poly_xy(entity)]
             if len(pts) >= 4:
                 xs = [p[0] for p in pts]
                 ys = [p[1] for p in pts]
@@ -21207,8 +21398,8 @@ def mark_doors_and_columns(msp) -> dict[str, Any]:
     # 벽면 기둥은 닫힌 폴리선이 아니라 선 네 개다. 그 윤곽도 COLUMN 레이어로 둔다.
     horizontal: list[tuple[float, float, float, Any]] = []
     vertical: list[tuple[float, float, float, Any]] = []
-    for entity in msp:
-        if entity.dxftype() != "LINE" or getattr(entity.dxf, "layer", None) not in (WALL_LAYER, COLUMN_LAYER):
+    for entity in _entities(msp):
+        if _dxftype(entity) != "LINE" or getattr(entity.dxf, "layer", None) not in (WALL_LAYER, COLUMN_LAYER):
             continue
         parsed = _axis_line(entity)
         if parsed is None:
@@ -21382,17 +21573,17 @@ def render_wall_dxf_png(
     xs: list[float] = []
     ys: list[float] = []
 
-    for e in msp:
+    for e in _entities(msp):
         layer = e.dxf.layer
-        t = e.dxftype()
+        t = _dxftype(e)
         try:
             if t == "LINE":
                 pts = [
-                    (float(e.dxf.start.x), float(e.dxf.start.y)),
-                    (float(e.dxf.end.x), float(e.dxf.end.y)),
+                    (_lx0(e), _ly0(e)),
+                    (_lx1(e), _ly1(e)),
                 ]
             elif t == "LWPOLYLINE":
-                pts = [(float(p[0]), float(p[1])) for p in e.get_points("xy")]
+                pts = [(float(p[0]), float(p[1])) for p in _poly_xy(e)]
                 if e.closed and pts and pts[0] != pts[-1]:
                     pts = pts + [pts[0]]
             elif t == "ARC":
@@ -21401,16 +21592,16 @@ def render_wall_dxf_png(
                     (
                         float(c.x),
                         float(c.y),
-                        float(e.dxf.radius),
-                        float(e.dxf.start_angle),
-                        float(e.dxf.end_angle),
+                        _ar(e),
+                        _asa(e),
+                        _aea(e),
                         layer == DOOR_LAYER,
                     )
                 )
                 continue
             elif t == "CIRCLE":
                 c = e.dxf.center
-                circles.append((float(c.x), float(c.y), float(e.dxf.radius)))
+                circles.append((float(c.x), float(c.y), _ar(e)))
                 continue
             elif t == "TEXT":
                 texts.append(
