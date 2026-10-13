@@ -85,7 +85,13 @@ def _roomish(text: str) -> bool:
 
 
 def is_room_label(text: str) -> bool:
-    """한글 실명, 또는 영문 2자 이상에 숫자가 붙은 이름. 축선·치수는 제외."""
+    """한글 실명, 또는 영문 2자 이상에 숫자가 붙은 이름. 축선·치수·안내 문구는 제외."""
+    name = norm_name(text)
+    # 마감·비치·주차 안내, 창고, 입구, 출구, DA는 면적 실이 아니다.
+    if any(token in name for token in ("노출콘크리트", "질식소화덮개", "주차", "창고", "입구", "출구")):
+        return False
+    if name.upper() in {"DA", "D.A", "D.A."}:
+        return False
     if _roomish(text):
         return True
     if any(token in text for token in ("면적", "천장", ":", "：", "=", "/")):
