@@ -24,6 +24,7 @@ WALL_LAYER = "WALL"
 WINDOW_LAYER = "WINDOW"
 COLUMN_LAYER = "COLUMN"
 DOOR_LAYER = "DOOR"
+BASE_LAYER = "BASE"
 BOUNDARY_LAYERS = (WALL_LAYER, WINDOW_LAYER, COLUMN_LAYER, DOOR_LAYER)
 AXIS_TOL_MM = 20.0
 CLUSTER_TOL_MM = 15.0
@@ -121,6 +122,17 @@ def is_split_anchor(text: str) -> bool:
     if folded in {"WC", "W.C", "W.C."}:
         return True
     return folded.startswith("WC(") or folded.startswith("W.C(")
+
+
+def is_region_label(text: str) -> bool:
+    """한 면을 가를 때 다른 영역으로 보는 글자. 집기는 호출자가 뺀다."""
+    if is_room_label(text) or is_split_anchor(text):
+        return True
+    name = norm_name(text)
+    folded = name.upper()
+    if "창고" in folded or "차고" in folded:
+        return True
+    return folded in {"DA", "D.A", "D.A."}
 
 
 def _label_record(entity) -> tuple[float, float, str, float] | None:
@@ -1416,6 +1428,140 @@ def split_face_at_wall_end(msp, segs, boxes, origin, others: list[tuple[float, f
     if best is None:
         return None
     return best[1], best[2], best[3], best[4], best[5]
+
+
+def _straight_parts(entity) -> list[tuple[float, float, float, float]]:
+    kind = entity.dxftype()
+    if kind == "LINE":
+        return [
+            (
+                float(entity.dxf.start.x),
+                float(entity.dxf.start.y),
+                float(entity.dxf.end.x),
+                float(entity.dxf.end.y),
+            )
+        ]
+    if kind != "LWPOLYLINE":
+        return []
+    pts = [(float(a), float(b)) for a, b in entity.get_points("xy")]
+    n = len(pts)
+    parts = []
+    for i in range(n - 1 + (1 if entity.closed else 0)):
+        a, b = pts[i], pts[(i + 1) % n]
+        parts.append((a[0], a[1], b[0], b[1]))
+    return parts
+
+
+def _hit_ring(x: float, y: float, ux: float, uy: float, sign: float, ring, limit: float):
+    """점에서 방향으로 limit 안에서 면 테두리와 만나는 가장 가까운 점."""
+    if ring.distance(Point(x, y)) <= 15.0:
+        return x, y, 0.0
+    ray = LineString([(x, y), (x + ux * sign * limit, y + uy * sign * limit)])
+    inter = ray.intersection(ring)
+    if inter.is_empty:
+        return None
+    if inter.geom_type == "Point":
+        pts = [inter]
+    elif inter.geom_type == "MultiPoint":
+        pts = list(inter.geoms)
+    else:
+        return None
+    hit = None
+    for ip in pts:
+        dist = math.hypot(ip.x - x, ip.y - y)
+        if dist <= 20.0:
+            continue
+        if hit is None or dist < hit[0]:
+            hit = (dist, float(ip.x), float(ip.y))
+    if hit is None:
+        return None
+    return hit[1], hit[2], hit[0]
+
+
+def split_face_on_divider(msp, segs, boxes, origin, others: list[tuple[float, float]], current_pts=None):
+    """한 면의 라벨 사이를 지나는 벽이 아닌 선을 면 경계까지 이어 면을 나눈다.
+
+    선 끝과 경계의 틈은 800 mm 까지만 잇는다. 이중선이면 실 라벨에 가까운 쪽을 쓴다.
+    나누지 못하면 None.
+    """
+    lines, face, x_axes, y_axes, swings = _closed_lines(msp, segs, origin, boxes, [])
+    if not lines or face is None or not others:
+        return None
+    ring = face.exterior
+    current = Polygon(current_pts) if current_pts and len(current_pts) >= 3 else None
+    spans = [LineString([origin, (ox, oy)]) for ox, oy in others]
+    minx, miny, maxx, maxy = face.bounds
+    candidates: list[tuple[float, float, LineString]] = []
+    seen: set[tuple] = set()
+    for entity in msp:
+        try:
+            if entity.dxf.layer != BASE_LAYER:
+                continue
+        except Exception:
+            continue
+        for x0, y0, x1, y1 in _straight_parts(entity):
+            length = math.hypot(x1 - x0, y1 - y0)
+            if length < 1500.0:
+                continue
+            if max(x0, x1) < minx - 800.0 or min(x0, x1) > maxx + 800.0:
+                continue
+            if max(y0, y1) < miny - 800.0 or min(y0, y1) > maxy + 800.0:
+                continue
+            segment = LineString([(x0, y0), (x1, y1)])
+            if not any(segment.intersects(span) for span in spans):
+                continue
+            mid = segment.interpolate(0.5, normalized=True)
+            if not face.buffer(30.0).covers(mid):
+                continue
+            key = (round(x0, 0), round(y0, 0), round(x1, 0), round(y1, 0), round(length, 0))
+            if key in seen:
+                continue
+            seen.add(key)
+            ux, uy = (x1 - x0) / length, (y1 - y0) / length
+            start = _hit_ring(x0, y0, ux, uy, -1.0, ring, 800.0)
+            end = _hit_ring(x1, y1, ux, uy, 1.0, ring, 800.0)
+            if start is None or end is None:
+                continue
+            chord = LineString([(start[0], start[1]), (end[0], end[1])])
+            if chord.length < 800.0:
+                continue
+            if ring.distance(Point(start[0], start[1])) > 20.0 or ring.distance(Point(end[0], end[1])) > 20.0:
+                continue
+            if any(
+                not face.buffer(60.0).covers(chord.interpolate(t, normalized=True))
+                for t in (0.25, 0.5, 0.75)
+            ):
+                continue
+            perp = abs((origin[0] - x0) * uy - (origin[1] - y0) * ux)
+            candidates.append((perp, chord.length - length, chord))
+    candidates.sort(key=lambda item: (item[0], item[1]))
+    best = None
+    for perp, extra, chord in candidates[:8]:
+        trial = lines + [chord]
+        face_a = _face_at(trial, origin[0], origin[1])
+        if face_a is None or not face_a.contains(Point(origin)):
+            continue
+        if current is not None and face_a.difference(current.buffer(80.0)).area > face_a.area * 0.05:
+            continue
+        separated = []
+        for index, (ox, oy) in enumerate(others):
+            face_b = _face_at(trial, ox, oy)
+            if face_b is None:
+                continue
+            shared = face_a.intersection(face_b).area
+            if shared > min(face_a.area, face_b.area) * 0.5:
+                continue
+            separated.append((index, face_b))
+        if not separated:
+            continue
+        areas = [face_a.area] + [item.area for _index, item in separated]
+        if min(areas) < 500_000.0:
+            continue
+        if sum(areas) > face.area * 1.2:
+            continue
+        best = (face_a, separated, x_axes, y_axes, swings)
+        break
+    return best
 
 
 def evaluate(

@@ -2974,6 +2974,181 @@ def promote_room_row_dividers(
     return out
 
 
+def door_side_wall_ids(msp, bboxes: Iterable[Any]) -> set[int]:
+    """Vision demote 상자 안의 문 양옆 벽.
+
+    스윙이나 X자 문 개구 끝에 닿은 두께 80–250 mm 이중벽과,
+    그 두께를 막는 짧은 선이다. 개구를 지나는 문짝은 넣지 않는다.
+    """
+    boxes = normalize_bbox_list(list(bboxes), field="demote_bboxes")
+    if not boxes:
+        return set()
+
+    def _in_box(x: float, y: float, pad: float = 0.0) -> bool:
+        return any(
+            box["xmin"] - pad <= x <= box["xmax"] + pad and box["ymin"] - pad <= y <= box["ymax"] + pad
+            for box in boxes
+        )
+
+    segments: list[dict] = []
+    for entity in _entities(msp):
+        layer = getattr(entity.dxf, "layer", None)
+        if layer not in (WALL_LAYER, BASE_LAYER):
+            continue
+        kind = _dxftype(entity)
+        parts: list[tuple[float, float, float, float]] = []
+        if kind == "LINE":
+            try:
+                parts.append(_line_xy(entity))
+            except Exception:  # noqa: BLE001
+                continue
+        elif kind == "LWPOLYLINE":
+            try:
+                points = [(float(x), float(y)) for x, y in _poly_xy(entity)]
+            except Exception:  # noqa: BLE001
+                continue
+            count = len(points)
+            if count < 2:
+                continue
+            last = count if entity.closed else count - 1
+            for index in range(last):
+                start, end = points[index], points[(index + 1) % count]
+                parts.append((start[0], start[1], end[0], end[1]))
+        for x0, y0, x1, y1 in parts:
+            length = math.hypot(x1 - x0, y1 - y0)
+            if length < 40.0:
+                continue
+            horizontal = abs(y1 - y0) <= max(20.0, 0.12 * length)
+            vertical = abs(x1 - x0) <= max(20.0, 0.12 * length)
+            if horizontal == vertical:
+                continue
+            segments.append({
+                "entity": entity,
+                "x0": x0,
+                "y0": y0,
+                "x1": x1,
+                "y1": y1,
+                "length": length,
+                "horizontal": horizontal,
+                "ortho": (y0 + y1) * 0.5 if horizontal else (x0 + x1) * 0.5,
+                "a0": min(x0, x1) if horizontal else min(y0, y1),
+                "a1": max(x0, x1) if horizontal else max(y0, y1),
+                "mx": (x0 + x1) * 0.5,
+                "my": (y0 + y1) * 0.5,
+            })
+
+    # (개구가 수평인가, 개구 끝 along, 개구가 놓인 벽 ortho, 끝의 수직 허용)
+    ends: list[tuple[bool, float, float, float]] = []
+    for entity in _entities(msp):
+        if _dxftype(entity) != "ARC":
+            continue
+        try:
+            radius = _ar(entity)
+            cx, cy = _acx(entity), _acy(entity)
+            sweep = (_aea(entity) - _asa(entity)) % 360.0
+            start, end_angle = _asa(entity), _aea(entity)
+        except Exception:  # noqa: BLE001
+            continue
+        if not (600.0 <= radius <= 1600.0) or not (50.0 <= sweep <= 130.0):
+            continue
+        tips = []
+        for angle in (start, end_angle):
+            rad = math.radians(angle)
+            tips.append((cx + radius * math.cos(rad), cy + radius * math.sin(rad)))
+        along = None
+        for tip in tips:
+            dx, dy = abs(tip[0] - cx), abs(tip[1] - cy)
+            if (dx > 0.7 * radius and dy < 0.35 * radius) or (dy > 0.7 * radius and dx < 0.35 * radius):
+                along = tip
+                break
+        if along is None:
+            continue
+        if not any(_in_box(px, py, 200.0) for px, py in ((cx, cy), along, *tips)):
+            continue
+        horizontal = abs(along[1] - cy) <= abs(along[0] - cx)
+        ortho = cy if horizontal else cx
+        for edge in (cx if horizontal else cy, along[0] if horizontal else along[1]):
+            ends.append((horizontal, edge, ortho, 400.0))
+
+    for is_h, face0, face1, a0, a1 in _x_door_openings(msp):
+        cx = (a0 + a1) * 0.5
+        cy = (face0 + face1) * 0.5
+        if not _in_box(cx, cy, 200.0):
+            continue
+        ortho = (face0 + face1) * 0.5
+        allowance = abs(face1 - face0) * 0.5 + 400.0
+        ends.append((is_h, a0, ortho, allowance))
+        ends.append((is_h, a1, ortho, allowance))
+
+    flank_segments: list[dict] = []
+    for horizontal, edge, ortho, allowance in ends:
+        for segment in segments:
+            if segment["horizontal"] == horizontal or not (120.0 <= segment["length"] <= 2500.0):
+                continue
+            if not _in_box(segment["mx"], segment["my"]):
+                continue
+            touch = False
+            for x, y in ((segment["x0"], segment["y0"]), (segment["x1"], segment["y1"])):
+                along = x if horizontal else y
+                perp = y if horizontal else x
+                if abs(along - edge) <= 280.0 and abs(perp - ortho) <= allowance:
+                    touch = True
+            if not touch:
+                continue
+            mate = None
+            for other in segments:
+                if other is segment or other["horizontal"] != segment["horizontal"]:
+                    continue
+                gap = abs(other["ortho"] - segment["ortho"])
+                if not (80.0 <= gap <= 250.0):
+                    continue
+                overlap = min(segment["a1"], other["a1"]) - max(segment["a0"], other["a0"])
+                if overlap < 0.7 * min(segment["length"], other["length"]):
+                    continue
+                mate = other
+                break
+            if mate is None:
+                continue
+            flank_segments.append(segment)
+            if _in_box(mate["mx"], mate["my"]):
+                flank_segments.append(mate)
+
+    # 양면을 벽 두께로 막는 짧은 선.
+    faces = [segment for segment in flank_segments if segment["length"] >= 120.0]
+    for segment in segments:
+        if not (40.0 <= segment["length"] <= 280.0):
+            continue
+        if not _in_box(segment["mx"], segment["my"]):
+            continue
+        hits = []
+        for face in faces:
+            if face["horizontal"] == segment["horizontal"]:
+                continue
+            for x, y in ((face["x0"], face["y0"]), (face["x1"], face["y1"])):
+                if (
+                    min(math.hypot(segment["x0"] - x, segment["y0"] - y), math.hypot(segment["x1"] - x, segment["y1"] - y))
+                    <= 25.0
+                ):
+                    hits.append(face)
+                    break
+        if len({id(face["entity"]) for face in hits}) >= 1 and len(hits) >= 2:
+            flank_segments.append(segment)
+
+    kept: set[int] = set()
+    for segment in flank_segments:
+        entity = segment["entity"]
+        if _dxftype(entity) == "LINE":
+            kept.add(id(entity))
+            continue
+        long_parts = [
+            part for part in segments
+            if part["entity"] is entity and part["length"] > 80.0
+        ]
+        if long_parts and all(part in flank_segments for part in long_parts):
+            kept.add(id(entity))
+    return kept
+
+
 def demote_in_bboxes(
     msp,
     bboxes: Iterable[Any],
@@ -21312,6 +21487,13 @@ def apply_corrections(
     # 과대 bbox 는 normalize_bbox_list 에서 이미 skip 되므로,
     # 남은 박스는 Vision 명시 판정 → 복도·계단·엘리베이터·H-Beam protect 보다 우선.
     review_demote = demote_in_bboxes(msp, review.get("demote_bboxes") or [])
+    # 문짝 상자가 양옆 벽까지 덮어도 그 벽은 문으로 내리지 않는다.
+    door_sides = door_side_wall_ids(msp, review.get("demote_bboxes") or [])
+    review_demote -= door_sides
+    n_door_side = 0
+    for entity in _entities(msp):
+        if id(entity) in door_sides and _paint_layer(entity, WALL_LAYER, WALL_COLOR):
+            n_door_side += 1
     n_protected = len(demote_ids & protect_ids)
     demote_ids -= protect_ids
     demote_ids |= review_demote
@@ -21337,7 +21519,7 @@ def apply_corrections(
             n_demoted += 1
 
     seen: set[tuple[float, float, float, float]] = set()
-    n_promoted = 0
+    n_promoted = n_door_side
     for s in promote:
         key = (round(s.x0, 1), round(s.y0, 1), round(s.x1, 1), round(s.y1, 1))
         if key in seen:

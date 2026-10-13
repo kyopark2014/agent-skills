@@ -118,7 +118,7 @@ drawing_list.json 에서 건물(source_filename) · 층(floor) 결정
      - 기하: 복도·연속방·긴 이중선 promote
      - 기하: 강당·오픈홀 중앙 통로 demote (`protect`보다 우선)
      - review.json demote/promote_bboxes
-       (`demote_bboxes` 는 protect 보다 우선. 한 변 > 25 m · 면적 > 200 m² 는 skip)
+       (`demote_bboxes` 는 protect 보다 우선. 한 변 > 25 m · 면적 > 200 m² 는 skip. 상자 안이어도 문 양옆 이중벽은 WALL로 둔다)
      - `--short-demote` 옵션
      - 벽이 닫히지 않아 면적이 밖으로 새면, 그 벽의 마지막을 따라 close
   ↓

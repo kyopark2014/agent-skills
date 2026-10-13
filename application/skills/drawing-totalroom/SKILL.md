@@ -41,7 +41,7 @@ description: >-
    `open`은 실마다 그 문만 연다. 테두리 밖 `DOOR`는 `open`이어도 닫힌 경계로 둔다.
 3. **기둥 돌출부는 항상 뺀다.** H-Beam이 벽 안쪽 면보다 실 안으로 들어온 면적은 `area_m2`에서 제외한다. 벽 두께 안에만 있는 부분은 빼지 않는다.
 4. **레이어** — `floor_label_detected.dxf` 는 `floor_wall_validated.dxf` 를 복사한 뒤 라벨 레이어를 더한 도면이다. 라벨 하나당 레이어 하나다. 같은 실명이 여러 곳이면 그 레이어에 HATCH 가 여러 개다. 레이어의 HATCH 면적 합이 그 라벨의 `area_m2`다. 각 자리에는 PNG 와 같이 실명과 `면적 ㎡` 문자를 흰 판 위에 둔다. 좌표는 입력 DXF 와 같은 mm 이다.
-5. **같은 면** — 서로 다른 실명이 한 면에 있으면 각 레이어에 그 면 전체가 들어간다. `shared_with` 가 있으면 `area_m2`를 서로 더하지 않는다. 같은 실명이 서로 다른 면에 있으면 각 면의 `area_m2`를 더한다.
+5. **같은 면** — 한 면에 실명이 둘 이상이거나 창고·차고·화장실·WC·DA 글자가 같이 있으면, 그 사이를 지나는 `BASE` 선이 면 경계에서 800 mm 안까지 닿을 때 그 선으로 면을 나눈다. 벽이 아닌 이중선이면 실 라벨에 가까운 쪽을 경계로 쓴다. 창고·차고·화장실·WC·DA 쪽은 실로 남기지 않는다. 나눌 선이 없으면 각 레이어에 그 면 전체가 들어가고, `shared_with` 가 있으면 `area_m2`를 서로 더하지 않는다. 같은 실명이 서로 다른 면에 있으면 각 면의 `area_m2`를 더한다.
 6. **원본 보존** — validated DXF 는 읽기 전용이다. 결과 DXF 는 그 도면의 사본에 라벨 레이어를 더한 것이고, 검증 파일을 덮어쓰지 않는다. `floor_label_detected.png` 는 그 결과 DXF 를 `render_wall_dxf_png` 로 그린 것이다. HATCH, 흰 판, 실명·면적 문자는 DXF 엔티티에서 온다. 결과는 그 DXF 와 같은 폴더의 `floor_label_detected.dxf`, `floor_label_detected.png`, `floor_label_detected.json` 만 덮어쓴다. 번호 붙은 파일은 만들지 않는다.
 7. **스크립트 절대경로** — 이 SKILL.md 옆 `scripts/detect_labels.py`. 층이 둘 이상이면 `scripts/detect_labels_all.py` 한 번. 물리 CPU 코어 수만큼 층을 동시에 계산한다. `for` 루프로 층마다 `detect_labels.py`를 호출하지 않는다.
 8. 응답은 **한국어**. 경로·JSON 키·레이어 이름은 산출 그대로 쓴다.

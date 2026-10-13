@@ -45,9 +45,11 @@ _FIXTURE_NAMES = (
     "옷장",
     "신발장",
     "화분",
+    "어항",
     "화장대",
     "월풀욕조",
     "욕조",
+    "장애인",
     "(장애인)",
 )
 _FIXTURE_TAIL = re.compile(r"^(?:[#＃]?\d+|[（(]\d+[）)])?$")
@@ -242,6 +244,70 @@ def _divide_shared_faces(msp, boxes, segs, detected: list[dict], door: str) -> l
     return detected
 
 
+def _divide_on_dividers(msp, boxes, segs, detected: list[dict], door: str) -> list[dict]:
+    """한 면에 라벨이 여러 개이면 그 사이의 벽이 아닌 선으로 면을 나눈다.
+
+    창고·차고·화장실·WC·DA 쪽은 실로 남기지 않는다.
+    """
+    labels = [
+        (x, y, text)
+        for x, y, text in room.iter_labels(msp)
+        if not is_fixture_label(text) and room.is_region_label(text)
+    ]
+    by_xy = {(round(item["x"]), round(item["y"])): item for item in detected}
+    for inst in detected:
+        inside = []
+        for x, y, text in labels:
+            if room.norm_name(text) == inst["name"]:
+                continue
+            if (x - inst["x"]) ** 2 + (y - inst["y"]) ** 2 < 400.0 ** 2:
+                continue
+            if room.point_in_poly(x, y, inst["pts"]):
+                inside.append((x, y, text))
+        if not inside:
+            continue
+        split = room.split_face_on_divider(
+            msp,
+            segs,
+            boxes,
+            (inst["x"], inst["y"]),
+            [(x, y) for x, y, _text in inside],
+            current_pts=inst["pts"],
+        )
+        if split is None:
+            continue
+        face_a, separated, x_axes, y_axes, swings = split
+        packed = _record_face(msp, boxes, face_a, x_axes, y_axes, swings, inst["x"], inst["y"], door)
+        if packed is None:
+            continue
+        kept = {key: inst[key] for key in ("text", "x", "y", "name")}
+        inst.clear()
+        inst.update(packed)
+        inst.update(kept)
+        notes = []
+        for index, face_b in separated:
+            x, y, text = inside[index]
+            other = by_xy.get((round(x), round(y)))
+            if other is None or not room.is_room_label(text):
+                area = face_b.area / 1_000_000.0
+                notes.append(f"{text} {area:.2f} m2")
+                continue
+            row = _record_face(msp, boxes, face_b, x_axes, y_axes, swings, x, y, door)
+            if row is None:
+                notes.append(text)
+                continue
+            other_kept = {key: other[key] for key in ("text", "x", "y", "name")}
+            other.clear()
+            other.update(row)
+            other.update(other_kept)
+            notes.append(f"{other['text']} {other['area_m2']:.2f} m2")
+        print(
+            f"divide {inst['text']} {inst['area_m2']:.2f} m2 | " + ", ".join(notes),
+            flush=True,
+        )
+    return detected
+
+
 def _face_key(pts: list[tuple[float, float]]) -> tuple[tuple[int, int], ...]:
     return tuple((round(x), round(y)) for x, y in pts)
 
@@ -415,6 +481,7 @@ def detect(dxf_path: Path, meta_path: Path, door: str = "close") -> dict:
         detected.append(found)
         print(f"[{index}/{len(seeds)}] {text}  {found['area_m2']:.2f} m2", flush=True)
     detected = _divide_shared_faces(msp, boxes, segs, detected, door)
+    detected = _divide_on_dividers(msp, boxes, segs, detected, door)
 
     by_face: dict[tuple, list[str]] = {}
     for inst in detected:
