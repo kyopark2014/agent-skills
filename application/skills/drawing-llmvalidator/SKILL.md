@@ -44,7 +44,7 @@ description: >-
 3. **출력** — `floors/<F>/floor_wall_validated.{dxf,png,_meta.json}` 만 생성·갱신.
    `floor_wall_original.*` 은 읽기 전용(덮어쓰기 금지).
 4. **범위** — 사용자가 층을 지정하면 그 층만 처리한다. 층을 말하지 않으면 `floor_wall_original.dxf`가 있는 층을 이번 실행에서 모두 처리한다.
-   한 층만 먼저 하고 사용자 컨펌을 기다리지 않는다. Vision은 층 사이에 멈추지 않는다. 보정은 층마다 bash를 따로 호출하고, 결과가 오면 `{floor}이 끝났습니다`를 쓴 뒤 바로 다음 층을 호출한다.
+   한 층만 먼저 하고 사용자 컨펌을 기다리지 않는다. Vision은 층 사이에 멈추지 않는다. 보정은 층마다 bash를 따로 호출한다. 한 턴의 bash 수는 물리 CPU 코어 수와 남은 층 수 중 작은 값이다. 각 bash가 끝나면 `{floor}이 끝났습니다`를 쓰고, 남은 층이 있으면 다음 묶음을 같은 방식으로 호출한다.
 5. **기존 산출 덮어쓰기** — `floor_wall_validated.*`, `diff_original_vs_validated.png`,
    `llm_review/`가 이미 있어도 건너뛰거나 묻지 않는다. 같은 경로에 다시 써서 덮어쓴다.
 6. **스크립트 절대경로** — `$WORKING_DIR/skills/drawing-llmvalidator/scripts/` 또는
@@ -70,11 +70,21 @@ python3 "$SCRIPTS/view_image_all.py" --artifacts "$ART"
 
 `view_image_all.py` 가 `view_image_index.json` 을 쓰기 전에는 아래를 실행하지 않는다.
 
-보정은 층마다 bash를 따로 호출한다. 한 턴에는 그 층 bash만 호출한다. bash가 끝나면 `{floor}이 끝났습니다`를 쓰고, 사용자 확인 없이 다음 층의 bash를 호출한다. 그 bash 안에서는 보정 다음에 diff를 실행한다. 여러 층을 한 명령에 넣지 않는다. `for`, `nohup`, `&`, `tail`은 쓰지 않는다. `correct_walls_all.py`는 호출하지 않는다.
+보정은 층마다 bash를 따로 호출한다. 한 bash는 한 층이다. 보정 전에 `nproc`로 물리 CPU 코어 수를 확인한다. 한 턴에 나란히 호출하는 bash 수는 그 코어 수와 남은 층 수 중 작은 값이다. 그 bash는 동시에 실행된다. 코어가 8이고 층이 8이면 bash 8개를 한 턴에 호출한다. 코어가 4이고 층이 8이면 먼저 4개, 그 결과가 온 뒤 나머지 4개를 호출한다. 코어 수보다 많은 bash를 한 턴에 넣지 않는다. 각 bash 결과가 오면 `{floor}이 끝났습니다`를 쓰고, 사용자 확인 없이 남은 층이 있으면 다음 묶음을 호출한다. 한 bash 안에 여러 층을 넣지 않는다. `for`, `nohup`, `&`, `tail`은 쓰지 않는다. `correct_walls_all.py`는 호출하지 않는다.
+
+```bash
+nproc
+```
+
+```bash
+python3 "$SCRIPTS/correct_walls_floor.py" --artifacts "$ART" --floor 5F && python3 "$SCRIPTS/render_wall_diff.py" --artifacts "$ART" --floor 5F
+```
 
 ```bash
 python3 "$SCRIPTS/correct_walls_floor.py" --artifacts "$ART" --floor 6F && python3 "$SCRIPTS/render_wall_diff.py" --artifacts "$ART" --floor 6F
 ```
+
+위 층 명령은 예시이다. 코어 수만큼 이런 bash를 한 턴에 나란히 호출하고, `--floor`만 층마다 바꾼다.
 
 | 스크립트 | 역할 |
 | --- | --- |
@@ -82,8 +92,8 @@ python3 "$SCRIPTS/correct_walls_floor.py" --artifacts "$ART" --floor 6F && pytho
 | `prepare_review.py` | 한 층. `floor_wall_original.png` → `llm_review/` 조각 (한 변 5000px 이하) + `tiles.json` |
 | `view_image_all.py` | tiles.json 이 있는 층을 판정. 진행 중 Vision 호출은 물리 CPU 코어 수. 끝날 때까지 대기 |
 | `view_image.py` | 한 층 타일 PNG를 Vision으로 보고 `llm_review/review.json` 작성. UI에서 고른 모델(`UI_MODEL_NAME`). thinking 끄기. 도구가 아니다 |
-| `correct_walls_all.py` | 에이전트는 호출하지 않는다. 여러 층이 한 bash에서 끝나야 결과가 돌아온다 |
-| `correct_walls_floor.py` | 한 층 demote/promote → `floor_wall_validated.*` + `llm_review/corrections.json`. 이 bash가 끝나면 `{floor}이 끝났습니다` |
+| `correct_walls_all.py` | 에이전트는 호출하지 않는다. 여러 층을 한 bash에 넣으면 그 bash가 끝나야 결과가 돌아온다 |
+| `correct_walls_floor.py` | 한 층 demote/promote → `floor_wall_validated.*` + `llm_review/corrections.json`. 한 턴에 코어 수만큼 이 bash를 나란히 호출한다. 각 bash가 끝나면 `{floor}이 끝났습니다` |
 | `render_wall_diff.py` | original vs validated → `diff_original_vs_validated.png` (초록=promote, 파랑=demote) |
 | `lib_llm_correct.py` | 갭 승격·가구 강등·WALL DXF PNG 재렌더 |
 
@@ -103,7 +113,7 @@ drawing_list.json 에서 건물(source_filename) · 층(floor) 결정
      5000px 이하면 타일 한 장. 한 변이 5000px를 넘을 때만 나뉜 파일마다 스크립트 안에서 1회
      채팅에 판정·공간 분석을 쓰지 않는다. 스크립트가 끝난 뒤에 ③으로 간다
   ↓
-③ correct_walls_floor.py
+③ correct_walls_floor.py  한 턴에 물리 CPU 코어 수만큼 bash를 나란히 호출
      - 기하: WALL 런 사이 진짜 갭 + 이중선 promote
      - 기하: 복도·연속방·긴 이중선 promote
      - 기하: 강당·오픈홀 중앙 통로 demote (`protect`보다 우선)
@@ -116,7 +126,7 @@ drawing_list.json 에서 건물(source_filename) · 층(floor) 결정
    저장 레이어는 나눈다. 벽은 빨강 `WALL`. 여닫이·미닫이 문짝과 스윙은 연두 `DOOR`. 같은 개구에 나란히 겹친 창틀과 관찰창 유리는 청록 `WINDOW`. 기둥은 파랑 `COLUMN`. 닫힌 폴리선이 아니라 선 네 개로 그린 정사각 기둥도 `COLUMN`이다. 면적 계산은 `WALL`·`WINDOW`·`COLUMN`·`DOOR` 선을 경계로 읽는다. `_meta.json`의 `doors`·`windows`·`columns`에 범위가 있다.
    diff_original_vs_validated.png 저장 (있으면 덮어씀)
   ↓
-⑤ Vision(①②) 도중에는 결과를 쓰지 않는다. 보정은 층마다 bash가 끝난 뒤 `{floor}이 끝났습니다`를 쓰고 다음 층을 호출한다.
+⑤ Vision(①②) 도중에는 결과를 쓰지 않는다. 보정은 코어 수만큼 bash를 한 턴에 나란히 호출한다. 각 bash가 끝나면 `{floor}이 끝났습니다`를 쓰고, 남은 층이 있으면 다음 묶음을 호출한다.
 ```
 
 ## Vision 판정 기준
@@ -295,7 +305,7 @@ $ARTIFACTS_DIR/<drawing_id>/floors/<F>/
 - [ ] 출력이 `floor_wall_validated.*` 인가 (original 덮어쓰기 금지)
 - [ ] 기존 validated·diff·llm_review 가 있어도 덮어썼는가
 - [ ] `prepare_review_all.py`와 `view_image_all.py`를 각 한 번 실행해 `review.json`을 썼는가 (`view_image` 도구 호출 없음, `nohup` 없음)
-- [ ] 보정을 층마다 bash 한 번으로 실행하고, 각 결과 뒤에 `{floor}이 끝났습니다`를 썼는가
+- [ ] 보정을 층마다 bash로 실행하고, 한 턴의 bash 수가 물리 CPU 코어 수를 넘지 않으며, 각 결과 뒤에 `{floor}이 끝났습니다`를 썼는가
 - [ ] 층 사이에 사용자 컨펌을 기다리지 않았는가
 
 ## Related

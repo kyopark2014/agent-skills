@@ -34,7 +34,7 @@ import evaluate_room as room  # noqa: E402
 _VALIDATOR_SCRIPTS = Path(__file__).resolve().parents[2] / "drawing-llmvalidator" / "scripts"
 if str(_VALIDATOR_SCRIPTS) not in sys.path:
     sys.path.insert(0, str(_VALIDATOR_SCRIPTS))
-from lib_llm_correct import render_wall_dxf_png  # noqa: E402
+from lib_llm_correct import floor_sheet_mm_per_inch, png_text_cap_mm, render_wall_dxf_png  # noqa: E402
 
 _LAYER_BAD = set('<>/\\":;?*=`')
 OUT_STEM = "floor_label_detected"
@@ -154,23 +154,69 @@ def _face_key(pts: list[tuple[float, float]]) -> tuple[tuple[int, int], ...]:
     return tuple((round(x), round(y)) for x, y in pts)
 
 
-def _add_label_tag(msp, layer: str, rgb: tuple[int, int, int], inst: dict) -> None:
-    """실명과 면적을 흰 판 위에 올린다. PNG 꼬리표와 같은 두 줄이다."""
+def _ink_width_mm(text: str, cap_mm: float, mm_per_inch: float) -> float:
+    """PNG에 찍히는 글줄의 가로 길이. 한글은 네모, 숫자는 그보다 좁다."""
+    fs = max(cap_mm, 1.0) / max(mm_per_inch, 1e-6) * 72.0
+    try:
+        import matplotlib
+
+        matplotlib.use("Agg")
+        from matplotlib.font_manager import FontProperties, fontManager
+        from matplotlib.textpath import TextPath
+
+        font_name = None
+        for cand in (
+            "AppleGothic",
+            "Apple SD Gothic Neo",
+            "NanumGothic",
+            "Malgun Gothic",
+            "Noto Sans CJK KR",
+            "Noto Sans KR",
+        ):
+            matches = [item for item in fontManager.ttflist if cand in item.name]
+            if matches:
+                font_name = matches[0].name
+                break
+        prop = FontProperties(family=font_name, size=fs) if font_name else FontProperties(size=fs)
+        width_pt = float(TextPath((0, 0), text, size=fs, prop=prop).get_extents().width)
+        if width_pt > 0:
+            return width_pt / 72.0 * mm_per_inch
+    except Exception:  # noqa: BLE001
+        pass
+    width = 0.0
+    for ch in text:
+        code = ord(ch)
+        if ch == " ":
+            width += 0.33
+        elif code < 128:
+            width += 0.55
+        else:
+            width += 1.0
+    return max(width, 1.0) * cap_mm
+
+
+def _add_label_tag(msp, layer: str, rgb: tuple[int, int, int], inst: dict, mm_per_inch: float) -> None:
+    """실명과 면적을 흰 판 위에 올린다.
+
+    판은 PNG가 글자를 그리는 높이에 맞춘다. 실 크기로 판을 키우면 렌더가
+    글자를 고정 포인트로 자른 뒤에도 흰 판만 남는다.
+    """
     name = inst["text"]
     area = f"{inst['area_m2']:.2f} ㎡"
-    chars = max(len(name), len(area), 1)
-    room_w = max(inst["width_m"], 0.4) * 1000.0
-    room_h = max(inst["height_m"], 0.4) * 1000.0
-    height = min(420.0, room_w * 0.82 / (chars * 1.02 + 1.2), room_h * 0.16)
-    height = max(140.0, height)
-    pad_x = height * 0.55
-    pad_y = height * 0.42
-    gap = height * 0.30
-    line2 = height * 0.82
-    box_w = chars * height * 1.02 + pad_x * 2
-    box_h = pad_y * 2 + height + gap + line2
-    x0 = inst["x"] - box_w / 2.0
-    y0 = inst["y"] - box_h / 2.0
+    cap = png_text_cap_mm(1000.0, mm_per_inch)
+    name_w = _ink_width_mm(name, cap, mm_per_inch)
+    area_w = _ink_width_mm(area, cap, mm_per_inch)
+    pad_x = cap * 0.4
+    pad_y = cap * 0.28
+    gap = cap * 0.22
+    text_w = max(name_w, area_w)
+    # 원본 실명은 이 점에서 오른쪽으로 그려진다. 판의 왼쪽을 그 점에 둔다.
+    x_text = float(inst["x"])
+    name_baseline = float(inst["y"])
+    x0 = x_text - pad_x
+    y0 = name_baseline - gap - cap - pad_y
+    box_w = text_w + pad_x * 2
+    box_h = pad_y * 2 + cap + gap + cap
     corners = [
         (x0, y0),
         (x0 + box_w, y0),
@@ -183,19 +229,19 @@ def _add_label_tag(msp, layer: str, rgb: tuple[int, int, int], inst: dict) -> No
     frame.rgb = rgb
     text = msp.add_text(
         name,
-        height=height,
-        dxfattribs={"layer": layer, "insert": (x0 + pad_x, y0 + pad_y + line2 + gap)},
+        height=cap,
+        dxfattribs={"layer": layer, "insert": (x_text, name_baseline)},
     )
     text.rgb = (20, 20, 20)
     area_text = msp.add_text(
         area,
-        height=line2,
-        dxfattribs={"layer": layer, "insert": (x0 + pad_x, y0 + pad_y)},
+        height=cap,
+        dxfattribs={"layer": layer, "insert": (x_text, y0 + pad_y)},
     )
     area_text.rgb = (20, 20, 20)
 
 
-def write_dxf(doc, path: Path, labels: list[dict]) -> None:
+def write_dxf(doc, path: Path, labels: list[dict], mm_per_inch: float) -> None:
     """검증 도면 사본에 라벨 레이어를 더해 저장한다. 원본 경로는 쓰지 않는다."""
     msp = doc.modelspace()
     for item in labels:
@@ -211,7 +257,7 @@ def write_dxf(doc, path: Path, labels: list[dict]) -> None:
             for hole in inst["holes"]:
                 hatch.paths.add_polyline_path(hole, is_closed=True, flags=0)
             hatch.seeds.append((inst["x"], inst["y"]))
-            _add_label_tag(msp, name, (red, green, blue), inst)
+            _add_label_tag(msp, name, (red, green, blue), inst, mm_per_inch)
     path.parent.mkdir(parents=True, exist_ok=True)
     apply_korean_text(doc)
     doc.saveas(str(path))
@@ -302,8 +348,15 @@ def detect(dxf_path: Path, meta_path: Path, door: str = "close") -> dict:
     dxf_out = out_dir / f"{OUT_STEM}.dxf"
     png_out = out_dir / f"{OUT_STEM}.png"
     json_out = out_dir / f"{OUT_STEM}.json"
-    write_dxf(doc, dxf_out, [{**item, "instances": [pair[0] for pair in item["instances"]]} for item in labels])
     meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    bbox = meta.get("bbox_mm") if isinstance(meta.get("bbox_mm"), dict) else {}
+    mm_per_inch = floor_sheet_mm_per_inch(bbox, _px_width(meta))
+    write_dxf(
+        doc,
+        dxf_out,
+        [{**item, "instances": [pair[0] for pair in item["instances"]]} for item in labels],
+        mm_per_inch,
+    )
     print("render png from dxf", flush=True)
     render_label_png(dxf_out, meta, png_out)
 
