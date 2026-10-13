@@ -18672,6 +18672,180 @@ def _find_pocket_face_doors(msp) -> list[dict]:
     return found
 
 
+def _find_diagonal_pocket_face_doors(msp) -> list[dict]:
+    """기울어진 포켓 미닫이를 찾는다.
+
+    길이 약 1.9 m 인 면 두 줄이 90–170 mm 간격으로 기울어 있고,
+    그 안에 길이 약 1 m 문짝이 네 줄 이상이면 문이다.
+    문짝은 내리고, 양면과 문 끝에 닿은 벽은 올린다.
+    주출입구 옆 사선 미닫이가 그 예다.
+    """
+    records: list[dict] = []
+    for entity in _entities(msp):
+        if _dxftype(entity) != "LINE":
+            continue
+        if getattr(entity.dxf, "layer", None) not in (WALL_LAYER, BASE_LAYER, DOOR_LAYER, WINDOW_LAYER):
+            continue
+        try:
+            x0, y0, x1, y1 = _line_xy(entity)
+        except Exception:  # noqa: BLE001
+            continue
+        dx, dy = x1 - x0, y1 - y0
+        length = math.hypot(dx, dy)
+        if length < 20.0 or abs(dx) <= 12.0 or abs(dy) <= 12.0:
+            continue
+        if dx < 0.0 or (abs(dx) < 1e-6 and dy < 0.0):
+            x0, y0, x1, y1 = x1, y1, x0, y0
+            dx, dy = -dx, -dy
+        records.append({
+            "entity": entity,
+            "x0": x0,
+            "y0": y0,
+            "x1": x1,
+            "y1": y1,
+            "length": length,
+            "ux": dx / length,
+            "uy": dy / length,
+            "layer": entity.dxf.layer,
+        })
+
+    def _frame(ox: float, oy: float, ux: float, uy: float, nx: float, ny: float, rec: dict) -> tuple[float, float, float]:
+        a0 = (rec["x0"] - ox) * ux + (rec["y0"] - oy) * uy
+        a1 = (rec["x1"] - ox) * ux + (rec["y1"] - oy) * uy
+        mx = (rec["x0"] + rec["x1"]) * 0.5
+        my = (rec["y0"] + rec["y1"]) * 0.5
+        perp = (mx - ox) * nx + (my - oy) * ny
+        return min(a0, a1), max(a0, a1), perp
+
+    def _perp_span(ox: float, oy: float, nx: float, ny: float, rec: dict) -> tuple[float, float]:
+        p0 = (rec["x0"] - ox) * nx + (rec["y0"] - oy) * ny
+        p1 = (rec["x1"] - ox) * nx + (rec["y1"] - oy) * ny
+        return min(p0, p1), max(p0, p1)
+
+    faces = [
+        rec for rec in records
+        if rec["layer"] in (WALL_LAYER, BASE_LAYER) and 1800.0 <= rec["length"] <= 2100.0
+    ]
+    found: list[dict] = []
+    seen: set[tuple] = set()
+    for index, left in enumerate(faces):
+        ux, uy = left["ux"], left["uy"]
+        nx, ny = -uy, ux
+        left_a0, left_a1, _left_perp = _frame(left["x0"], left["y0"], ux, uy, nx, ny, left)
+        for right in faces[index + 1:]:
+            if abs(left["ux"] * right["ux"] + left["uy"] * right["uy"]) < 0.997:
+                continue
+            right_a0, right_a1, right_perp = _frame(left["x0"], left["y0"], ux, uy, nx, ny, right)
+            gap = abs(right_perp)
+            if not (90.0 <= gap <= 170.0):
+                continue
+            span0 = max(left_a0, right_a0)
+            span1 = min(left_a1, right_a1)
+            if span1 - span0 < 1600.0:
+                continue
+            face0, face1 = sorted((0.0, right_perp))
+            key = (round(left["x0"] / 80.0), round(left["y0"] / 80.0), round(span0 / 80.0), round(gap / 20.0))
+            if key in seen:
+                continue
+            framed = [
+                (*_frame(left["x0"], left["y0"], ux, uy, nx, ny, rec), rec)
+                for rec in records
+            ]
+            leaves = [
+                (a0, a1, perp, rec)
+                for a0, a1, perp, rec in framed
+                if abs(rec["ux"] * ux + rec["uy"] * uy) >= 0.997
+                and face0 + 8.0 < perp < face1 - 8.0
+                and 880.0 <= rec["length"] <= 1100.0
+                and min(a1, span1) - max(a0, span0) >= 0.65 * rec["length"]
+            ]
+            if len(leaves) < 4:
+                continue
+            seen.add(key)
+            door: list = []
+            wall: list = []
+            used: set[int] = set()
+            leaf_ends: list[float] = []
+            for a0, a1, _perp, rec in leaves:
+                leaf_ends.extend((a0, a1))
+                if id(rec["entity"]) in used:
+                    continue
+                used.add(id(rec["entity"]))
+                door.append(rec["entity"])
+            leaf_lo = min(perp for _a0, _a1, perp, _rec in leaves)
+            leaf_hi = max(perp for _a0, _a1, perp, _rec in leaves)
+            for a0, a1, perp, rec in framed:
+                if id(rec["entity"]) in used:
+                    continue
+                parallel = abs(rec["ux"] * ux + rec["uy"] * uy) >= 0.997
+                if not parallel:
+                    continue
+                on_face = min(abs(perp - face0), abs(perp - face1)) <= 8.0
+                cover = min(a1, span1) - max(a0, span0)
+                if on_face and rec["length"] >= 1600.0 and cover >= 1400.0:
+                    used.add(id(rec["entity"]))
+                    if rec["layer"] == BASE_LAYER:
+                        wall.append(rec["entity"])
+                    continue
+                if (
+                    on_face
+                    and 20.0 <= rec["length"] <= 80.0
+                    and (
+                        abs(a1 - span0) <= 50.0
+                        or abs(a0 - span1) <= 50.0
+                        or abs(a0 - span0) <= 50.0
+                        or abs(a1 - span1) <= 50.0
+                    )
+                    and rec["layer"] == BASE_LAYER
+                ):
+                    used.add(id(rec["entity"]))
+                    wall.append(rec["entity"])
+            for a0, a1, _perp, rec in framed:
+                if id(rec["entity"]) in used:
+                    continue
+                if abs(rec["ux"] * ux + rec["uy"] * uy) > 0.12:
+                    continue
+                along = (a0 + a1) * 0.5
+                thick0, thick1 = _perp_span(left["x0"], left["y0"], nx, ny, rec)
+                near_leaf = any(abs(along - end) <= 45.0 for end in leaf_ends)
+                near_pocket = min(abs(along - span0), abs(along - span1)) <= 60.0
+                leaf_overlap = min(thick1, leaf_hi + 15.0) - max(thick0, leaf_lo - 15.0)
+                pocket_overlap = min(thick1, face1 + 40.0) - max(thick0, face0 - 40.0)
+                if 20.0 <= rec["length"] <= 80.0 and near_leaf and leaf_overlap >= 15.0:
+                    used.add(id(rec["entity"]))
+                    door.append(rec["entity"])
+                elif (
+                    90.0 <= rec["length"] <= 260.0
+                    and near_pocket
+                    and pocket_overlap >= 0.7 * (face1 - face0)
+                    and rec["layer"] == BASE_LAYER
+                ):
+                    used.add(id(rec["entity"]))
+                    wall.append(rec["entity"])
+            xs = [left["x0"], left["x1"], right["x0"], right["x1"]]
+            ys = [left["y0"], left["y1"], right["y0"], right["y1"]]
+            found.append({
+                "bbox": [min(xs), min(ys), max(xs), max(ys)],
+                "door": door,
+                "wall": wall,
+            })
+    return found
+
+
+def separate_diagonal_pocket_face_doors(msp) -> tuple[int, int]:
+    """기울어진 포켓 미닫이 문짝은 문으로 내리고, 양옆 벽은 올린다."""
+    n_demote = 0
+    n_promote = 0
+    for pocket in _find_diagonal_pocket_face_doors(msp):
+        for entity in pocket["door"]:
+            if _paint_layer(entity, DOOR_LAYER, DOOR_COLOR):
+                n_demote += 1
+        for entity in pocket["wall"]:
+            if _paint_layer(entity, WALL_LAYER, WALL_COLOR):
+                n_promote += 1
+    return n_demote, n_promote
+
+
 def separate_pocket_face_doors(msp) -> tuple[int, int]:
     """포켓 미닫이 문짝은 문으로 내리고, 양면과 문 끝 벽은 올린다."""
     n_demote = 0
@@ -20239,6 +20413,9 @@ def apply_corrections(
     n_pocket_face_demote, n_pocket_face_promote = separate_pocket_face_doors(msp)
     n_demoted += n_pocket_face_demote
     n_promoted += n_pocket_face_promote
+    n_diag_pocket_demote, n_diag_pocket_promote = separate_diagonal_pocket_face_doors(msp)
+    n_demoted += n_diag_pocket_demote
+    n_promoted += n_diag_pocket_promote
     n_short_demote, n_short_promote = separate_short_staggered_doors(msp)
     n_demoted += n_short_demote
     n_promoted += n_short_promote
@@ -20260,6 +20437,8 @@ def apply_corrections(
     n_promoted += n_line_window + n_line_wall
     n_strip_window, n_strip_wall = promote_strip_windows(msp)
     n_promoted += n_strip_window + n_strip_wall
+    n_mullion_window, n_mullion_wall = promote_mullion_strip_windows(msp)
+    n_promoted += n_mullion_window + n_mullion_wall
     marked = mark_doors_and_columns(msp)
     n_promoted += promote_door_side_doubles(msp)
 
@@ -21168,6 +21347,251 @@ def promote_strip_windows(msp) -> tuple[int, int]:
     return n_window, n_wall
 
 
+def _find_mullion_strip_windows(msp) -> list[dict]:
+    """멀리언으로 나뉜 띠.
+
+    길이 약 2.7–3.6 m 선이 깊이 150 mm 안에 네 줄 이상 모이고,
+    그 사이를 짧은 세로선이 나누면 그 띠다.
+    같은 방향으로 더 긴 벽면이 양끝 밖으로 이어지면 벽이다.
+    그렇지 않으면 창이고, 개구 좌우로 이어진 면과 끝의 막이는 벽이다.
+    """
+    records: list[dict] = []
+    for entity in _entities(msp):
+        if _dxftype(entity) != "LINE":
+            continue
+        layer = getattr(entity.dxf, "layer", None)
+        if layer not in (WALL_LAYER, BASE_LAYER, DOOR_LAYER, WINDOW_LAYER):
+            continue
+        try:
+            x0, y0, x1, y1 = _line_xy(entity)
+        except Exception:  # noqa: BLE001
+            continue
+        dx, dy = x1 - x0, y1 - y0
+        length = math.hypot(dx, dy)
+        if length < 20.0:
+            continue
+        if dx < 0.0 or (abs(dx) < 1e-6 and dy < 0.0):
+            x0, y0, x1, y1 = x1, y1, x0, y0
+            dx, dy = -dx, -dy
+        records.append({
+            "entity": entity,
+            "x0": x0,
+            "y0": y0,
+            "x1": x1,
+            "y1": y1,
+            "length": length,
+            "ux": dx / length,
+            "uy": dy / length,
+            "layer": layer,
+        })
+
+    def _frame(
+        ox: float, oy: float, ux: float, uy: float, nx: float, ny: float, rec: dict,
+    ) -> tuple[float, float, float]:
+        a0 = (rec["x0"] - ox) * ux + (rec["y0"] - oy) * uy
+        a1 = (rec["x1"] - ox) * ux + (rec["y1"] - oy) * uy
+        mx = (rec["x0"] + rec["x1"]) * 0.5
+        my = (rec["y0"] + rec["y1"]) * 0.5
+        perp = (mx - ox) * nx + (my - oy) * ny
+        return min(a0, a1), max(a0, a1), perp
+
+    def _perp_span(
+        ox: float, oy: float, nx: float, ny: float, rec: dict,
+    ) -> tuple[float, float]:
+        p0 = (rec["x0"] - ox) * nx + (rec["y0"] - oy) * ny
+        p1 = (rec["x1"] - ox) * nx + (rec["y1"] - oy) * ny
+        return min(p0, p1), max(p0, p1)
+
+    rails = [
+        rec for rec in records
+        if rec["layer"] in (WALL_LAYER, BASE_LAYER, WINDOW_LAYER)
+        and 2500.0 <= rec["length"] <= 4200.0
+    ]
+    found: list[dict] = []
+    seen: set[tuple] = set()
+    for seed in rails:
+        ux, uy = seed["ux"], seed["uy"]
+        nx, ny = -uy, ux
+        members: list[tuple[float, float, float, dict]] = []
+        for rec in rails:
+            if abs(rec["ux"] * ux + rec["uy"] * uy) < 0.997:
+                continue
+            if abs(rec["length"] - seed["length"]) > 20.0:
+                continue
+            a0, a1, perp = _frame(seed["x0"], seed["y0"], ux, uy, nx, ny, rec)
+            overlap = min(a1, seed["length"]) - max(a0, 0.0)
+            if overlap < 0.95 * min(rec["length"], seed["length"]):
+                continue
+            if abs(perp) > 190.0:
+                continue
+            members.append((a0, a1, perp, rec))
+        if len(members) < 4:
+            continue
+        perps = sorted(item[2] for item in members)
+        spread = perps[-1] - perps[0]
+        if not (100.0 <= spread <= 180.0):
+            continue
+        packed = False
+        for start, perp in enumerate(perps):
+            count = 0
+            for other in perps[start:]:
+                if other - perp > 35.0:
+                    break
+                count += 1
+            if count >= 3:
+                packed = True
+                break
+        if not packed:
+            continue
+        span0 = max(item[0] for item in members)
+        span1 = min(item[1] for item in members)
+        if span1 - span0 < 0.9 * seed["length"]:
+            continue
+        p0, p1 = perps[0], perps[-1]
+        framed = [
+            (*_frame(seed["x0"], seed["y0"], ux, uy, nx, ny, rec), rec)
+            for rec in records
+        ]
+        stations: list[float] = []
+        mullions: list[dict] = []
+        for a0, a1, perp, rec in framed:
+            if abs(rec["ux"] * ux + rec["uy"] * uy) > 0.12:
+                continue
+            if rec["layer"] not in (WALL_LAYER, BASE_LAYER, WINDOW_LAYER):
+                continue
+            if not (90.0 <= rec["length"] <= 220.0):
+                continue
+            mid = (a0 + a1) * 0.5
+            if mid < span0 - 20.0 or mid > span1 + 20.0:
+                continue
+            lo, hi = _perp_span(seed["x0"], seed["y0"], nx, ny, rec)
+            if lo < p0 - 30.0 or hi > p1 + 40.0:
+                continue
+            if hi - lo < 0.55 * (p1 - p0):
+                continue
+            mullions.append(rec)
+            if not any(abs(mid - station) <= 100.0 for station in stations):
+                stations.append(mid)
+        if len(stations) < 3 or max(stations) - min(stations) < 0.55 * (span1 - span0):
+            continue
+        mid_x = sum(item[3]["x0"] + item[3]["x1"] for item in members) / (2.0 * len(members))
+        mid_y = sum(item[3]["y0"] + item[3]["y1"] for item in members) / (2.0 * len(members))
+        key = (round(seed["length"] / 50.0), round(mid_x / 300.0), round(mid_y / 300.0))
+        if key in seen:
+            continue
+        seen.add(key)
+
+        glass: list = []
+        glass_ids: set[int] = set()
+
+        def _take_glass(rec: dict) -> None:
+            if id(rec["entity"]) in glass_ids:
+                return
+            glass_ids.add(id(rec["entity"]))
+            glass.append(rec["entity"])
+
+        for _a0, _a1, _perp, rec in members:
+            _take_glass(rec)
+        for rec in mullions:
+            _take_glass(rec)
+        for a0, a1, perp, rec in framed:
+            if id(rec["entity"]) in glass_ids:
+                continue
+            if rec["layer"] not in (WALL_LAYER, BASE_LAYER, WINDOW_LAYER):
+                continue
+            parallel = abs(rec["ux"] * ux + rec["uy"] * uy) >= 0.997
+            if not parallel or not (40.0 <= rec["length"] <= 80.0):
+                continue
+            if perp < p0 - 8.0 or perp > p1 + 8.0:
+                continue
+            if a0 < span0 - 8.0 or a1 > span1 + 8.0:
+                continue
+            _take_glass(rec)
+
+        wall: list = []
+        continued = False
+        span = span1 - span0
+        for a0, a1, perp, rec in framed:
+            if id(rec["entity"]) in glass_ids or rec["layer"] not in (WALL_LAYER, BASE_LAYER):
+                continue
+            parallel = abs(rec["ux"] * ux + rec["uy"] * uy) >= 0.997
+            if parallel:
+                if perp < p0 - 700.0 or perp > p1 + 700.0:
+                    continue
+                overlap = min(a1, span1) - max(a0, span0)
+                outside = (a1 - a0) - max(0.0, overlap)
+                touches = (
+                    min(a1, span0 + 40.0) - max(a0, span0 - 40.0) > 0.0
+                    or min(a1, span1 + 40.0) - max(a0, span1 - 40.0) > 0.0
+                )
+                side = (
+                    touches
+                    and 300.0 <= rec["length"] <= 2200.0
+                    and outside >= 400.0
+                    and outside >= 0.45 * rec["length"]
+                    and overlap <= 500.0
+                )
+                past_left = span0 - a0
+                past_right = a1 - span1
+                offset = min(abs(perp - p0), abs(perp - p1))
+                through = (
+                    20.0 <= offset <= 550.0
+                    and overlap >= 0.85 * span
+                    and 80.0 <= past_left <= 1600.0
+                    and 80.0 <= past_right <= 1600.0
+                )
+                if through:
+                    continued = True
+                if side or through:
+                    wall.append(rec["entity"])
+                continue
+            if abs(rec["ux"] * ux + rec["uy"] * uy) > 0.12:
+                continue
+            mid = (a0 + a1) * 0.5
+            if min(abs(mid - span0), abs(mid - span1)) > 40.0:
+                continue
+            if not (80.0 <= rec["length"] <= 700.0):
+                continue
+            lo, hi = _perp_span(seed["x0"], seed["y0"], nx, ny, rec)
+            in_zone = lo >= p0 - 400.0 and hi <= p1 + 700.0
+            outside_glass = lo < p0 - 25.0 or hi > p1 + 25.0
+            if in_zone and outside_glass:
+                wall.append(rec["entity"])
+        xs = [item[3]["x0"] for item in members] + [item[3]["x1"] for item in members]
+        ys = [item[3]["y0"] for item in members] + [item[3]["y1"] for item in members]
+        found.append({
+            "bbox": [min(xs), min(ys), max(xs), max(ys)],
+            "glass": glass,
+            "wall": wall,
+            "as_wall": continued,
+        })
+    return found
+
+
+def promote_mullion_strip_windows(msp) -> tuple[int, int]:
+    """멀리언 띠의 유리를 올린다. 더 긴 벽이 이어지면 유리도 벽이다."""
+    n_window = 0
+    n_wall = 0
+    painted: set[int] = set()
+    for window in _find_mullion_strip_windows(msp):
+        for entity in window["glass"]:
+            if id(entity) in painted:
+                continue
+            if window["as_wall"]:
+                if _paint_layer(entity, WALL_LAYER, WALL_COLOR):
+                    n_wall += 1
+            elif _mark_window(entity):
+                n_window += 1
+            painted.add(id(entity))
+        for entity in window["wall"]:
+            if id(entity) in painted:
+                continue
+            if _paint_layer(entity, WALL_LAYER, WALL_COLOR):
+                n_wall += 1
+            painted.add(id(entity))
+    return n_window, n_wall
+
+
 def mark_doors_and_columns(msp) -> dict[str, Any]:
     """문·창·기둥을 레이어로 나눠 저장한다.
 
@@ -21258,6 +21682,11 @@ def mark_doors_and_columns(msp) -> dict[str, Any]:
         doors.append({
             "kind": "sliding",
             "bbox_mm": [round(value, 1) for value in box],
+        })
+    for pocket in _find_diagonal_pocket_face_doors(msp):
+        doors.append({
+            "kind": "sliding",
+            "bbox_mm": [round(value, 1) for value in pocket["bbox"]],
         })
     for door in _find_wide_staggered_doors(msp):
         if door["vertical"]:
@@ -21351,6 +21780,13 @@ def mark_doors_and_columns(msp) -> dict[str, Any]:
     for window in _find_diagonal_observation_windows(msp):
         windows.append({
             "kind": "observation",
+            "bbox_mm": [round(value, 1) for value in window["bbox"]],
+        })
+    for window in _find_mullion_strip_windows(msp):
+        if window["as_wall"]:
+            continue
+        windows.append({
+            "kind": "mullion",
             "bbox_mm": [round(value, 1) for value in window["bbox"]],
         })
     doors.extend(sliding)
@@ -21538,6 +21974,40 @@ def _rings_path(rings: list[list[tuple[float, float]]]):
     return MPath(verts, codes)
 
 
+def floor_plot_bounds(bbox_mm: dict[str, float]) -> tuple[float, float, float, float, float]:
+    """render_wall_dxf_png 가 층 bbox 밖에 두는 여백을 포함한 도면 범위."""
+    cx0 = float(bbox_mm["xmin"])
+    cy0 = float(bbox_mm["ymin"])
+    cx1 = float(bbox_mm["xmax"])
+    cy1 = float(bbox_mm["ymax"])
+    span_y0 = max(cy1 - cy0, 1.0)
+    tick = max(span_y0 * 0.025, 1000.0)
+    xmin = cx0 - max(tick * 0.8, 1500.0)
+    ymin = cy0 - max(tick * 2.5, 4000.0)
+    xmax = cx1 + max(tick * 2.0, 3000.0)
+    ymax = cy1 + max(tick * 6.5, 9000.0)
+    return xmin, ymin, xmax, ymax, tick
+
+
+def floor_sheet_mm_per_inch(bbox_mm: dict[str, float], px_width: int, dpi: int = 200) -> float:
+    """층 PNG에서 도면 1인치가 차지하는 mm. 라벨 판 크기를 글자와 맞출 때 쓴다."""
+    xmin, _ymin, xmax, _ymax, _tick = floor_plot_bounds(bbox_mm)
+    span_x = max(xmax - xmin, 1.0)
+    fig_w = max(int(px_width), 1) / dpi
+    return span_x / max(fig_w, 0.01)
+
+
+def png_text_fontsize(text_height_mm: float, mm_per_inch: float) -> float:
+    """도면 글자 높이를 PNG 포인트로 바꾼 값. 5–7pt로 자른 뒤 2를 곱한다."""
+    fs = (max(text_height_mm, 1.0) / max(mm_per_inch, 1e-6)) * 72.0 * 1.6
+    return max(5.0, min(7.0, fs)) * 2.0
+
+
+def png_text_cap_mm(text_height_mm: float, mm_per_inch: float) -> float:
+    """그 포인트가 도면에서 차지하는 높이."""
+    return (png_text_fontsize(text_height_mm, mm_per_inch) / 72.0) * mm_per_inch
+
+
 def render_wall_dxf_png(
     dxf_path: Path,
     png_path: Path,
@@ -21678,12 +22148,7 @@ def render_wall_dxf_png(
         cy0 = float(bbox_mm["ymin"])
         cx1 = float(bbox_mm["xmax"])
         cy1 = float(bbox_mm["ymax"])
-        span_y0 = max(cy1 - cy0, 1.0)
-        tick = max(span_y0 * 0.025, 1000.0)
-        xmin = cx0 - max(tick * 0.8, 1500)
-        ymin = cy0 - max(tick * 2.5, 4000)
-        xmax = cx1 + max(tick * 2.0, 3000)
-        ymax = cy1 + max(tick * 6.5, 9000)
+        xmin, ymin, xmax, ymax, tick = floor_plot_bounds(bbox_mm)
         content_bbox = (cx0, cy0, cx1, cy1, tick)
         tight = False
         pad = 0.0
@@ -21822,9 +22287,7 @@ def render_wall_dxf_png(
         for tx, ty, s, th, rot, text_layer, rgb in texts:
             if not s or not s.strip():
                 continue
-            fs = (max(th, 1.0) / mm_per_inch) * 72.0 * 1.6
-            fs = max(5.0, min(7.0, fs))
-            fs *= 2.0
+            fs = png_text_fontsize(th, mm_per_inch)
             on_label = area_draw and text_layer in area_layers and rgb
             if on_label:
                 color = f"#{rgb[0]:02x}{rgb[1]:02x}{rgb[2]:02x}"
