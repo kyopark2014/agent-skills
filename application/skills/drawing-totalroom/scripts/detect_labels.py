@@ -150,6 +150,98 @@ def detect_one(
     }, None
 
 
+def _record_face(msp, boxes, face, x_axes, y_axes, swings, x: float, y: float, door: str) -> dict | None:
+    """이미 닫힌 면을 detect_one 과 같은 기록으로 만든다."""
+    try:
+        net, protrusions = room._subtract_columns(face, boxes, (x, y))
+    except SystemExit:
+        return None
+    pts = room._simplify_ring(list(net.exterior.coords), x_axes, y_axes)
+    holes = [
+        hole
+        for hole in (room._simplify_ring(list(ring.coords), x_axes, y_axes) for ring in net.interiors)
+        if len(hole) >= 3
+    ]
+    if len(pts) < 3 or not room.point_in_poly(x, y, pts):
+        return None
+    boundary = _boundary_at(msp, face, swings)
+    area = room.shoelace_m2(pts) - sum(room.shoelace_m2(hole) for hole in holes)
+    minx, miny, maxx, maxy = face.bounds
+    return {
+        "pts": pts,
+        "holes": holes,
+        "area_m2": area,
+        "column_protrusion_m2": sum(item["area_m2"] for item in protrusions),
+        "width_m": (maxx - minx) / 1000.0,
+        "height_m": (maxy - miny) / 1000.0,
+        "drawing_area_m2": room.drawing_area_m2(msp, pts),
+        "boundary_doors": [
+            {
+                "kind": item["kind"],
+                "x": round(item["x"], 1),
+                "y": round(item["y"], 1),
+                "state": "open" if door == "open" else "close",
+            }
+            for item in boundary
+        ],
+        "net": net,
+    }
+
+
+def _divide_shared_faces(msp, boxes, segs, detected: list[dict], door: str) -> list[dict]:
+    """한 면에 화장실·WC 글자가 있으면 벽 끝을 이어 그 부분을 면적에서 뺀다.
+
+    WC·화장실 라벨은 실로 남기지 않는다.
+    """
+    anchors = [
+        (x, y, text)
+        for x, y, text in room.iter_labels(msp)
+        if room.is_split_anchor(text)
+    ]
+    if not anchors:
+        return detected
+    used: set[tuple[int, int]] = set()
+    for inst in detected:
+        inside = [
+            (x, y, text)
+            for x, y, text in anchors
+            if (round(x), round(y)) not in used and room.point_in_poly(x, y, inst["pts"])
+        ]
+        if not inside:
+            continue
+        split = room.split_face_at_wall_end(
+            msp, segs, boxes, (inst["x"], inst["y"]), [(x, y) for x, y, _text in inside]
+        )
+        if split is None:
+            continue
+        face_a, faces_b, x_axes, y_axes, swings = split
+        packed = _record_face(msp, boxes, face_a, x_axes, y_axes, swings, inst["x"], inst["y"], door)
+        if packed is None:
+            continue
+        others = []
+        for (x, y, text), face_b in zip(inside, faces_b):
+            row = _record_face(msp, boxes, face_b, x_axes, y_axes, swings, x, y, door)
+            if row is None:
+                others = []
+                break
+            row.update({"text": text, "x": x, "y": y, "name": room.norm_name(text)})
+            others.append(row)
+        if len(others) != len(inside):
+            continue
+        kept = {key: inst[key] for key in ("text", "x", "y", "name")}
+        inst.clear()
+        inst.update(packed)
+        inst.update(kept)
+        for x, y, _text in inside:
+            used.add((round(x), round(y)))
+        print(
+            f"split {inst['text']} {inst['area_m2']:.2f} m2, excluded "
+            + ", ".join(f"{row['text']} {row['area_m2']:.2f} m2" for row in others),
+            flush=True,
+        )
+    return detected
+
+
 def _face_key(pts: list[tuple[float, float]]) -> tuple[tuple[int, int], ...]:
     return tuple((round(x), round(y)) for x, y in pts)
 
@@ -322,6 +414,7 @@ def detect(dxf_path: Path, meta_path: Path, door: str = "close") -> dict:
         found.update({"text": text, "x": x, "y": y, "name": room.norm_name(text)})
         detected.append(found)
         print(f"[{index}/{len(seeds)}] {text}  {found['area_m2']:.2f} m2", flush=True)
+    detected = _divide_shared_faces(msp, boxes, segs, detected, door)
 
     by_face: dict[tuple, list[str]] = {}
     for inst in detected:

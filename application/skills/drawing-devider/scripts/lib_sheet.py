@@ -90,7 +90,8 @@ _FLOOR_HEAD = (
     r"|(?:제\s*)?(?P<bf>B\s*\d+)\s*F?"
     r"|(?:제\s*)?(?P<n>\d+)\s*(?:층|F))"
 )
-_PLAN_TAIL = r"(?:평면도|평면|PLAN|FLOOR)"
+_PLAN_TAIL = r"(?:평면도|평면|PLAN|FLOOR|배치도|배치)"
+_TRAIL_PAREN = r"(?:\s*\([^)]{0,20}\))?"
 
 
 def _token_from_match(matched: re.Match[str]) -> str | None:
@@ -125,10 +126,10 @@ def parse_floor_label(value: str) -> str | None:
         return "PH"
     if re.fullmatch(rf"(?:옥탑층|옥탑|PH|PENTHOUSE)(?:\s+\S+){{1,4}}\s+{_PLAN_TAIL}", raw, re.I):
         return "PH"
-    strict = re.fullmatch(rf"{_FLOOR_HEAD}(?:\s*{_PLAN_TAIL})?$", raw, re.I)
+    strict = re.fullmatch(rf"{_FLOOR_HEAD}(?:\s*{_PLAN_TAIL})?{_TRAIL_PAREN}$", raw, re.I)
     if strict:
         return _token_from_match(strict)
-    titled = re.fullmatch(rf"{_FLOOR_HEAD}(?:\s+\S+){{1,4}}\s*{_PLAN_TAIL}$", raw, re.I)
+    titled = re.fullmatch(rf"{_FLOOR_HEAD}(?:\s+\S+){{1,4}}\s*{_PLAN_TAIL}{_TRAIL_PAREN}$", raw, re.I)
     if titled:
         return _token_from_match(titled)
     return None
@@ -378,7 +379,37 @@ def _rects_from_lines(lines: list[_Seg]) -> list[tuple[float, float, float, floa
     return found
 
 
+def _coverage_fraction(outer, inners, grid: int = 24) -> float:
+    """outer 영역이 inners(격자 샘플링)로 얼마나 덮이는지 0~1로 추정한다.
+
+    단순 면적 합은 inners가 겹칠 때 1.0을 넘어 과대평가되므로,
+    실제 겹치지 않는 면적 비율을 격자 샘플로 근사한다.
+    """
+    x0, y0, x1, y1 = outer
+    w, h = x1 - x0, y1 - y0
+    if w <= 0 or h <= 0:
+        return 0.0
+    step_x, step_y = w / grid, h / grid
+    hit = 0
+    for i in range(grid):
+        cx = x0 + (i + 0.5) * step_x
+        for j in range(grid):
+            cy = y0 + (j + 0.5) * step_y
+            for inner in inners:
+                if inner[0] <= cx <= inner[2] and inner[1] <= cy <= inner[3]:
+                    hit += 1
+                    break
+    return hit / (grid * grid)
+
+
 def _dedupe_rects(rects: list[tuple[float, float, float, float]]):
+    """같은 테두리의 중복은 치우되, 진짜 바깥 도곽(코너·치수선 조각들의 부모)만 남긴다.
+
+    예전 버전은 "안에 들어온 작은 사각형이 2개 이상이면 부모를 지운다"는 규칙만 썼다.
+    치수선·심볼 조각이 큰 도곽 구석에 우연히 2개 겹치면 그 큰 도곽 자체(=실제 도면 테두리)가
+    통째로 사라져 "도곽 안에 기하가 없습니다" 오류로 이어졌다. 자식들이 바깥 사각형의
+    대부분(코너 2개 조각 정도가 아니라 과반)을 덮을 때만 부모를 중복으로 보고 지운다.
+    """
     ordered = sorted(rects, key=_area, reverse=True)
     kept: list[tuple[float, float, float, float]] = []
     for rect in ordered:
@@ -389,13 +420,12 @@ def _dedupe_rects(rects: list[tuple[float, float, float, float]]):
         kept.append(rect)
     parents = set()
     for i, outer in enumerate(kept):
-        children = 0
-        for j, inner in enumerate(kept):
-            if i == j:
-                continue
-            if _contains(outer, inner) and _area(inner) < _area(outer) * 0.85:
-                children += 1
-        if children >= 2:
+        children = [
+            inner
+            for j, inner in enumerate(kept)
+            if i != j and _contains(outer, inner) and _area(inner) < _area(outer) * 0.85
+        ]
+        if len(children) >= 2 and _coverage_fraction(outer, children) >= 0.6:
             parents.add(i)
     return [rect for i, rect in enumerate(kept) if i not in parents]
 
@@ -405,7 +435,7 @@ def _inside(rect, x: float, y: float, pad: float = 0.0) -> bool:
 
 
 def _title_score(hit: _TextHit) -> float:
-    bonus = 3.0 if re.search(r"평면|PLAN|FLOOR", hit.text, re.I) else 1.0
+    bonus = 3.0 if re.search(r"평면|PLAN|FLOOR|배치", hit.text, re.I) else 1.0
     return max(hit.height, 1.0) * bonus
 
 

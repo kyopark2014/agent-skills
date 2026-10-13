@@ -87,10 +87,13 @@ def _roomish(text: str) -> bool:
 def is_room_label(text: str) -> bool:
     """한글 실명, 또는 영문 2자 이상에 숫자가 붙은 이름. 축선·치수·안내 문구는 제외."""
     name = norm_name(text)
-    # 마감·비치·주차 안내, 창고, 입구, 출구, DA는 면적 실이 아니다.
-    if any(token in name for token in ("노출콘크리트", "질식소화덮개", "주차", "창고", "입구", "출구")):
+    # 마감·비치·주차 안내, 창고, 차고, 화장실, WC, 입구, 출구, 상부 OPEN, DA는 면적 실이 아니다.
+    folded = name.upper()
+    if any(token in folded for token in ("노출콘크리트", "질식소화덮개", "주차", "창고", "차고", "화장실", "입구", "출구", "상부OPEN")):
         return False
-    if name.upper() in {"DA", "D.A", "D.A."}:
+    if folded in {"DA", "D.A", "D.A.", "WC", "W.C", "W.C.", "상부"}:
+        return False
+    if folded.startswith("WC(") or folded.startswith("W.C("):
         return False
     if _roomish(text):
         return True
@@ -105,6 +108,19 @@ def is_room_label(text: str) -> bool:
         return False
     letters = re.findall(r"[A-Za-z]", name)
     return len(letters) >= 2 and re.search(r"\d", name) is not None
+
+
+def is_split_anchor(text: str) -> bool:
+    """면적 실명은 아니지만, 다른 실과 한 면이면 벽 끝으로 가를 대상이다."""
+    if is_room_label(text):
+        return False
+    name = norm_name(text)
+    folded = name.upper()
+    if "화장실" in folded:
+        return True
+    if folded in {"WC", "W.C", "W.C."}:
+        return True
+    return folded.startswith("WC(") or folded.startswith("W.C(")
 
 
 def _label_record(entity) -> tuple[float, float, str, float] | None:
@@ -1065,8 +1081,227 @@ def _boundary_doors(doors: list[dict], face: Polygon) -> list[dict]:
     return kept
 
 
-def _room_lines(msp, segs, origin, boxes, open_doors):
-    """라벨이 들어 있는 닫힌 면. open_doors 의 여닫이는 개구로 남긴다."""
+def _wallish_lines(msp, lines: list[LineString], origin: tuple[float, float], pad: float) -> list[LineString]:
+    """벽 끝에서 이어진 BASE 평행 이중선.
+
+    레이어는 벽이 아니어도 문틀이나 짧은 벽 꺾임처럼 보이면 그 선으로 실을 닫는다.
+    해치처럼 간격이 여러 겹인 선은 넣지 않는다.
+    """
+    if not lines:
+        return []
+    ox, oy = origin
+    base: list[tuple[float, float, float, float, float, float, float]] = []
+    for entity in msp:
+        if getattr(entity.dxf, "layer", None) != "BASE":
+            continue
+        parts: list[tuple[float, float, float, float]] = []
+        if entity.dxftype() == "LINE":
+            parts.append(
+                (
+                    float(entity.dxf.start.x),
+                    float(entity.dxf.start.y),
+                    float(entity.dxf.end.x),
+                    float(entity.dxf.end.y),
+                )
+            )
+        elif entity.dxftype() == "LWPOLYLINE":
+            pts = [(float(a), float(b)) for a, b in entity.get_points("xy")]
+            count = len(pts)
+            for index in range(count - 1 + (1 if entity.closed else 0)):
+                start, end = pts[index], pts[(index + 1) % count]
+                parts.append((start[0], start[1], end[0], end[1]))
+        for x0, y0, x1, y1 in parts:
+            length = math.hypot(x1 - x0, y1 - y0)
+            if not (500.0 <= length <= 4000.0):
+                continue
+            if abs((x0 + x1) * 0.5 - ox) > pad or abs((y0 + y1) * 0.5 - oy) > pad:
+                continue
+            base.append((x0, y0, x1, y1, length, (x1 - x0) / length, (y1 - y0) / length))
+    if len(base) < 2:
+        return []
+    paired: set[int] = set()
+    for i, (x0, y0, _x1, _y1, length, ux, uy) in enumerate(base):
+        bins: set[int] = set()
+        mates = 0
+        for j, (a0, b0, a1, b1, _other, vx, vy) in enumerate(base):
+            if i == j or abs(ux * vx + uy * vy) < 0.99:
+                continue
+            px, py = (a0 + a1) * 0.5 - x0, (b0 + b1) * 0.5 - y0
+            perp = abs(-uy * px + ux * py)
+            if perp > 220.0:
+                continue
+            along0 = (a0 - x0) * ux + (b0 - y0) * uy
+            along1 = (a1 - x0) * ux + (b1 - y0) * uy
+            lo, hi = min(along0, along1), max(along0, along1)
+            overlap = min(length, hi) - max(0.0, lo)
+            if overlap < 400.0:
+                continue
+            bins.add(round(perp / 30.0))
+            if 15.0 <= perp <= 200.0:
+                mates += 1
+        if mates and len(bins) < 5:
+            paired.add(i)
+    if not paired:
+        return []
+    tree = STRtree(lines)
+    kept: list[LineString] = []
+    for index in sorted(paired):
+        x0, y0, x1, y1, _length, _ux, _uy = base[index]
+        near = False
+        for x, y in ((x0, y0), (x1, y1)):
+            pt = Point(x, y)
+            for hit in tree.query(pt.buffer(400.0)):
+                if float(lines[int(hit)].distance(pt)) <= 400.0:
+                    near = True
+                    break
+            if near:
+                break
+        if near:
+            kept.append(LineString([(x0, y0), (x1, y1)]))
+    return kept
+
+
+def _continuing_wall_lines(msp, lines: list[LineString], origin: tuple[float, float], pad: float) -> list[LineString]:
+    """벽과 나란히 이어진 BASE 선과, 끊긴 벽 끝을 다음 벽까지 이은 선.
+
+    실을 나눌 때 같은 방향으로 이어지는 벽을 경계로 쓴다.
+    """
+    if not lines:
+        return []
+    ox, oy = origin
+    walls = [ln for ln in lines if ln.length >= 800.0]
+    if not walls:
+        return []
+    refs: list[tuple[float, float, float, float]] = []
+    for ln in walls:
+        x0, y0 = float(ln.coords[0][0]), float(ln.coords[0][1])
+        x1, y1 = float(ln.coords[-1][0]), float(ln.coords[-1][1])
+        length = math.hypot(x1 - x0, y1 - y0)
+        refs.append((x0, y0, (x1 - x0) / length, (y1 - y0) / length))
+    raw: list[LineString] = []
+    for entity in msp:
+        if getattr(entity.dxf, "layer", None) != "BASE" or entity.dxftype() != "LINE":
+            continue
+        x0, y0 = float(entity.dxf.start.x), float(entity.dxf.start.y)
+        x1, y1 = float(entity.dxf.end.x), float(entity.dxf.end.y)
+        length = math.hypot(x1 - x0, y1 - y0)
+        if not (800.0 <= length <= 8000.0):
+            continue
+        if abs((x0 + x1) * 0.5 - ox) > pad or abs((y0 + y1) * 0.5 - oy) > pad:
+            continue
+        vx, vy = (x1 - x0) / length, (y1 - y0) / length
+        mx, my = (x0 + x1) * 0.5, (y0 + y1) * 0.5
+        for wx, wy, ux, uy in refs:
+            if abs(vx * ux + vy * uy) < 0.995:
+                continue
+            px, py = mx - wx, my - wy
+            if abs(-uy * px + ux * py) <= 80.0:
+                raw.append(LineString([(x0, y0), (x1, y1)]))
+                break
+    accepted: list[LineString] = []
+    if raw:
+        tree = STRtree(lines)
+
+        def touches_wall(ln: LineString) -> bool:
+            for xy in (ln.coords[0], ln.coords[-1]):
+                pt = Point(float(xy[0]), float(xy[1]))
+                for hit in tree.query(pt.buffer(400.0)):
+                    if float(lines[int(hit)].distance(pt)) <= 400.0:
+                        return True
+            return False
+
+        rest: list[LineString] = []
+        for ln in raw:
+            if touches_wall(ln):
+                accepted.append(ln)
+            else:
+                rest.append(ln)
+        for _ in range(8):
+            if not accepted or not rest:
+                break
+            grown = STRtree(accepted)
+            still: list[LineString] = []
+            for ln in rest:
+                joined = False
+                for xy in (ln.coords[0], ln.coords[-1]):
+                    pt = Point(float(xy[0]), float(xy[1]))
+                    for hit in grown.query(pt.buffer(400.0)):
+                        if float(accepted[int(hit)].distance(pt)) <= 400.0:
+                            joined = True
+                            break
+                    if joined:
+                        break
+                if joined:
+                    accepted.append(ln)
+                else:
+                    still.append(ln)
+            if len(still) == len(rest):
+                break
+            rest = still
+    extensions: list[LineString] = []
+    seen: set[tuple] = set()
+    wall_tree = STRtree(lines)
+    for ln in walls:
+        x0, y0 = float(ln.coords[0][0]), float(ln.coords[0][1])
+        x1, y1 = float(ln.coords[-1][0]), float(ln.coords[-1][1])
+        length = math.hypot(x1 - x0, y1 - y0)
+        ux, uy = (x1 - x0) / length, (y1 - y0) / length
+        for x, y, sign in ((x0, y0, -1.0), (x1, y1, 1.0)):
+            if abs(x - ox) > pad or abs(y - oy) > pad:
+                continue
+            pt = Point(x, y)
+            dx, dy = ux * sign, uy * sign
+            blocked = False
+            for hit in wall_tree.query(pt.buffer(80.0)):
+                other = lines[int(hit)]
+                if other.equals(ln) or float(other.distance(pt)) > 80.0:
+                    continue
+                nearest = other.interpolate(other.project(pt))
+                along = (float(nearest.x) - x) * dx + (float(nearest.y) - y) * dy
+                if along > 20.0:
+                    blocked = True
+                    break
+            if blocked:
+                continue
+            ray = LineString([(x, y), (x + dx * 3600.0, y + dy * 3600.0)])
+            best: tuple[float, float, float] | None = None
+            for hit in wall_tree.query(ray.buffer(120.0)):
+                other = lines[int(hit)]
+                if other.equals(ln):
+                    continue
+                points: list[tuple[float, float]] = []
+                inter = ray.intersection(other)
+                if not inter.is_empty:
+                    geoms = list(inter.geoms) if hasattr(inter, "geoms") else [inter]
+                    for geom in geoms:
+                        if geom.geom_type == "Point":
+                            points.append((float(geom.x), float(geom.y)))
+                for ex, ey in (other.coords[0], other.coords[-1]):
+                    along = (float(ex) - x) * dx + (float(ey) - y) * dy
+                    perp = abs((float(ex) - x) * -dy + (float(ey) - y) * dx)
+                    if 200.0 <= along <= 3600.0 and perp <= 120.0:
+                        points.append((float(ex), float(ey)))
+                for px, py in points:
+                    along = (px - x) * dx + (py - y) * dy
+                    if along <= 200.0 or along > 3600.0:
+                        continue
+                    if best is None or along < best[0]:
+                        best = (along, px, py)
+            if best is None:
+                continue
+            key = tuple(sorted(((round(x, 1), round(y, 1)), (round(best[1], 1), round(best[2], 1)))))
+            if key in seen:
+                continue
+            seen.add(key)
+            extensions.append(LineString([(x, y), (best[1], best[2])]))
+    return accepted + extensions
+
+
+def _closed_lines(msp, segs, origin, boxes, open_doors):
+    """라벨이 들어 있는 닫힌 면과, 그 면을 만든 벽선.
+
+    벽만으로 닫히지 않으면, 벽 끝에 붙은 벽처럼 보이는 선까지 경계로 쓴다.
+    """
     lx, ly = origin
     pad = 12000.0
     open_keys = {(round(door["x"]), round(door["y"])) for door in open_doors}
@@ -1085,9 +1320,102 @@ def _room_lines(msp, segs, origin, boxes, open_doors):
             lines.extend(door["lines"])
         found = _face_at(lines, lx, ly)
         if found is not None and not _touches_window(found, origin, pad + 2000):
-            return found, x_axes, y_axes, swings
+            return lines, found, x_axes, y_axes, swings
         pad += 8000
-    return None, [], [], []
+    extra = _wallish_lines(msp, lines, origin, pad + 2000)
+    closed = _cap_wall_ends(lines + extra, WALL_CAP_MM) if extra else lines
+    found = _face_at(closed, lx, ly) if extra else None
+    if found is None:
+        extra.extend(_continuing_wall_lines(msp, lines, origin, pad + 2000))
+        if extra:
+            closed = _cap_wall_ends(lines + extra, WALL_CAP_MM)
+            found = _face_at(closed, lx, ly)
+    if found is not None and not _touches_window(found, origin, pad + 2000):
+        return closed, found, x_axes, y_axes, swings
+    return None, None, [], [], []
+
+
+def _room_lines(msp, segs, origin, boxes, open_doors):
+    """라벨이 들어 있는 닫힌 면. open_doors 의 여닫이는 개구로 남긴다."""
+    _lines, found, x_axes, y_axes, swings = _closed_lines(msp, segs, origin, boxes, open_doors)
+    if found is None:
+        return None, [], [], []
+    return found, x_axes, y_axes, swings
+
+
+def split_face_at_wall_end(msp, segs, boxes, origin, others: list[tuple[float, float]]):
+    """한 면 안에서 끊긴 벽 끝을 바깥 경계까지 이어 라벨을 다른 면으로 나눈다.
+
+    벽 끝에서 200 mm 안의 꺾임은 건너뛴다. 1600 mm 안에서 가장 짧은 연장만 쓴다.
+    나누지 못하면 None.
+    """
+    lines, face, x_axes, y_axes, swings = _closed_lines(msp, segs, origin, boxes, [])
+    if not lines or face is None:
+        return None
+    ring = face.exterior
+    best = None
+    for ln in lines:
+        coords = list(ln.coords)
+        x0, y0 = float(coords[0][0]), float(coords[0][1])
+        x1, y1 = float(coords[-1][0]), float(coords[-1][1])
+        length = math.hypot(x1 - x0, y1 - y0)
+        if length < 800.0:
+            continue
+        ux, uy = (x1 - x0) / length, (y1 - y0) / length
+        for x, y, sign in ((x0, y0, -1.0), (x1, y1, 1.0)):
+            if not face.buffer(40.0).covers(Point(x, y)):
+                continue
+            ray = LineString([(x, y), (x + ux * sign * 1600.0, y + uy * sign * 1600.0)])
+            inter = ray.intersection(ring)
+            pts = []
+            if inter.is_empty:
+                continue
+            if inter.geom_type == "Point":
+                pts = [inter]
+            elif inter.geom_type == "MultiPoint":
+                pts = list(inter.geoms)
+            else:
+                continue
+            hit = None
+            for ip in pts:
+                dist = math.hypot(ip.x - x, ip.y - y)
+                if dist <= 200.0:
+                    continue
+                if hit is None or dist < hit[0]:
+                    hit = (dist, float(ip.x), float(ip.y))
+            if hit is None:
+                continue
+            dist, x2, y2 = hit
+            chord = LineString([(x, y), (x2, y2)])
+            if not face.buffer(80.0).covers(chord.interpolate(0.5, normalized=True)):
+                continue
+            extra = lines + [chord]
+            face_a = _face_at(extra, origin[0], origin[1])
+            if face_a is None:
+                continue
+            faces_b = []
+            ok = True
+            for ox, oy in others:
+                face_b = _face_at(extra, ox, oy)
+                if face_b is None:
+                    ok = False
+                    break
+                shared = face_a.intersection(face_b).area
+                if shared > min(face_a.area, face_b.area) * 0.5:
+                    ok = False
+                    break
+                faces_b.append(face_b)
+            if not ok or not faces_b:
+                continue
+            if min(face_a.area, *(item.area for item in faces_b)) < 500_000.0:
+                continue
+            if face_a.area + sum(item.area for item in faces_b) > face.area * 1.2:
+                continue
+            if best is None or dist < best[0]:
+                best = (dist, face_a, faces_b, x_axes, y_axes, swings)
+    if best is None:
+        return None
+    return best[1], best[2], best[3], best[4], best[5]
 
 
 def evaluate(
