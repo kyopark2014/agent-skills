@@ -101,8 +101,13 @@ def _summary(entry: dict) -> dict | None:
         "folder": folder,
         "source_filename": str(entry.get("source_filename") or "").strip(),
         "created_at": str(entry.get("created_at") or "").strip(),
+        "updated_at": str(entry.get("updated_at") or "").strip(),
         "status": str(entry.get("status") or "pending").strip() or "pending",
     }
+
+
+def _list_stamp(item: dict) -> str:
+    return str(item.get("updated_at") or item.get("created_at") or "")
 
 
 def list_drawings(artifacts: Path) -> dict:
@@ -112,7 +117,7 @@ def list_drawings(artifacts: Path) -> dict:
         item = _summary(entry)
         if item:
             drawings.append(item)
-    drawings.sort(key=lambda item: item.get("created_at") or "", reverse=True)
+    drawings.sort(key=_list_stamp, reverse=True)
     return {"drawings": drawings}
 
 

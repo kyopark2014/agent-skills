@@ -28,6 +28,7 @@ import os
 import re
 import subprocess
 import sys
+import unicodedata
 from collections import Counter
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from datetime import datetime
@@ -556,6 +557,48 @@ def _load_drawing_list(path: Path) -> dict:
     return loaded
 
 
+def original_upload_source(dxf_path: Path) -> Path:
+    """Return the upload file when ``dxf_path`` is a renamed copy of it.
+
+    A copy under ``artifacts/`` with a slug name is not the original. The
+    catalog keeps the upload basename when exactly one upload has the same size.
+    """
+    try:
+        resolved = Path(dxf_path).resolve()
+        size = resolved.stat().st_size
+    except OSError:
+        return Path(dxf_path)
+    artifacts = next((parent for parent in resolved.parents if parent.name == "artifacts"), None)
+    if artifacts is None:
+        return resolved
+    upload = artifacts.parent / "upload"
+    if not upload.is_dir():
+        return resolved
+    try:
+        if resolved.is_relative_to(upload):
+            return resolved
+    except (OSError, ValueError):
+        return resolved
+    matches: list[Path] = []
+    try:
+        candidates = list(upload.iterdir())
+    except OSError:
+        return resolved
+    for candidate in candidates:
+        if not candidate.is_file():
+            continue
+        if candidate.suffix.lower() not in {".dxf", ".dwg", ".dwf"}:
+            continue
+        try:
+            if candidate.stat().st_size == size:
+                matches.append(candidate.resolve())
+        except OSError:
+            continue
+    if len(matches) == 1:
+        return matches[0]
+    return resolved
+
+
 def upsert_drawing_list(
     out_dir: Path,
     drawing_id: str,
@@ -579,13 +622,14 @@ def upsert_drawing_list(
         drawings.append(entry)
 
     entry["folder"] = drawing_id
-    entry["source_filename"] = dxf_path.name
+    source = original_upload_source(dxf_path)
+    entry["source_filename"] = unicodedata.normalize("NFC", source.name)
     try:
-        resolved_source = dxf_path.resolve()
+        resolved_source = source.resolve()
         entry["source_path"] = str(resolved_source)
         entry["source_size_bytes"] = resolved_source.stat().st_size
     except OSError:
-        entry["source_path"] = str(dxf_path)
+        entry["source_path"] = str(source)
         entry["source_size_bytes"] = entry.get("source_size_bytes")
     entry["updated_at"] = now
     entry["layout_method"] = getattr(layout, "method", None)

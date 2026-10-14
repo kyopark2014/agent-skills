@@ -33,6 +33,7 @@ description: >-
 11. 응답은 **한국어**. 경로·JSON 키는 영문/숫자 유지.
 12. **타일 분할(레거시)** — 추후 다시 나눌 수 있으나 **현재 기본 경로가 아님**. 사용자가 명시할 때만 `plan_split.py` / `split_floor.py`를 사용한다.
 13. **DWG** — `--dxf`에 `.dwg`를 그대로 넣는다. `extract_2d.py`가 `$ARTIFACTS_DIR/<drawing_id>/<원본이름>.dxf`를 만든 뒤 그 DXF로 층을 추출한다. 그 DXF가 DWG보다 새로우면 다시 변환하지 않는다. 변환은 ODA File Converter, 없으면 `dwg2dxf`다. 에이전트가 따로 변환 명령을 만들지 않는다. 원본 DWG는 수정하지 않는다.
+14. **원본 파일명** — `--dxf`와 `--raw-dxf`에는 사용자가 올린 파일 경로를 그대로 넣는다. artifacts에 다른 이름으로 복사하지 않는다. `source_filename`과 `source_path`는 그 원본 파일이다.
 
 ## Script Location
 
@@ -105,7 +106,7 @@ ART="$ARTIFACTS_DIR/sk_yongin_jiwon"
 python3 "$SCRIPTS/analyze_drawing.py" \
   --drawing-id <drawing_id> \
   --out "$ART" \
-  --raw-dxf "$ARTIFACTS_DIR/<input>.dxf" \
+  --raw-dxf "<업로드된 원본 DXF 또는 DWG 경로>" \
   --floor-dir "$ART/floors"
 ```
 
@@ -140,7 +141,7 @@ DXF 또는 DWG 입력 (artifacts/ 또는 --dxf)
 ```bash
 # 위 Script Location bootstrap 후
 python3 "$SCRIPTS/extract_2d.py" \
-  --dxf "$ARTIFACTS_DIR/<input>.dxf" \
+  --dxf "<업로드된 원본 DXF 또는 DWG 경로>" \
   --floor 12F \
   --out "$ARTIFACTS_DIR" \
   --drawing-id <drawing_id>
@@ -159,7 +160,7 @@ python3 "$SCRIPTS/extract_2d.py" \
 
 ```bash
 python3 "$SCRIPTS/extract_2d.py" \
-  --dxf "$ARTIFACTS_DIR/<input>.dxf" \
+  --dxf "<업로드된 원본 DXF 또는 DWG 경로>" \
   --drawing-id <drawing_id> \
   --list-floors
 ```
@@ -168,7 +169,7 @@ python3 "$SCRIPTS/extract_2d.py" \
 
 ```bash
 python3 "$SCRIPTS/extract_2d.py" \
-  --dxf "$ARTIFACTS_DIR/<input>.dxf" \
+  --dxf "<업로드된 원본 DXF 또는 DWG 경로>" \
   --floor 1F \
   --out "$ARTIFACTS_DIR" \
   --drawing-id <drawing_id>
@@ -178,7 +179,7 @@ python3 "$SCRIPTS/extract_2d.py" \
 
 ```bash
 python3 "$SCRIPTS/extract_2d.py" \
-  --dxf "$ARTIFACTS_DIR/<input>.dxf" \
+  --dxf "<업로드된 원본 DXF 또는 DWG 경로>" \
   --floor all \
   --out "$ARTIFACTS_DIR" \
   --drawing-id <drawing_id>
@@ -204,7 +205,7 @@ python3 "$SCRIPTS/extract_2d.py" \
 python3 "$SCRIPTS/analyze_drawing.py" \
   --drawing-id <drawing_id> \
   --out "$ART" \
-  --raw-dxf "$ARTIFACTS_DIR/<input>.dxf" \
+  --raw-dxf "<업로드된 원본 DXF 또는 DWG 경로>" \
   --floor-dir "$ART/floors"
 ```
 

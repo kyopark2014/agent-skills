@@ -112,6 +112,44 @@ class DrawingIdTests(unittest.TestCase):
             with patch("application.utils.SESSION_STORAGE_DIR", raw):
                 self.assertEqual(_artifacts_dir("lge"), own.resolve())
 
+    def test_list_orders_by_latest_update(self):
+        with tempfile.TemporaryDirectory() as raw:
+            artifacts = Path(raw)
+            (artifacts / "drawing_list.json").write_text(
+                json.dumps(
+                    {
+                        "drawings": [
+                            {
+                                "drawing_id": "older_edit",
+                                "folder": "older_edit",
+                                "created_at": "2026-10-15T01:00:00+09:00",
+                                "updated_at": "2026-10-15T02:00:00+09:00",
+                                "status": "ready",
+                            },
+                            {
+                                "drawing_id": "newer_edit",
+                                "folder": "newer_edit",
+                                "created_at": "2026-10-14T01:00:00+09:00",
+                                "updated_at": "2026-10-15T07:00:00+09:00",
+                                "status": "ready",
+                            },
+                            {
+                                "drawing_id": "created_only",
+                                "folder": "created_only",
+                                "created_at": "2026-10-15T03:00:00+09:00",
+                                "status": "ready",
+                            },
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            listed = list_drawings(artifacts)
+            self.assertEqual(
+                [item["drawing_id"] for item in listed["drawings"]],
+                ["newer_edit", "created_only", "older_edit"],
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -120,6 +120,7 @@ export interface DrawingSummary {
   folder: string;
   source_filename: string;
   created_at: string;
+  updated_at?: string;
   status: string;
 }
 
