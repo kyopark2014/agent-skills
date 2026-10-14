@@ -50,7 +50,7 @@ from lib_korean_dxf import apply_korean_text, read_dxf  # noqa: E402
 from lib_render import render_floor_original_preview  # noqa: E402
 from lib_sheet import discover_layout, normalize_floor_token  # noqa: E402
 from lib_split import find_primary_floor_bbox, find_primary_line_bbox  # noqa: E402
-from lib_structure import collect_structural_sheet  # noqa: E402
+from lib_structure import collect_structural_sheet, drop_off_layer_hidden  # noqa: E402
 
 
 _EXTRACT_DOC: Drawing | None = None
@@ -817,6 +817,10 @@ def extract_floor(
         print(f"  exploded {ins.dxf.name}: {len(ents)} entities")
         entities.extend(ents)
 
+    entities, skipped_hidden = drop_off_layer_hidden(doc, entities)
+    if skipped_hidden:
+        print(f"  off-layer hidden skipped: {skipped_hidden}")
+
     raw_count = len(entities)
     # 필터는 항상 fresh 좌표의 코어 클러스터 기준 (조경 확장)
     if variant == "original":
@@ -1025,6 +1029,10 @@ def extract_sheet_floor(
                 cy = (float(ext.extmin.y) + float(ext.extmax.y)) / 2
                 if clip[0] <= cx <= clip[2] and clip[1] <= cy <= clip[3]:
                     absorb_insert(entity)
+
+    entities, skipped_hidden = drop_off_layer_hidden(doc, entities)
+    if skipped_hidden:
+        print(f"  off-layer hidden skipped: {skipped_hidden}")
 
     if not any(e.dxftype() in GEOM_TYPES for e in entities):
         raise RuntimeError(f"{floor}: 도곽 안에 기하가 없습니다 ({sheet.title})")

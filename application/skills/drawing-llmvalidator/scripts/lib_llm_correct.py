@@ -16384,17 +16384,28 @@ def close_leaking_wall_ends(msp) -> int:
                 tips.append((point, direction, seg))
         return tips
 
+    # 문 호 반지름은 선과 무관하다. 매 호출마다 걸러내지 않는다.
+    door_arcs = [arc for arc in arcs if 400.0 <= arc[2] <= 1400.0]
+    # _chains_from/_extend 가 같은 BASE 선을 수십만 번 다시 본다. 판정은 선분 기하만
+    # 보므로 선분마다 한 번만 계산한다. 결과는 캐시 없이 매번 계산한 것과 같다.
+    door_leaf_cache: dict[int, bool] = {}
+
     def _door_leaf(seg: dict) -> bool:
+        key = id(seg)
+        cached = door_leaf_cache.get(key)
+        if cached is not None:
+            return cached
         mx = (seg["a"][0] + seg["b"][0]) * 0.5
         my = (seg["a"][1] + seg["b"][1]) * 0.5
-        for hx, hy, radius in arcs:
-            if not (400.0 <= radius <= 1400.0):
-                continue
+        leaf = False
+        for hx, hy, radius in door_arcs:
             if abs(seg["L"] - radius) > max(180.0, 0.35 * radius):
                 continue
             if math.hypot(mx - hx, my - hy) <= radius + 250.0:
-                return True
-        return False
+                leaf = True
+                break
+        door_leaf_cache[key] = leaf
+        return leaf
 
     def _extend(first: dict, tip_at, direction) -> list[dict]:
         used = {id(first)}

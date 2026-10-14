@@ -105,31 +105,78 @@ def _token_from_match(matched: re.Match[str]) -> str | None:
     return None
 
 
+def _collapse_spaced_glyphs(raw: str) -> str:
+    """글자마다 띄운 제목만 붙인다. '1 층 평 면 도' → '1층평면도'.
+
+    '1층 냉난방 평면도'처럼 단어 사이 공백은 유지한다.
+    한 글자(한글·숫자)가 연속된 구간만 붙이고, 두 글자 이상인 단어는 그대로 둔다.
+    """
+    tokens = raw.split()
+    if len(tokens) < 2:
+        return raw
+    glued: list[str] = []
+    buf: list[str] = []
+
+    def flush() -> None:
+        if buf:
+            glued.append("".join(buf))
+            buf.clear()
+
+    for token in tokens:
+        if len(token) == 1 and re.fullmatch(r"[가-힣\d]", token):
+            buf.append(token)
+            continue
+        flush()
+        glued.append(token)
+    flush()
+    return " ".join(glued)
+
+
+_FLOORISH_LEAD = re.compile(r"^(?:RF|ROOF|PH|PENTHOUSE|B\d+F?)$", re.I)
+
+
+def _strip_equipment_prefix(raw: str) -> str:
+    """'EHP 1층 …'처럼 층 표기 앞의 영문 설비 코드를 뺀다. 층 토큰 자체는 남긴다."""
+    tokens = raw.split()
+    index = 0
+    while index < len(tokens) - 1:
+        token = tokens[index]
+        if _FLOORISH_LEAD.fullmatch(token):
+            break
+        if re.fullmatch(r"[A-Za-z][A-Za-z0-9]{1,12}", token):
+            index += 1
+            continue
+        break
+    return " ".join(tokens[index:])
+
+
 def parse_floor_label(value: str) -> str | None:
     """짧은 층 제목만 인정한다. 치수·실명·참조 문구는 제외.
 
-    '1층 평면도'뿐 아니라 '1층 냉난방 평면도'처럼
+    '1층 평면도'뿐 아니라 '1층 냉난방 평면도', 'EHP 1층 냉난방 제어 평면도',
+    'EHP 지붕층 냉난방 철거 평면도'처럼 앞에 설비 코드가 있고
     층과 평면도 사이에 용도가 있는 제목도 인정한다.
     """
-    raw = plain_text(value)
+    raw = _collapse_spaced_glyphs(plain_text(value))
     if not raw or len(raw) > 48:
         return None
     if re.fullmatch(r"[\d.,\s]+", raw):
         return None
     if len(set(re.findall(r"(\d+)\s*층", raw))) > 1:
         return None
-    if re.fullmatch(rf"(?:옥상|지붕층|지붕|ROOF|RF)(?:\s+{_PLAN_TAIL})?", raw, re.I):
+    body = _strip_equipment_prefix(raw)
+    if re.fullmatch(rf"(?:옥상|지붕층|지붕|ROOF|RF)(?:\s*{_PLAN_TAIL})?", body, re.I):
         return "RF"
-    if re.fullmatch(rf"(?:옥상|지붕층|지붕|ROOF|RF)(?:\s+\S+){{1,4}}\s+{_PLAN_TAIL}", raw, re.I):
+    if re.fullmatch(rf"(?:옥상|지붕층|지붕|ROOF|RF)(?:\s+\S+){{1,4}}\s+{_PLAN_TAIL}", body, re.I):
         return "RF"
-    if re.fullmatch(rf"(?:옥탑층|옥탑|PH|PENTHOUSE)(?:\s+{_PLAN_TAIL})?", raw, re.I):
+    if re.fullmatch(rf"(?:옥탑층|옥탑|PH|PENTHOUSE)(?:\s*{_PLAN_TAIL})?", body, re.I):
         return "PH"
-    if re.fullmatch(rf"(?:옥탑층|옥탑|PH|PENTHOUSE)(?:\s+\S+){{1,4}}\s+{_PLAN_TAIL}", raw, re.I):
+    if re.fullmatch(rf"(?:옥탑층|옥탑|PH|PENTHOUSE)(?:\s+\S+){{1,4}}\s+{_PLAN_TAIL}", body, re.I):
         return "PH"
-    strict = re.fullmatch(rf"{_FLOOR_HEAD}(?:\s*{_PLAN_TAIL})?{_TRAIL_PAREN}$", raw, re.I)
+    strict = re.fullmatch(rf"{_FLOOR_HEAD}(?:\s*{_PLAN_TAIL})?{_TRAIL_PAREN}$", body, re.I)
     if strict:
         return _token_from_match(strict)
-    titled = re.fullmatch(rf"{_FLOOR_HEAD}(?:\s+\S+){{1,4}}\s*{_PLAN_TAIL}{_TRAIL_PAREN}$", raw, re.I)
+    titled = re.fullmatch(rf"{_FLOOR_HEAD}(?:\s+\S+){{1,4}}\s*{_PLAN_TAIL}{_TRAIL_PAREN}$", body, re.I)
     if titled:
         return _token_from_match(titled)
     return None
@@ -500,6 +547,8 @@ def _frames_from(rects, texts: list[_TextHit], warnings: list[str]) -> list[Shee
             continue
         ranked = sorted(hits, key=_title_score, reverse=True)
         best = ranked[0]
+        # 같은 층 제목이 둘이면(제어 평면도와 철거 평면도) 도곽 전체를 그 층 하나로 둔다.
+        # 서로 다른 층이 한 도곽에 있을 때만 영역을 나누거나 미확정으로 남긴다.
         rivals = [h for h in ranked[1:] if h.floor != best.floor and _title_score(h) >= _title_score(best) * 0.67]
         if rivals:
             split = _split_multi(rect, hits)

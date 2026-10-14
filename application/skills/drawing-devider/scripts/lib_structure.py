@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import math
+import re
 
 from ezdxf import bbox as ezbbox
 from ezdxf.document import Drawing
@@ -20,6 +21,49 @@ from ezdxf.upright import upright
 from lib_split import entity_centroid, filter_bbox
 
 _GEOM = frozenset({"LINE", "ARC", "CIRCLE", "LWPOLYLINE", "TEXT", "MTEXT"})
+
+
+# 선종류 이름의 마지막 토큰. '1-plan$0$HIDDEN', 'HID2' 처럼 숨은선만 해당한다.
+_HIDDEN_LINETYPE = re.compile(r"^(?:HIDDENX2|HIDDEN2|HIDDEN|HID2|HID|H1)$", re.IGNORECASE)
+
+
+def is_hidden_linetype(name: str) -> bool:
+    token = (name or "").split("$")[-1].strip()
+    return _HIDDEN_LINETYPE.fullmatch(token) is not None
+
+
+def _effective_linetype(doc: Drawing, entity) -> str:
+    name = str(getattr(entity.dxf, "linetype", "") or "BYLAYER")
+    if name.upper() != "BYLAYER":
+        return name
+    layer_name = str(getattr(entity.dxf, "layer", "") or "0")
+    try:
+        return str(doc.layers.get(layer_name).dxf.linetype or "CONTINUOUS")
+    except Exception:  # noqa: BLE001 — 레이어 표가 없으면 실선으로 본다
+        return "CONTINUOUS"
+
+
+def hidden_on_off_layer(doc: Drawing, entity) -> bool:
+    """꺼진 레이어 위의 숨은선. 켜진 레이어의 점선과 실선은 남긴다."""
+    layer_name = str(getattr(entity.dxf, "layer", "") or "0")
+    try:
+        layer = doc.layers.get(layer_name)
+    except Exception:  # noqa: BLE001
+        return False
+    if layer.is_on():
+        return False
+    return is_hidden_linetype(_effective_linetype(doc, entity))
+
+
+def drop_off_layer_hidden(doc: Drawing, entities: list) -> tuple[list, int]:
+    kept = []
+    skipped = 0
+    for entity in entities:
+        if hidden_on_off_layer(doc, entity):
+            skipped += 1
+            continue
+        kept.append(entity)
+    return kept, skipped
 
 
 def is_arch_layer(name: str) -> bool:

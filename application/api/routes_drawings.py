@@ -6,6 +6,7 @@ import json
 import os
 import re
 import shutil
+import unicodedata
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Request
@@ -13,10 +14,12 @@ from fastapi.responses import FileResponse
 
 from application.api.routes_auth import require_user_id
 from application import utils
+from application.unicode_paths import resolve_existing_path
 
 router = APIRouter(prefix="/api/drawings", tags=["drawings"])
 
-_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,80}$")
+# Hangul syllables (NFC) plus the previous ASCII set. Path separators and dots stay out.
+_ID_RE = re.compile(r"^[A-Za-z0-9가-힣][A-Za-z0-9가-힣_-]{0,80}$")
 _IMAGE_KINDS = {
     "original": "floor_original.png",
     "wall": "floor_wall_original.png",
@@ -39,8 +42,8 @@ def _contained(path: Path, root: Path) -> bool:
 
 
 def _safe_id(value: object) -> str | None:
-    text = str(value or "").strip()
-    if not _ID_RE.fullmatch(text):
+    text = unicodedata.normalize("NFC", str(value or "").strip())
+    if not text or not _ID_RE.fullmatch(text):
         return None
     return text
 
@@ -111,8 +114,12 @@ def _find_entry(catalog: dict, drawing_id: str) -> dict | None:
 
 def _folder_dir(artifacts: Path, folder: str) -> Path:
     root = artifacts.resolve()
-    target = (root / folder).resolve()
-    if not _contained(target, root):
+    spelled = Path(resolve_existing_path(str(root / folder)))
+    try:
+        target = spelled.resolve()
+    except OSError:
+        target = spelled
+    if target == root or not _contained(target, root):
         raise HTTPException(status_code=400, detail="Invalid drawing folder")
     return target
 
