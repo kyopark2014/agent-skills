@@ -90,9 +90,24 @@ def _roomish(text: str) -> bool:
 
 
 def is_excluded_area_label(text: str) -> bool:
-    """면적과 실 라벨에서 빼는 이름. 방풍실, 보관실, 퇴식대, 샤워실, 고압, 저압, 계단실, 복도, EPS."""
+    """면적과 실 라벨에서 빼는 이름. 방풍실, 보관실, 퇴식대, 샤워실, 고압, 저압, 계단실, 복도, EPS, OPEN, 홀-, 홈-, 입구, 출구, 양치공간, 청소도구함, 오픈, 조경, 배경, 평면도, 비품고을."""
     name = norm_name(text)
     folded = name.upper()
+    if (
+        "OPEN" in folded
+        or "입구" in folded
+        or "출구" in folded
+        or "양치공간" in folded
+        or "청소도구함" in folded
+        or "오픈" in folded
+        or "조경" in folded
+        or "배경" in folded
+        or "평면도" in folded
+        or "비품고을" in folded
+        or folded.startswith("홀-")
+        or folded.startswith("홈-")
+    ):
+        return True
     if any(token in folded for token in ("방풍실", "보관실", "퇴식대", "샤워실", "고압", "저압", "계단실", "복도")):
         return True
     shaft = folded.replace(".", "")
@@ -1344,10 +1359,312 @@ def _continuing_wall_lines(msp, lines: list[LineString], origin: tuple[float, fl
     return accepted + extensions
 
 
+def _opening_entity_lines(msp, lines: list[LineString], origin: tuple[float, float], pad: float) -> list[LineString]:
+    """벽이 2.4–18 m 끊긴 개구 안의 선을 경계로 쓴다.
+
+    라벨이 있는 실이 벽만으로 닫히지 않으면, 그 개구를 지나는 선을 벽으로 본다.
+    선들이 1.2 m 안쪽 틈으로 이어져 개구를 덮으면, 양끝 벽 사이를 한 줄로 닫는다.
+    식생활관 오른쪽이 그 예다.
+    """
+    if not lines:
+        return []
+    ox, oy = origin
+    walls: list[tuple[float, float, float, float, float, float, float]] = []
+    for ln in lines:
+        x0, y0 = float(ln.coords[0][0]), float(ln.coords[0][1])
+        x1, y1 = float(ln.coords[-1][0]), float(ln.coords[-1][1])
+        length = math.hypot(x1 - x0, y1 - y0)
+        if length < 1500.0:
+            continue
+        if min(abs(x0 - ox), abs(x1 - ox)) > pad and min(abs(y0 - oy), abs(y1 - oy)) > pad:
+            continue
+        walls.append((x0, y0, x1, y1, length, (x1 - x0) / length, (y1 - y0) / length))
+    openings: list[tuple[float, float, float, float, float, float]] = []
+    seen_gap: set[tuple] = set()
+    for i, left in enumerate(walls):
+        lx0, ly0, lx1, ly1, llen, lux, luy = left
+        for right in walls[i + 1 :]:
+            rx0, ry0, rx1, ry1, _rlen, rux, ruy = right
+            if abs(lux * rux + luy * ruy) < 0.98:
+                continue
+            nx, ny = -luy, lux
+            off0 = abs((rx0 - lx0) * nx + (ry0 - ly0) * ny)
+            off1 = abs((rx1 - lx0) * nx + (ry1 - ly0) * ny)
+            if off0 > 80.0 or off1 > 80.0:
+                continue
+            along = (
+                (lx0, ly0, 0.0),
+                (lx1, ly1, llen),
+                (rx0, ry0, (rx0 - lx0) * lux + (ry0 - ly0) * luy),
+                (rx1, ry1, (rx1 - lx0) * lux + (ry1 - ly0) * luy),
+            )
+            lo1, hi1 = 0.0, llen
+            lo2, hi2 = min(along[2][2], along[3][2]), max(along[2][2], along[3][2])
+            if min(hi1, hi2) - max(lo1, lo2) > 200.0:
+                continue
+            gap = max(lo1, lo2) - min(hi1, hi2)
+            if not (2400.0 <= gap <= 18000.0):
+                continue
+            inner = sorted(along, key=lambda item: item[2])
+            near_x, near_y = inner[1][0], inner[1][1]
+            far_x, far_y = inner[2][0], inner[2][1]
+            dist = math.hypot(far_x - near_x, far_y - near_y) or gap
+            mid_x = (near_x + far_x) * 0.5
+            mid_y = (near_y + far_y) * 0.5
+            if abs(mid_x - ox) > pad or abs(mid_y - oy) > pad:
+                continue
+            key = (
+                round(near_x / 50.0),
+                round(near_y / 50.0),
+                round(far_x / 50.0),
+                round(far_y / 50.0),
+            )
+            if key in seen_gap:
+                continue
+            seen_gap.add(key)
+            openings.append((near_x, near_y, far_x, far_y, (far_x - near_x) / dist, (far_y - near_y) / dist))
+    if not openings:
+        return []
+    raw: list[tuple[float, float, float, float]] = []
+    for entity in msp:
+        kind = entity.dxftype()
+        parts: list[tuple[float, float, float, float]] = []
+        if kind == "LINE":
+            parts.append(
+                (
+                    float(entity.dxf.start.x),
+                    float(entity.dxf.start.y),
+                    float(entity.dxf.end.x),
+                    float(entity.dxf.end.y),
+                )
+            )
+        elif kind == "LWPOLYLINE":
+            pts = [(float(a), float(b)) for a, b in entity.get_points("xy")]
+            count = len(pts)
+            for index in range(count - 1 + (1 if entity.closed else 0)):
+                start, end = pts[index], pts[(index + 1) % count]
+                parts.append((start[0], start[1], end[0], end[1]))
+        for x0, y0, x1, y1 in parts:
+            if math.hypot(x1 - x0, y1 - y0) < 1500.0:
+                continue
+            if abs((x0 + x1) * 0.5 - ox) > pad or abs((y0 + y1) * 0.5 - oy) > pad:
+                continue
+            raw.append((x0, y0, x1, y1))
+    kept: list[LineString] = []
+    for ax, ay, bx, by, ux, uy in openings:
+        nx, ny = -uy, ux
+        gap = math.hypot(bx - ax, by - ay)
+        cover: list[tuple[float, float]] = []
+        for x0, y0, x1, y1 in raw:
+            elen = math.hypot(x1 - x0, y1 - y0)
+            if abs(((x1 - x0) / elen) * ux + ((y1 - y0) / elen) * uy) < 0.98:
+                continue
+            off0 = (x0 - ax) * nx + (y0 - ay) * ny
+            off1 = (x1 - ax) * nx + (y1 - ay) * ny
+            if abs(off1 - off0) > 80.0 or abs(off0) > 500.0:
+                continue
+            t0 = (x0 - ax) * ux + (y0 - ay) * uy
+            t1 = (x1 - ax) * ux + (y1 - ay) * uy
+            lo, hi = min(t0, t1), max(t0, t1)
+            if min(hi, gap) - max(lo, 0.0) < 2500.0:
+                continue
+            cover.append((lo, hi))
+        if not cover:
+            continue
+        cover.sort()
+        merged: list[list[float]] = [list(cover[0])]
+        for lo, hi in cover[1:]:
+            if lo - merged[-1][1] <= 1200.0:
+                merged[-1][1] = max(merged[-1][1], hi)
+            else:
+                merged.append([lo, hi])
+        span = None
+        for lo, hi in merged:
+            if lo <= 1200.0:
+                lo = 0.0
+            if hi >= gap - 1200.0:
+                hi = gap
+            if lo <= 0.0 and hi >= gap and (span is None or hi - lo > span[1] - span[0]):
+                span = (lo, hi)
+        if span is None:
+            continue
+        kept.append(LineString([(ax, ay), (bx, by)]))
+    return kept
+
+
+def _open_corner_lines(lines: list[LineString], origin: tuple[float, float]) -> list[LineString]:
+    """가로·세로 벽 끝이 사선 외벽과 2–9 m 떨어지면 그 사이를 닫는다.
+
+    라벨이 있는 실이 벽만으로 닫히지 않을 때만 쓴다.
+    식생활관 왼쪽 위·아래처럼, 긴 벽이 사선 외벽에 닿지 않아 실이 새는 경우다.
+    """
+    if not lines:
+        return []
+    ox, oy = origin
+    tree = STRtree(lines)
+    kept: list[LineString] = []
+    seen: set[tuple] = set()
+    for ln in lines:
+        if ln.length < 3500.0:
+            continue
+        x0, y0 = float(ln.coords[0][0]), float(ln.coords[0][1])
+        x1, y1 = float(ln.coords[-1][0]), float(ln.coords[-1][1])
+        if min(abs(x1 - x0), abs(y1 - y0)) > 400.0:
+            continue
+        length = math.hypot(x1 - x0, y1 - y0)
+        ux, uy = (x1 - x0) / length, (y1 - y0) / length
+        for x, y in ((x0, y0), (x1, y1)):
+            if math.hypot(x - ox, y - oy) > 24000.0:
+                continue
+            pt = Point(x, y)
+            best: tuple[float, float, float] | None = None
+            for idx in tree.query(pt.buffer(9000.0)):
+                other = lines[int(idx)]
+                if other.length < 15000.0:
+                    continue
+                c0, c1 = other.coords[0], other.coords[-1]
+                if abs(float(c0[0]) - float(c1[0])) < 1500.0 or abs(float(c0[1]) - float(c1[1])) < 1500.0:
+                    continue
+                dist = float(other.distance(pt))
+                if not (2000.0 <= dist <= 9000.0):
+                    continue
+                vx = float(c1[0]) - float(c0[0])
+                vy = float(c1[1]) - float(c0[1])
+                vlen = math.hypot(vx, vy) or 1.0
+                if abs(ux * vx / vlen + uy * vy / vlen) > 0.4:
+                    continue
+                nearest = other.interpolate(other.project(pt))
+                if best is None or dist < best[0]:
+                    best = (dist, float(nearest.x), float(nearest.y))
+            if best is None:
+                continue
+            if math.hypot((x + best[1]) * 0.5 - ox, (y + best[2]) * 0.5 - oy) > 18000.0:
+                continue
+            key = (
+                round(x / 200.0),
+                round(y / 200.0),
+                round(best[1] / 200.0),
+                round(best[2] / 200.0),
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            kept.append(LineString([(x, y), (best[1], best[2])]))
+    return kept
+
+
+def _gap_entity_lines(msp, lines: list[LineString], origin: tuple[float, float], pad: float) -> list[LineString]:
+    """벽이 끊긴 구간 안의 선을 벽으로 본다.
+
+    벽 끝이 다른 벽에 닿지 않고, 그 앞으로 2.4 m 안에 같은 방향의 선이 있으면
+    그 선을 경계로 쓰고 벽 끝과 잇는다. 선이 없는 개구는 그대로 연다.
+    일반교실 1-5 왼쪽 위처럼 문 위 인방이 BASE인 경우다.
+    """
+    if not lines:
+        return []
+    ox, oy = origin
+    reach = min(pad, 20000.0)
+    cands: list[tuple[float, float, float, float, float, float, float]] = []
+    for entity in msp:
+        kind = entity.dxftype()
+        parts: list[tuple[float, float, float, float]] = []
+        if kind == "LINE":
+            parts.append(
+                (
+                    float(entity.dxf.start.x),
+                    float(entity.dxf.start.y),
+                    float(entity.dxf.end.x),
+                    float(entity.dxf.end.y),
+                )
+            )
+        elif kind == "LWPOLYLINE":
+            pts = [(float(a), float(b)) for a, b in entity.get_points("xy")]
+            count = len(pts)
+            for index in range(count - 1 + (1 if entity.closed else 0)):
+                start, end = pts[index], pts[(index + 1) % count]
+                parts.append((start[0], start[1], end[0], end[1]))
+        for x0, y0, x1, y1 in parts:
+            length = math.hypot(x1 - x0, y1 - y0)
+            if not (400.0 <= length <= 6000.0):
+                continue
+            if abs((x0 + x1) * 0.5 - ox) > reach or abs((y0 + y1) * 0.5 - oy) > reach:
+                continue
+            cands.append((x0, y0, x1, y1, length, (x1 - x0) / length, (y1 - y0) / length))
+    if not cands:
+        return []
+    tree = STRtree(lines)
+    kept: list[LineString] = []
+    seen: set[tuple] = set()
+
+    def add(ax: float, ay: float, bx: float, by: float) -> None:
+        if math.hypot(bx - ax, by - ay) <= 0.5:
+            return
+        key = tuple(sorted(((round(ax, 1), round(ay, 1)), (round(bx, 1), round(by, 1)))))
+        if key in seen:
+            return
+        seen.add(key)
+        kept.append(LineString([(ax, ay), (bx, by)]))
+
+    for ln in lines:
+        if ln.length < 1500.0:
+            continue
+        x0, y0 = float(ln.coords[0][0]), float(ln.coords[0][1])
+        x1, y1 = float(ln.coords[-1][0]), float(ln.coords[-1][1])
+        length = math.hypot(x1 - x0, y1 - y0)
+        ux, uy = (x1 - x0) / length, (y1 - y0) / length
+        for x, y, dx, dy in ((x0, y0, -ux, -uy), (x1, y1, ux, uy)):
+            if abs(x - ox) > reach or abs(y - oy) > reach:
+                continue
+            pt = Point(x, y)
+            closed_end = False
+            for hit in tree.query(pt.buffer(80.0)):
+                other = lines[int(hit)]
+                if other is ln or float(other.distance(pt)) > 80.0:
+                    continue
+                c0, c1 = other.coords[0], other.coords[-1]
+                span = math.hypot(float(c1[0]) - float(c0[0]), float(c1[1]) - float(c0[1])) or 1.0
+                oux = (float(c1[0]) - float(c0[0])) / span
+                ouy = (float(c1[1]) - float(c0[1])) / span
+                parallel = abs(dx * oux + dy * ouy) >= 0.98
+                nearest = other.interpolate(other.project(pt))
+                along = (float(nearest.x) - x) * dx + (float(nearest.y) - y) * dy
+                if parallel and along > 20.0:
+                    closed_end = True
+                    break
+                if not parallel and other.length > 400.0:
+                    closed_end = True
+                    break
+            if closed_end:
+                continue
+            for ex0, ey0, ex1, ey1, _elen, eux, euy in cands:
+                if abs(dx * eux + dy * euy) < 0.98:
+                    continue
+                off0 = abs((ex0 - x) * -dy + (ey0 - y) * dx)
+                off1 = abs((ex1 - x) * -dy + (ey1 - y) * dx)
+                if off0 > 80.0 or off1 > 80.0:
+                    continue
+                a0 = (ex0 - x) * dx + (ey0 - y) * dy
+                a1 = (ex1 - x) * dx + (ey1 - y) * dy
+                lo, hi = min(a0, a1), max(a0, a1)
+                if hi < 200.0 or lo > DOOR_GAP_MM:
+                    continue
+                if min(hi, DOOR_GAP_MM) - max(lo, 0.0) < 400.0:
+                    continue
+                add(ex0, ey0, ex1, ey1)
+                near_along = min(a0, a1)
+                if 40.0 <= near_along <= DOOR_GAP_MM:
+                    if a0 <= a1:
+                        add(x, y, ex0, ey0)
+                    else:
+                        add(x, y, ex1, ey1)
+    return kept
+
+
 def _closed_lines(msp, segs, origin, boxes, open_doors):
     """라벨이 들어 있는 닫힌 면과, 그 면을 만든 벽선.
 
     벽만으로 닫히지 않으면, 벽 끝에 붙은 벽처럼 보이는 선까지 경계로 쓴다.
+    그래도 열리면, 끊긴 구간 안의 선을 벽으로 보고 벽 끝과 잇는다.
     """
     lx, ly = origin
     pad = 12000.0
@@ -1369,6 +1686,19 @@ def _closed_lines(msp, segs, origin, boxes, open_doors):
         if found is not None and not _touches_window(found, origin, pad + 2000):
             return lines, found, x_axes, y_axes, swings
         pad += 8000
+    opening = _opening_entity_lines(msp, lines, origin, pad + 2000)
+    corners = _open_corner_lines(lines, origin)
+    if opening or corners:
+        # 라벨 근처만 400 mm로 잇는다. 층 전체를 같은 너비로 막으면 선이 너무 많아진다.
+        near = box(lx - 20000.0, ly - 20000.0, lx + 15000.0, ly + 18000.0)
+        pool = lines + opening + corners
+        local = [ln for ln in pool if near.intersects(ln)]
+        far = [ln for ln in lines if not near.intersects(ln)]
+        closed = _cap_wall_ends(local, max(WALL_CAP_MM, 400.0)) + far
+        if len(closed) <= MAX_FACE_LINES:
+            found = _face_at(closed, lx, ly)
+            if found is not None and not _touches_window(found, origin, pad + 2000):
+                return closed, found, x_axes, y_axes, swings
     extra = _wallish_lines(msp, lines, origin, pad + 2000)
     merged = lines + extra
     if extra and len(merged) <= MAX_FACE_LINES:
@@ -1377,9 +1707,17 @@ def _closed_lines(msp, segs, origin, boxes, open_doors):
     else:
         found = None
     if found is None:
+        extra.extend(_opening_entity_lines(msp, lines, origin, pad + 2000))
         extra.extend(_continuing_wall_lines(msp, lines, origin, pad + 2000))
         merged = lines + extra
         if extra and len(merged) <= MAX_FACE_LINES:
+            closed = _cap_wall_ends(merged, WALL_CAP_MM)
+            found = _face_at(closed, lx, ly)
+    if found is None or _touches_window(found, origin, pad + 2000):
+        # 앞에서 넣은 보조선은 실을 닫지 못했고 선을 너무 늘린다. 끊긴 구간의 선만 더한다.
+        gap = _gap_entity_lines(msp, lines, origin, pad + 2000)
+        merged = lines + gap
+        if gap and len(merged) <= MAX_FACE_LINES:
             closed = _cap_wall_ends(merged, WALL_CAP_MM)
             found = _face_at(closed, lx, ly)
     if found is not None and not _touches_window(found, origin, pad + 2000):

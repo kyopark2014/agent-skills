@@ -4,10 +4,12 @@
 XA-S-{N}F 평면 블록이 없는 도면용 폴백.
 modelspace와 얕은 INSERT에서 큰 축정렬 사각형과
 '1층 평면도', 'B1F', '지하1층' 같은 제목을 짝짓는다.
+그것도 없으면 종이공간 제목과 켜진 평면 뷰포트를 쓴다.
 """
 
 from __future__ import annotations
 
+import math
 import re
 from collections import defaultdict
 from dataclasses import dataclass, field
@@ -17,6 +19,10 @@ MAX_EDGE_MM = 500_000.0
 MAX_ASPECT = 8.0
 AXIS_TOL_MM = 20.0
 MAX_STORED_LINES = 20_000
+_BAND_MM = 10_000.0
+_COMPANION_GAP_MM = 15_000.0
+_COMPANION_MIN_LINES = 1_000
+_BAND_MIN_LINES = 50
 
 
 def normalize_floor_token(floor: str) -> str:
@@ -699,6 +705,180 @@ def _collect_primitives(doc):
     return rects, lines, texts, truncated
 
 
+def _viewport_model_bbox(viewport) -> tuple[float, float, float, float] | None:
+    """켜진 평면 뷰포트가 보는 모델 범위. 배치용(id 1)과 꺼진 뷰포트는 뺀다."""
+    dxf = viewport.dxf
+    if int(dxf.status or 0) <= 0:
+        return None
+    if int(getattr(dxf, "id", 0) or 0) == 1:
+        return None
+    if int(getattr(dxf, "flags", 0) or 0) & 0x20000:
+        return None
+    try:
+        if not viewport.is_top_view:
+            return None
+        x0, y0, x1, y1 = viewport.get_modelspace_limits()
+    except Exception:
+        return None
+    if not _accept_size(x1 - x0, y1 - y0):
+        return None
+    return (float(x0), float(y0), float(x1), float(y1))
+
+
+def _paperspace_titles(layout) -> list[_TextHit]:
+    hits: list[_TextHit] = []
+    for entity in layout:
+        kind = entity.dxftype()
+        if kind in {"TEXT", "MTEXT"}:
+            raw = _entity_text(entity)
+            label = parse_floor_label(raw)
+            if not label:
+                continue
+            try:
+                x, y = float(entity.dxf.insert.x), float(entity.dxf.insert.y)
+            except Exception:
+                x, y = 0.0, 0.0
+            hits.append(_TextHit(raw, label, x, y, _text_height(entity)))
+            continue
+        if kind != "INSERT":
+            continue
+        try:
+            attribs = list(entity.attribs)
+        except Exception:
+            attribs = []
+        for attrib in attribs:
+            raw = str(getattr(attrib.dxf, "text", "") or "")
+            label = parse_floor_label(raw)
+            if not label:
+                continue
+            height = float(getattr(attrib.dxf, "height", 0) or 0)
+            hits.append(_TextHit(raw, label, 0.0, 0.0, height))
+    return hits
+
+
+def _companion_window(doc, window: tuple[float, float, float, float]):
+    """뷰포트와 같은 x 구간에서 아래로 떨어진 선 군집의 범위.
+
+    건축 밑그림과 설비 평면이 모델스페이스에 위아래로 놓인 경우다.
+    뷰포트 안에 선이 더 많으면 군집을 만들지 않는다.
+    """
+    x0, y0, x1, y1 = window
+    pad_x = max(5_000.0, (x1 - x0) * 0.15)
+    xa, xb = x0 - pad_x, x1 + pad_x
+    y_bins: dict[int, int] = defaultdict(int)
+    x_of_y: dict[int, dict[int, int]] = defaultdict(lambda: defaultdict(int))
+    inside = 0
+    for entity in doc.modelspace().query("LINE"):
+        mx = (float(entity.dxf.start.x) + float(entity.dxf.end.x)) / 2.0
+        my = (float(entity.dxf.start.y) + float(entity.dxf.end.y)) / 2.0
+        if mx < xa or mx > xb:
+            continue
+        if x0 <= mx <= x1 and y0 <= my <= y1:
+            inside += 1
+        yk = math.floor(my / _BAND_MM)
+        xk = math.floor(mx / _BAND_MM)
+        y_bins[yk] += 1
+        x_of_y[yk][xk] += 1
+
+    def near(yk: int) -> bool:
+        low = yk * _BAND_MM
+        high = low + _BAND_MM
+        return high > y0 - _COMPANION_GAP_MM and low < y1 + _COMPANION_GAP_MM
+
+    keys = sorted(k for k, count in y_bins.items() if count >= _BAND_MIN_LINES and not near(k))
+    if not keys:
+        return None
+    groups: list[list[int]] = [[keys[0]]]
+    for key in keys[1:]:
+        if key == groups[-1][-1] + 1:
+            groups[-1].append(key)
+        else:
+            groups.append([key])
+    best = max(groups, key=lambda group: sum(y_bins[key] for key in group))
+    total = sum(y_bins[key] for key in best)
+    if total < _COMPANION_MIN_LINES or total < inside:
+        return None
+    xs: dict[int, int] = defaultdict(int)
+    for key in best:
+        for xk, count in x_of_y[key].items():
+            xs[xk] += count
+    x_keys = [key for key, count in xs.items() if count >= _BAND_MIN_LINES]
+    if not x_keys:
+        return None
+    box = (
+        min(x_keys) * _BAND_MM,
+        min(best) * _BAND_MM,
+        (max(x_keys) + 1) * _BAND_MM,
+        (max(best) + 1) * _BAND_MM,
+    )
+    if not _accept_size(box[2] - box[0], box[3] - box[1]):
+        return None
+    if _iou(box, window) >= 0.2:
+        return None
+    return box
+
+
+def _dedupe_frames(frames: list[SheetFrame]) -> list[SheetFrame]:
+    unique: list[SheetFrame] = []
+    for frame in frames:
+        if any(_iou(frame.bbox, prev.bbox) >= 0.5 for prev in unique):
+            continue
+        unique.append(frame)
+    return unique
+
+
+def discover_paperspace_floors(doc) -> LayoutDiscovery:
+    """모델스페이스 도곽이 없을 때 종이공간 제목과 뷰포트로 층을 나눈다."""
+    warnings: list[str] = []
+    frames: list[SheetFrame] = []
+    companion_note = False
+    for layout in doc.layouts:
+        if not layout.is_any_paperspace:
+            continue
+        hits = _paperspace_titles(layout)
+        floors = {hit.floor for hit in hits}
+        if len(floors) != 1:
+            if len(floors) > 1:
+                warnings.append(
+                    f"종이공간 {layout.name!r}에 서로 다른 층 제목이 있어 그 레이아웃은 빼니다."
+                )
+            continue
+        best = max(hits, key=_title_score)
+        windows = []
+        for viewport in layout.query("VIEWPORT"):
+            box = _viewport_model_bbox(viewport)
+            if box:
+                windows.append(box)
+        windows = _dedupe_rects(windows)
+        if not windows:
+            warnings.append(
+                f"종이공간 {layout.name!r}의 제목 {best.text!r}에 켜진 평면 뷰포트가 없습니다."
+            )
+            continue
+        title = plain_text(best.text)
+        for box in windows:
+            frames.append(SheetFrame(best.floor, title, box, best.height))
+            companion = _companion_window(doc, box)
+            if companion is None:
+                continue
+            frames.append(SheetFrame(best.floor, title, companion, best.height))
+            companion_note = True
+    if companion_note:
+        warnings.append(
+            "뷰포트 밖에 선이 몰린 구간이 있어 같은 층을 둘로 나눕니다. 아래·왼쪽이 먼저입니다."
+        )
+    frames = _dedupe_frames(frames)
+    named = _assign_sheet_ids(frames, warnings) if frames else []
+    if not named:
+        warnings.append("종이공간 제목과 뷰포트로 구분할 층을 찾지 못했습니다.")
+    return LayoutDiscovery(
+        method="paperspace",
+        floors=[frame.floor for frame in named],
+        sheets=named,
+        warnings=warnings,
+    )
+
+
 def discover_block_floors(doc) -> list[str]:
     found: set[str] = set()
     for entity in doc.modelspace().query("INSERT"):
@@ -729,8 +909,8 @@ def discover_sheet_floors(doc) -> LayoutDiscovery:
 def discover_layout(doc, *, mode: str = "auto") -> LayoutDiscovery:
     """mode: auto | block | sheet.
 
-    auto는 XA-S-{N}F 평면 블록이 있으면 그 방식을 쓰고,
-    없으면 도곽·층 제목으로 넘긴다.
+    auto는 XA-S-{N}F 평면 블록, 모델스페이스 도곽·층 제목,
+    종이공간 제목·뷰포트 순으로 층을 나눈다.
     """
     if mode not in {"auto", "block", "sheet"}:
         raise ValueError(f"layout 오류: {mode!r}")
@@ -744,6 +924,18 @@ def discover_layout(doc, *, mode: str = "auto") -> LayoutDiscovery:
             warnings=["XA-S-{N}F 평면 블록이 없습니다."],
         )
     sheet = discover_sheet_floors(doc)
+    if sheet.floors:
+        if mode == "auto":
+            sheet.warnings.insert(0, "XA-S-{N}F 평면 블록이 없어 도곽과 층 제목으로 층을 구분했습니다.")
+        return sheet
+    if mode == "auto":
+        paperspace = discover_paperspace_floors(doc)
+        if paperspace.floors:
+            paperspace.warnings.insert(
+                0,
+                "XA-S-{N}F 평면 블록과 모델스페이스 도곽이 없어 종이공간 제목과 뷰포트를 사용했습니다.",
+            )
+            return paperspace
     if mode == "auto":
         sheet.warnings.insert(0, "XA-S-{N}F 평면 블록이 없어 도곽과 층 제목으로 층을 구분했습니다.")
     return sheet

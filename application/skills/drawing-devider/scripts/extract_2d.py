@@ -1153,7 +1153,7 @@ def _execute_extract_job(doc: Drawing, job: dict) -> dict:
     variant = job["variant"]
     try:
         out_dir = Path(job["out_dir"])
-        if job["method"] == "sheet":
+        if job["method"] in {"sheet", "paperspace"}:
             return extract_sheet_floor(
                 doc,
                 floor,
@@ -1316,7 +1316,7 @@ def main() -> int:
         print("[error] 층 블록과 도곽·층 제목을 모두 찾지 못했습니다.", file=sys.stderr)
         return 2
     targets = floors if floor_spec is None else floor_spec
-    if layout.method == "sheet":
+    if layout.method in {"sheet", "paperspace"}:
         missing = [floor for floor in targets if floor not in sheets]
         if missing:
             print(
