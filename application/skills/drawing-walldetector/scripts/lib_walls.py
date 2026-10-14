@@ -718,6 +718,30 @@ def _apply_candidate_overrides(
     return cond
 
 
+def text_box_entity_idxs(entities: list[DXFEntity]) -> set[int]:
+    """글상자. 닫힌 TBOX 사각형의 변은 벽 면이 아니다."""
+    found: set[int] = set()
+    for i, entity in enumerate(entities):
+        if entity.dxftype() != "LWPOLYLINE" or not entity.closed:
+            continue
+        if str(entity.dxf.layer).upper() != "TBOX":
+            continue
+        found.add(i)
+    return found
+
+
+def column_grid_entity_idxs(entities: list[DXFEntity]) -> set[int]:
+    """기둥 축 격자. 닫힌 XC 사각형의 변은 벽 면이 아니다."""
+    found: set[int] = set()
+    for i, entity in enumerate(entities):
+        if entity.dxftype() != "LWPOLYLINE" or not entity.closed:
+            continue
+        if str(entity.dxf.layer).upper() != "XC":
+            continue
+        found.add(i)
+    return found
+
+
 def detect_wall_keys(
     segs: list[Seg],
     *,
@@ -731,6 +755,7 @@ def detect_wall_keys(
     wall_pack_gap_mm: float | None = None,
     door_entity_idxs: set[int] | None = None,
     door_slots: list[tuple[bool, float, float, float, float]] | None = None,
+    skip_entity_idxs: set[int] | None = None,
 ) -> set[tuple[int, int]]:
     """평행 이중선 벽 세그먼트 키.
 
@@ -739,6 +764,7 @@ def detect_wall_keys(
     """
     doors = door_entity_idxs or set()
     slots = door_slots or []
+    skipped = skip_entity_idxs or set()
     wall: set[tuple[int, int]] = set()
     for profile in _wall_condition_profiles(conditions, project):
         tuned = _apply_candidate_overrides(
@@ -750,7 +776,7 @@ def detect_wall_keys(
             stair_count=stair_count,
             wall_pack_gap_mm=wall_pack_gap_mm,
         )
-        wall |= _detect_wall_keys_one(segs, tuned, doors, slots)
+        wall |= _detect_wall_keys_one(segs, tuned, doors, slots, skipped)
     return wall
 
 
@@ -759,6 +785,7 @@ def _detect_wall_keys_one(
     cond: dict,
     doors: set[int],
     slots: list[tuple[bool, float, float, float, float]],
+    skipped: set[int],
 ) -> set[tuple[int, int]]:
     """조건 하나에서 평행 이중선 벽 키를 고른다."""
     cand_cfg = cond["candidate"]
@@ -780,6 +807,7 @@ def _detect_wall_keys_one(
         and s.length >= min_len
         and (max_len is None or s.length <= max_len)
         and s.entity_idx not in doors
+        and s.entity_idx not in skipped
     ]
     wall: set[tuple[int, int]] = set()
 
@@ -1388,6 +1416,8 @@ def classify_entities(
     - 폴리라인은 벽 비율 ≥ entity_wall_ratio 일 때만 통째로 WALL
       (미만이면 세그먼트만 wall_segs 로 빨강)
     - 두께 0으로 겹친 사각 공유 변은 벽이 아니다. 평행 이중선만 벽이다.
+    - 글상자(TBOX) 변은 벽 면이 아니다. 나란한 중심선도 벽으로 올리지 않는다.
+    - 기둥 축 격자(XC) 변은 벽 면이 아니다.
     """
     profiles = _wall_condition_profiles(conditions, project)
     angle_tol = max(float(profile["candidate"]["angle_tolerance_deg"]) for profile in profiles)
@@ -1396,6 +1426,8 @@ def classify_entities(
         angle_tol_deg=angle_tol,
     )
     door_x_idxs = find_door_x_idxs(entities)
+    text_boxes = text_box_entity_idxs(entities)
+    column_grids = column_grid_entity_idxs(entities)
     wall_keys = detect_wall_keys(
         segs,
         conditions=profiles,
@@ -1404,12 +1436,13 @@ def classify_entities(
         thick_max_mm=thick_max_mm,
         door_entity_idxs=door_x_idxs,
         door_slots=_door_opening_slots(entities, door_x_idxs),
+        skip_entity_idxs=text_boxes | column_grids,
     )
     # 여닫이문 잎만 빼고 문끝 벽은 올린다. 잎에 가까운 다른 도형은 문으로 넣지 않는다.
     door_drop, door_jamb_keys = _apply_swing_doors(entities, segs, wall_keys)
     hbeam_idxs = find_hbeam_column_idxs(entities)
     wall_entity_idxs: set[int] = set(hbeam_idxs)
-    skip_idxs: set[int] = set(door_x_idxs) | door_drop
+    skip_idxs: set[int] = set(door_x_idxs) | door_drop | text_boxes | column_grids
     n_furniture = 0
     n_hatch = 0
     n_hbeam = len(hbeam_idxs)

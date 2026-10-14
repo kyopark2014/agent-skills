@@ -2912,6 +2912,19 @@ button.config-popover-choice.is-selected {
   background: #f85149;
 }
 
+.drawing-header-actions {
+  margin-left: auto;
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+  flex-shrink: 1;
+}
+
+.drawing-header-actions .drawing-back-btn {
+  margin-left: 0;
+}
+
 .drawing-back-btn {
   margin-left: auto;
   flex-shrink: 0;

@@ -10,7 +10,9 @@ from pathlib import Path
 
 from fastapi import HTTPException
 
-from application.api.routes_drawings import list_drawings, list_floor_catalog
+from unittest.mock import patch
+
+from application.api.routes_drawings import _artifacts_dir, list_drawings, list_floor_catalog
 
 
 class DrawingIdTests(unittest.TestCase):
@@ -72,6 +74,43 @@ class DrawingIdTests(unittest.TestCase):
             self.assertEqual([item["drawing_id"] for item in listed["drawings"]], ["clubhouse_multi"])
             with self.assertRaises(HTTPException):
                 list_floor_catalog(artifacts, "../secret")
+
+    def test_local_login_without_catalog_reads_ksdyb_drawing_list(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            ksdyb = root / "ksdyb" / "artifacts"
+            ksdyb.mkdir(parents=True)
+            (ksdyb / "drawing_list.json").write_text(
+                json.dumps(
+                    {
+                        "drawings": [
+                            {
+                                "drawing_id": "garak_plaza",
+                                "folder": "garak_plaza",
+                                "source_filename": "garak.dxf",
+                                "created_at": "2026-10-14T00:00:00+09:00",
+                                "status": "ready",
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (root / "lge" / "artifacts").mkdir(parents=True)
+            with patch("application.utils.SESSION_STORAGE_DIR", raw):
+                artifacts = _artifacts_dir("lge")
+            self.assertEqual(artifacts, ksdyb.resolve())
+            self.assertEqual(
+                [item["drawing_id"] for item in list_drawings(artifacts)["drawings"]],
+                ["garak_plaza"],
+            )
+            own = root / "lge" / "artifacts"
+            (own / "drawing_list.json").write_text(
+                json.dumps({"drawings": [{"drawing_id": "own_plan", "folder": "own_plan", "status": "ready"}]}),
+                encoding="utf-8",
+            )
+            with patch("application.utils.SESSION_STORAGE_DIR", raw):
+                self.assertEqual(_artifacts_dir("lge"), own.resolve())
 
 
 if __name__ == "__main__":

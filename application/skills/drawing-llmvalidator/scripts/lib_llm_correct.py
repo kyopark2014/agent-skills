@@ -543,6 +543,8 @@ def find_promote_segments(
     for s in base:
         if s.length < min_len_mm:
             continue
+        if _grid_frame_edge(s) or _text_box_edge(s):
+            continue
         if s.is_h:
             buckets = [_bucket(s.ortho) + d * 50 for d in (-2, -1, 0, 1, 2)]
             iv: list[tuple[float, float, float]] = []
@@ -4470,6 +4472,40 @@ def filter_promote_away_from_open_halls(
     ]
 
 
+def _grid_frame_edge(seg: AxisSeg) -> bool:
+    """기둥 축 격자 변. 양쪽이 15 m를 넘는 닫힌 사각형은 벽 면이 아니다."""
+    entity = seg.entity
+    if entity is None or getattr(entity, "dxftype", lambda: "")() != "LWPOLYLINE":
+        return False
+    if not entity.closed:
+        return False
+    pts = [(float(p[0]), float(p[1])) for p in entity.get_points("xy")]
+    if len(pts) < 4:
+        return False
+    xs = [p[0] for p in pts]
+    ys = [p[1] for p in pts]
+    width = max(xs) - min(xs)
+    height = max(ys) - min(ys)
+    return min(width, height) >= 15000.0 and max(width, height) >= 15000.0
+
+
+def _text_box_edge(seg: AxisSeg) -> bool:
+    """글상자 변. 짧은 변이 벽 두께보다 두껍고 800 mm 안팎인 닫힌 사각형."""
+    entity = seg.entity
+    if entity is None or getattr(entity, "dxftype", lambda: "")() != "LWPOLYLINE":
+        return False
+    if not entity.closed:
+        return False
+    pts = [(float(p[0]), float(p[1])) for p in entity.get_points("xy")]
+    if not (4 <= len(pts) <= 5):
+        return False
+    xs = [p[0] for p in pts]
+    ys = [p[1] for p in pts]
+    short = min(max(xs) - min(xs), max(ys) - min(ys))
+    long = max(max(xs) - min(xs), max(ys) - min(ys))
+    return 700.0 <= short <= 900.0 and long >= 1200.0
+
+
 def promote_corridor_walls(
     segs: list[AxisSeg],
     *,
@@ -4478,9 +4514,14 @@ def promote_corridor_walls(
     """복도 양측처럼 긴 이중선 BASE → WALL 승격 (갭 조건 없이).
 
     가구·계단 해칭은 보통 이 길이의 단일 이중선이 아니므로 min_len으로 걸러낸다.
+    글상자 변, 기둥 축 격자 변과만 나란한 중심선은 이중선이 아니다.
     """
     wall = [s for s in segs if s.layer == WALL_LAYER]
-    base = [s for s in segs if s.layer == BASE_LAYER]
+    base = [
+        s
+        for s in segs
+        if s.layer == BASE_LAYER and not _text_box_edge(s) and not _grid_frame_edge(s)
+    ]
     h_wall, v_wall = _index_wall_runs(wall)
     out: list[AxisSeg] = []
     seen: set[tuple[float, float, float, float]] = set()
@@ -6144,14 +6185,15 @@ def promote_collinear_room_walls(
     """
     wall = [s for s in segs if s.layer == WALL_LAYER]
     base = [s for s in segs if s.layer == BASE_LAYER]
+    faces = [s for s in base if not _grid_frame_edge(s) and not _text_box_edge(s)]
     h_wall, v_wall = _index_wall_runs(wall)
     out: list[AxisSeg] = []
     seen: set[tuple[float, float, float, float]] = set()
 
-    for s in base:
+    for s in faces:
         if not (min_len_mm <= s.length <= max_len_mm):
             continue
-        if not _has_parallel_pair(s, base):
+        if not _has_parallel_pair(s, faces):
             continue
         if s.is_h:
             iv: list[tuple[float, float, float]] = []

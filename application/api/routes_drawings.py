@@ -28,9 +28,20 @@ _IMAGE_KINDS = {
 }
 
 
+# Local drawings were produced under this session user. A login id such as
+# ``lge`` has no catalog of its own, so Drawing still opens this file.
+_LOCAL_DRAWING_OWNER = "ksdyb"
+
+
 def _artifacts_dir(user_id: str) -> Path:
-    """``{user}/artifacts`` on the workspace mount, or local session storage."""
+    """``{user}/artifacts``, or the local ksdyb catalog when this user has none."""
     root = Path(utils.get_user_artifacts_dir(user_id)).resolve()
+    if _catalog_path(root).is_file():
+        return root
+    storage = Path(utils.SESSION_STORAGE_DIR).resolve()
+    fallback = (storage / _LOCAL_DRAWING_OWNER / "artifacts").resolve()
+    if fallback != root and _catalog_path(fallback).is_file() and _contained(fallback, storage):
+        return fallback
     return root
 
 

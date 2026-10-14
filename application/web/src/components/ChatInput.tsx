@@ -39,6 +39,9 @@ interface Props {
   onSend: (text: string, files?: string[]) => void;
   /** Task whose uploads stay attached across screen changes. */
   taskId?: string | null;
+  /** Prefill the composer once, for a task started from an existing upload. */
+  draft?: { taskId: string; text: string } | null;
+  onDraftApplied?: () => void;
   onRagUploadComplete?: (message: string) => void;
 }
 
@@ -68,6 +71,8 @@ export function ChatInput({
   onStop,
   onSend,
   taskId = null,
+  draft = null,
+  onDraftApplied,
   onRagUploadComplete,
 }: Props) {
   const [value, setValue] = useState("");
@@ -87,6 +92,15 @@ export function ChatInput({
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const isComposingRef = useRef(false);
   const submitAfterCompositionRef = useRef(false);
+  const onDraftAppliedRef = useRef(onDraftApplied);
+  onDraftAppliedRef.current = onDraftApplied;
+
+  useEffect(() => {
+    if (!draft || !taskId || draft.taskId !== taskId) return;
+    setValue(draft.text);
+    onDraftAppliedRef.current?.();
+    textareaRef.current?.focus();
+  }, [draft, taskId]);
 
   const {
     uploading,

@@ -6,6 +6,7 @@ import { MenuIcon } from "./SidebarIcons";
 interface Props {
   onMenuClick?: () => void;
   onBack: () => void;
+  onOpenUploads?: () => void;
   onOpen: (drawingId: string) => void;
 }
 
@@ -23,7 +24,7 @@ function formatCreatedAt(value: string | undefined): string {
   });
 }
 
-export function DrawingListView({ onMenuClick, onBack, onOpen }: Props) {
+export function DrawingListView({ onMenuClick, onBack, onOpenUploads, onOpen }: Props) {
   const [drawings, setDrawings] = useState<DrawingSummary[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -86,9 +87,14 @@ export function DrawingListView({ onMenuClick, onBack, onOpen }: Props) {
           <MenuIcon className="sidebar-icon" />
         </button>
         <span className="main-header-title">Drawing</span>
-        <button type="button" className="drawing-back-btn" onClick={onBack}>
-          채팅으로
-        </button>
+        <div className="drawing-header-actions">
+          <button type="button" className="drawing-back-btn" onClick={onOpenUploads}>
+            도면 가져오기
+          </button>
+          <button type="button" className="drawing-back-btn" onClick={onBack}>
+            채팅으로
+          </button>
+        </div>
       </header>
       <div className="drawing-list-body">
         {loading ? (

@@ -154,6 +154,27 @@ interface UseFileUploadOptions {
   taskId?: string | null;
 }
 
+export function seedTaskLoadedFile(taskId: string, file: LoadedFile) {
+  const path = (file.path || "").trim();
+  const name = (file.name || "").trim();
+  if (!taskId.trim() || !path || !name) return;
+  const key = uploadSessionKey(taskId);
+  updateUploadSession(key, (session) => {
+    const next = session.loadedFiles.filter((item) => item.path !== path);
+    return {
+      ...session,
+      loadedFiles: [
+        ...next,
+        {
+          path,
+          name,
+          size: Number.isFinite(file.size) && file.size > 0 ? file.size : 0,
+        },
+      ],
+    };
+  });
+}
+
 export function useFileUpload({ disabled = false, taskId = null }: UseFileUploadOptions = {}) {
   const sessionKey = uploadSessionKey(taskId);
   const sessionKeyRef = useRef(sessionKey);

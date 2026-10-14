@@ -133,6 +133,15 @@ export interface DrawingFloor {
   label: boolean;
 }
 
+export interface UploadDrawing {
+  file_name: string;
+  size: number;
+  created_at: string;
+  status: "used" | "ready" | string;
+  drawing_id: string | null;
+  workspace_path: string;
+}
+
 export interface DrawingCatalog {
   drawing_id: string;
   folder: string;
@@ -447,6 +456,13 @@ export const api = {
   deleteDrawing: (drawingId: string) =>
     request<{ ok: boolean; drawing_id: string }>(
       `/api/drawings/${encodeURIComponent(drawingId)}`,
+      { method: "DELETE" },
+    ),
+  listUploadDrawings: () =>
+    request<{ files: UploadDrawing[] }>("/api/files/uploads"),
+  deleteUploadDrawing: (fileName: string) =>
+    request<{ ok: boolean; file_name: string }>(
+      `/api/files/uploads?name=${encodeURIComponent(fileName)}`,
       { method: "DELETE" },
     ),
   getLlmGateway: () =>

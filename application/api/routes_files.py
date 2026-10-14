@@ -4,11 +4,17 @@ import uuid
 from pathlib import Path
 from urllib.parse import quote
 
-from fastapi import APIRouter, File, HTTPException, Request, UploadFile
+from fastapi import APIRouter, File, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse
 
 from application.api.routes_auth import require_user_id
+from application.api.routes_drawings import _artifacts_dir, load_drawing_catalog
 from application import utils
+from application.services.upload_drawing_service import (
+    UploadDrawingError,
+    delete_upload_drawing,
+    list_upload_drawings,
+)
 from application.viewer_html import build_markdown_viewer_page
 
 logger = logging.getLogger("routes_files")
@@ -62,6 +68,30 @@ def _validate_image_filename(filename: str) -> str:
     stem = os.path.splitext(name)[0] or "pasted"
     unique = uuid.uuid4().hex[:10]
     return f"{stem}_{unique}{ext}"
+
+
+@router.get("/uploads")
+def get_upload_drawings(request: Request) -> dict:
+    """List dwg/dxf/dwf files under the user's Load-files upload directory."""
+    user_id = require_user_id(request)
+    catalog = load_drawing_catalog(_artifacts_dir(user_id))
+    try:
+        return {"files": list_upload_drawings(user_id, catalog)}
+    except UploadDrawingError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+
+
+@router.delete("/uploads")
+def delete_upload_drawing_route(
+    request: Request,
+    name: str = Query(..., min_length=1),
+) -> dict:
+    """Delete one drawing from the user's upload directory after the client confirms."""
+    user_id = require_user_id(request)
+    try:
+        return delete_upload_drawing(user_id, name)
+    except UploadDrawingError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
 
 
 @router.post("/upload")

@@ -18,7 +18,8 @@ import {
   shouldAppendAssistantMessage,
   stabilizeMessageKeys,
 } from "./services/messageService";
-import { api } from "./api";
+import { api, type UploadDrawing } from "./api";
+import { seedTaskLoadedFile } from "./hooks/useFileUpload";
 import type { AppConfig, Message, Task } from "./types";
 import { Sidebar } from "./components/Sidebar";
 import { ChatThread } from "./components/ChatThread";
@@ -27,6 +28,7 @@ import { GoogleLoginModal } from "./components/GoogleLoginModal";
 import { Dashboard } from "./components/Dashboard";
 import { DrawingListView } from "./components/DrawingListView";
 import { DrawingView } from "./components/DrawingView";
+import { UploadDrawingListView } from "./components/UploadDrawingListView";
 import {
   SIDEBAR_W_DEFAULT,
   clampSidebarWidth,
@@ -46,6 +48,7 @@ const MOBILE_BREAKPOINT_PX = 768;
 const BOOT_ERROR_MESSAGE =
   "Failed to load application configuration. Please try again.";
 const TASK_ERROR_MESSAGE = "Task operation failed. Please try again.";
+const UPLOAD_START_PROMPT = "drawing-areasizing으로 분석하세요.";
 const CHAT_ERROR_MESSAGE = "Failed to send message. Please try again.";
 const LOAD_MESSAGES_ERROR_MESSAGE =
   "Failed to load messages. Please try again.";
@@ -70,7 +73,9 @@ export default function App() {
   const [sidebarResizing, setSidebarResizing] = useState(false);
   const sidebarWidthRef = useRef(sidebarWidth);
   sidebarWidthRef.current = sidebarWidth;
-  const [view, setView] = useState<"chat" | "dashboard" | "drawings" | "drawing">("chat");
+  const [view, setView] = useState<"chat" | "dashboard" | "drawings" | "drawing" | "uploads">("chat");
+  const [drawingReturnView, setDrawingReturnView] = useState<"drawings" | "uploads">("drawings");
+  const [chatDraft, setChatDraft] = useState<{ taskId: string; text: string } | null>(null);
   const [activeDrawingId, setActiveDrawingId] = useState<string | null>(null);
   const [queuedByTaskId, setQueuedByTaskId] = useState<
     Record<string, QueuedMessage[]>
@@ -426,6 +431,41 @@ export default function App() {
     if (config?.projectName) {
       document.title = formatBrandTitle(config.projectName);
     }
+  }
+
+  async function handleStartUploadDrawing(file: UploadDrawing) {
+    if (!config) {
+      throw new Error("로그인이 필요합니다.");
+    }
+    const defaults = buildNewTaskDefaults(config, activeTask);
+    const canEnableGateway =
+      Boolean(config.llm_gateway_configured) && llmGatewayReady;
+    const task = await appDataService.createTask({
+      ...defaults,
+      llm_gateway_enabled: canEnableGateway
+        ? (activeTask?.llm_gateway_enabled ?? true)
+        : false,
+    });
+    seedTaskLoadedFile(task.id, {
+      path: file.workspace_path,
+      name: file.file_name,
+      size: file.size,
+    });
+    setTasks((prev) => [task, ...prev]);
+    setActiveTaskId(task.id);
+    setMessages([]);
+    setChatDraft({ taskId: task.id, text: UPLOAD_START_PROMPT });
+    setConfig((prev) =>
+      prev
+        ? {
+            ...prev,
+            default_skills: task.skills,
+            default_mcp_servers: task.mcp_servers,
+          }
+        : prev,
+    );
+    setView("chat");
+    setSidebarOpen(false);
   }
 
   async function handleNewTask() {
@@ -815,7 +855,7 @@ export default function App() {
               }
             : undefined
         }
-        drawingActive={view === "drawings" || view === "drawing"}
+        drawingActive={view === "drawings" || view === "drawing" || view === "uploads"}
         onOpenDrawing={() => {
           setView("drawings");
           setSidebarOpen(false);
@@ -833,14 +873,28 @@ export default function App() {
             key={activeDrawingId}
             drawingId={activeDrawingId}
             onMenuClick={() => setSidebarOpen(true)}
-            onBack={() => setView("drawings")}
+            onBack={() => setView(drawingReturnView)}
+          />
+        ) : view === "uploads" ? (
+          <UploadDrawingListView
+            onMenuClick={() => setSidebarOpen(true)}
+            onBackToDrawings={() => setView("drawings")}
+            onBackToChat={() => setView("chat")}
+            onOpen={(drawingId) => {
+              setActiveDrawingId(drawingId);
+              setDrawingReturnView("uploads");
+              setView("drawing");
+            }}
+            onStart={handleStartUploadDrawing}
           />
         ) : view === "drawings" ? (
           <DrawingListView
             onMenuClick={() => setSidebarOpen(true)}
             onBack={() => setView("chat")}
+            onOpenUploads={() => setView("uploads")}
             onOpen={(drawingId) => {
               setActiveDrawingId(drawingId);
+              setDrawingReturnView("drawings");
               setView("drawing");
             }}
           />
@@ -864,6 +918,8 @@ export default function App() {
                 onStop={handleStop}
                 onSend={handleSend}
                 taskId={activeTaskId}
+                draft={chatDraft}
+                onDraftApplied={() => setChatDraft(null)}
                 onRagUploadComplete={handleRagUploadComplete}
               />
             }
