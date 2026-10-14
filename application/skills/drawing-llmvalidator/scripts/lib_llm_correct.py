@@ -16511,7 +16511,7 @@ def close_leaking_wall_ends(msp) -> int:
             continue
         name = ev.norm_name(text)
         folded = name.upper()
-        if any(token in folded for token in ("도로", "부지", "인승", "ELEV", "창고", "차고", "화장실", "입구", "출구", "상부OPEN")):
+        if ev.is_excluded_area_label(text) or any(token in folded for token in ("도로", "부지", "인승", "ELEV", "창고", "차고", "화장실", "입구", "출구", "상부OPEN")):
             continue
         if folded in {"WC", "W.C", "W.C."} or folded.startswith("WC(") or folded.startswith("W.C("):
             continue
@@ -21008,7 +21008,7 @@ def promote_curved_corner_walls(msp) -> int:
 def _nonarea_room_anchor(text: str) -> bool:
     folded = text.replace(" ", "")
     token = folded.upper()
-    if "화장실" in folded or "창고" in folded or "차고" in folded:
+    if any(word in folded for word in ("화장실", "창고", "차고")) or _excluded_area_text(text):
         return True
     if token in {"WC", "W.C", "W.C.", "DA", "D.A", "D.A."}:
         return True
@@ -21094,8 +21094,111 @@ def _promote_room_enclosure(msp, anchors: list[tuple[float, float]]) -> int:
     return n
 
 
+def _excluded_area_text(text: str) -> bool:
+    """면적에서 빼는 실명. drawing-roomevaluator 와 같은 이름이다."""
+    return _load_room_eval().is_excluded_area_label(text)
+
+
+def _promote_excluded_area_bounds(msp) -> int:
+    """방풍실·보관실·퇴식대·EPS를 둘러싼 회색 면을 벽으로 올린다.
+
+    라벨 양쪽에 면이 있거나 한쪽이 이미 벽이면 남은 면을 올린다.
+    그 면에서 40–280 mm 떨어진 같은 방향 면도 벽이다.
+    """
+    anchors = [(x, y) for x, y, text in _iter_text_labels(msp) if _excluded_area_text(text)]
+    if not anchors:
+        return 0
+    segs = [seg for seg in _core_segments(msp) if 400.0 <= seg["length"] <= 8000.0]
+    painted: set[int] = set()
+    n = 0
+
+    def _off(seg: dict, px: float, py: float) -> float:
+        return (px - seg["x0"]) * seg["nx"] + (py - seg["y0"]) * seg["ny"]
+
+    def _along(seg: dict, px: float, py: float) -> float:
+        return (px - seg["x0"]) * seg["ux"] + (py - seg["y0"]) * seg["uy"]
+
+    def _take(seg: dict) -> None:
+        nonlocal n
+        entity = seg["entity"]
+        if seg["layer"] != BASE_LAYER or id(entity) in painted:
+            return
+        if _paint_layer(entity, WALL_LAYER, WALL_COLOR):
+            painted.add(id(entity))
+            seg["layer"] = WALL_LAYER
+            n += 1
+
+    for px, py in anchors:
+        groups: dict[int, list[dict]] = {}
+        for seg in segs:
+            along = _along(seg, px, py)
+            if along < -250.0 or along > seg["length"] + 250.0:
+                continue
+            off = _off(seg, px, py)
+            if not (80.0 <= abs(off) <= 4200.0):
+                continue
+            groups.setdefault(seg["bin"], []).append(seg)
+        seeds: list[dict] = []
+        for items in groups.values():
+            for sign in (1.0, -1.0):
+                side = [seg for seg in items if _off(seg, px, py) * sign > 0.0]
+                other = [seg for seg in items if _off(seg, px, py) * sign < 0.0 and seg["length"] >= 400.0]
+                if not side or not other:
+                    continue
+                near = min(side, key=lambda seg: abs(_off(seg, px, py)))
+                far = min(other, key=lambda seg: abs(_off(seg, px, py)))
+                gap = abs(_off(near, px, py)) + abs(_off(far, px, py))
+                if not (700.0 <= gap <= 4500.0) or near["length"] < 800.0:
+                    continue
+                if (
+                    near["layer"] == BASE_LAYER
+                    and far["layer"] == BASE_LAYER
+                    and min(near["length"], far["length"]) < 0.45 * max(near["length"], far["length"])
+                ):
+                    continue
+                if near["layer"] == BASE_LAYER:
+                    seeds.append(near)
+        for items in groups.values():
+            for sign in (1.0, -1.0):
+                walls = [
+                    seg for seg in items
+                    if seg["layer"] == WALL_LAYER and seg["length"] >= 700.0 and _off(seg, px, py) * sign > 0.0
+                ]
+                if walls:
+                    seeds.append(min(walls, key=lambda seg: abs(_off(seg, px, py))))
+        ends: list[dict] = []
+        for seed in seeds:
+            reach = seed["length"] + 600.0
+            for bin_id, items in groups.items():
+                if not (70.0 <= _ang_delta(seed["bin"], bin_id) <= 110.0):
+                    continue
+                for sign in (1.0, -1.0):
+                    side = [
+                        seg for seg in items
+                        if seg["layer"] == BASE_LAYER and seg["length"] >= 800.0 and _off(seg, px, py) * sign > 0.0
+                    ]
+                    if not side:
+                        continue
+                    near = min(side, key=lambda seg: abs(_off(seg, px, py)))
+                    if abs(_off(near, px, py)) <= reach:
+                        ends.append(near)
+        for seed in seeds + ends:
+            _take(seed)
+            seed_off = _off(seed, px, py)
+            for seg in groups.get(seed["bin"], []):
+                if seg["layer"] != BASE_LAYER:
+                    continue
+                delta = abs(_off(seg, px, py) - seed_off)
+                if not (40.0 <= delta <= 280.0):
+                    continue
+                if abs(_off(seg, px, py)) > abs(seed_off) + 300.0:
+                    continue
+                _take(seg)
+    return n
+
+
 def promote_nonarea_enclosures(msp) -> int:
-    """화장실·창고·차고·DA는 면적에서 빠지므로 둘러싼 벽을 WALL로 올린다.
+    """화장실·창고·차고·방풍실·보관실·퇴식대·DA는 면적에서 빠지므로 둘러싼 벽을 WALL로 올린다.
 
     사방으로 처음 만나는 긴 선의 바깥에 벽이 한 겹 더 있을 때만 올린다.
     샤프트 안 X와 짧은 가구선은 남긴다.
@@ -21184,7 +21287,7 @@ def promote_nonarea_enclosures(msp) -> int:
                     painted.add(id(seg["entity"]))
                     seg["layer"] = WALL_LAYER
                     n += 1
-    return n + _promote_room_enclosure(msp, room_anchors)
+    return n + _promote_room_enclosure(msp, room_anchors) + _promote_excluded_area_bounds(msp)
 
 
 def promote_collinear_wall_continuations(msp) -> int:
@@ -21374,6 +21477,129 @@ def promote_diagonal_wall_turns(msp) -> int:
     return n
 
 
+def promote_mullion_diagonal_walls(msp) -> int:
+    """멀리언이 반복된 사선 이중선은 벽이다.
+
+    수평·수직에서 8° 넘게 기운 두 선이 15–45 mm로 나란하고,
+    그 면을 따라 120–280 mm 수직 멀리언이 반복되면 그 긴 면을 벽으로 둔다.
+    같은 방향에서 40–280 mm 떨어진 2 m 이상 면도 함께 올린다.
+    멀리언 짧은 선은 벽 경계로 두지 않는다.
+    """
+    axis_limit = math.radians(8.0)
+    diags: list[tuple] = []
+    shorts: list[tuple] = []
+    for entity in _entities(msp):
+        if _dxftype(entity) != "LINE":
+            continue
+        layer = getattr(entity.dxf, "layer", None)
+        if layer not in (WALL_LAYER, BASE_LAYER):
+            continue
+        try:
+            x0, y0, x1, y1 = _line_xy(entity)
+        except Exception:  # noqa: BLE001
+            continue
+        length = math.hypot(x1 - x0, y1 - y0)
+        if length < 80.0:
+            continue
+        ang = math.atan2(y1 - y0, x1 - x0)
+        if ang < 0.0 or ang >= math.pi:
+            x0, y0, x1, y1 = x1, y1, x0, y0
+            ang = math.atan2(y1 - y0, x1 - x0)
+            length = math.hypot(x1 - x0, y1 - y0)
+        ux, uy = math.cos(ang), math.sin(ang)
+        item = (x0, y0, x1, y1, length, ux, uy, -uy, ux, entity, layer)
+        if length <= 320.0:
+            shorts.append(item)
+            continue
+        if length < 1500.0:
+            continue
+        if ang < axis_limit or ang > math.pi - axis_limit or abs(ang - math.pi / 2.0) < axis_limit:
+            continue
+        diags.append(item)
+    if len(diags) < 2 or not shorts:
+        return 0
+
+    def _along(item, x: float, y: float) -> float:
+        return (x - item[0]) * item[5] + (y - item[1]) * item[6]
+
+    def _perp(item, x: float, y: float) -> float:
+        return (x - item[0]) * item[7] + (y - item[1]) * item[8]
+
+    def _overlap(a, b) -> float:
+        lo = max(0.0, min(_along(a, b[0], b[1]), _along(a, b[2], b[3])))
+        hi = min(a[4], max(_along(a, b[0], b[1]), _along(a, b[2], b[3])))
+        return hi - lo
+
+    def _gap(a, b) -> float | None:
+        if abs(a[5] * b[5] + a[6] * b[6]) < 0.995:
+            return None
+        mx, my = (b[0] + b[2]) * 0.5, (b[1] + b[3]) * 0.5
+        dist = abs(_perp(a, mx, my))
+        if not (15.0 <= dist <= 45.0):
+            return None
+        if _overlap(a, b) < 3000.0:
+            return None
+        return dist
+
+    def _touches_rail(rail, tick) -> bool:
+        d0 = abs(_perp(rail, tick[0], tick[1]))
+        d1 = abs(_perp(rail, tick[2], tick[3]))
+        return min(d0, d1) <= 45.0 and max(d0, d1) <= 320.0
+
+    painted: set[int] = set()
+    n = 0
+
+    def _take(item) -> None:
+        nonlocal n
+        entity = item[9]
+        if id(entity) in painted or item[4] < 2000.0:
+            return
+        painted.add(id(entity))
+        if _paint_layer(entity, WALL_LAYER, WALL_COLOR):
+            n += 1
+
+    for index, line in enumerate(diags):
+        for other_index, mate in enumerate(diags):
+            if other_index <= index:
+                continue
+            if max(line[4], mate[4]) < 8000.0 or min(line[4], mate[4]) < 4000.0:
+                continue
+            if _gap(line, mate) is None:
+                continue
+            span_lo = max(0.0, min(_along(line, mate[0], mate[1]), _along(line, mate[2], mate[3])))
+            span_hi = min(line[4], max(_along(line, mate[0], mate[1]), _along(line, mate[2], mate[3])))
+            span = span_hi - span_lo
+            stations: list[float] = []
+            for tick in shorts:
+                if tick[4] < 120.0 or tick[4] > 280.0:
+                    continue
+                if abs(tick[5] * line[5] + tick[6] * line[6]) > 0.30:
+                    continue
+                mx, my = (tick[0] + tick[2]) * 0.5, (tick[1] + tick[3]) * 0.5
+                along = _along(line, mx, my)
+                if along < span_lo - 100.0 or along > span_hi + 100.0:
+                    continue
+                if _touches_rail(line, tick) or _touches_rail(mate, tick):
+                    stations.append(along)
+            if len(stations) < max(12, int(span / 1200.0)):
+                continue
+            stations.sort()
+            if stations[-1] - stations[0] < 0.55 * span:
+                continue
+            _take(line)
+            _take(mate)
+            for face in diags:
+                if id(face[9]) in painted or face[4] < 2000.0:
+                    continue
+                if abs(face[5] * line[5] + face[6] * line[6]) < 0.995:
+                    continue
+                mx, my = (face[0] + face[2]) * 0.5, (face[1] + face[3]) * 0.5
+                dist = abs(_perp(line, mx, my))
+                if 40.0 <= dist <= 280.0 and _overlap(line, face) >= 1500.0:
+                    _take(face)
+    return n
+
+
 def promote_service_core_walls(msp) -> int:
     """EPS, PS, 엘리베이터, 계단은 벽이다.
 
@@ -21384,7 +21610,8 @@ def promote_service_core_walls(msp) -> int:
     anchors: list[tuple[float, float]] = []
     for x, y, text in _iter_text_labels(msp):
         token = text.strip().upper().replace(" ", "")
-        if token in {"EPS", "PS"} or token.startswith("ELEV"):
+        shaft = token.replace(".", "")
+        if re.fullmatch(r"(?:EPS|PS)(?:[#＃-]?\d+)?", shaft) or token.startswith("ELEV") or shaft.startswith("ELEV"):
             anchors.append((x, y))
     n = _promote_core_rectangles(msp, segs, anchors)
     n += _promote_stair_runs(msp, segs)
@@ -21855,6 +22082,7 @@ def apply_corrections(
     n_promoted += promote_curved_corner_walls(msp)
     n_promoted += promote_collinear_wall_continuations(msp)
     n_promoted += promote_diagonal_wall_turns(msp)
+    n_promoted += promote_mullion_diagonal_walls(msp)
 
     n_wall = sum(1 for e in _entities(msp) if e.dxf.layer == WALL_LAYER)
     n_base = sum(1 for e in _entities(msp) if e.dxf.layer == BASE_LAYER)

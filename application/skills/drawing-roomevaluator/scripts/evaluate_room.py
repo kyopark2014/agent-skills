@@ -32,6 +32,10 @@ JOIN_MM = 80.0
 DOOR_GAP_MM = 2400.0
 DOOR_TOUCH_MM = 450.0
 WALL_CAP_MM = 300.0
+# 끝점마다 잇는 이웃 수. 이중선 끝막음은 가까운 몇 선이면 된다.
+CAP_PER_END = 3
+# 이보다 많은 선은 실 하나가 아니라 층 전체다. node/polygonize 를 하지 않는다.
+MAX_FACE_LINES = 12000
 SNAP_MM = 40.0
 COLUMN_MIN_MM = 450.0
 COLUMN_MAX_MM = 1500.0
@@ -85,11 +89,23 @@ def _roomish(text: str) -> bool:
     return re.search(r"[가-힣]", name) is not None
 
 
+def is_excluded_area_label(text: str) -> bool:
+    """면적과 실 라벨에서 빼는 이름. 방풍실, 보관실, 퇴식대, 샤워실, 고압, 저압, 계단실, 복도, EPS."""
+    name = norm_name(text)
+    folded = name.upper()
+    if any(token in folded for token in ("방풍실", "보관실", "퇴식대", "샤워실", "고압", "저압", "계단실", "복도")):
+        return True
+    shaft = folded.replace(".", "")
+    return re.fullmatch(r"(?:EPS|PS)(?:[#＃-]?\d+)?", shaft) is not None
+
+
 def is_room_label(text: str) -> bool:
     """한글 실명, 또는 영문 2자 이상에 숫자가 붙은 이름. 축선·치수·안내 문구는 제외."""
     name = norm_name(text)
-    # 마감·비치·주차 안내, 창고, 차고, 화장실, WC, 입구, 출구, 상부 OPEN, DA는 면적 실이 아니다.
+    # 마감·비치·주차 안내, 창고, 차고, 화장실, 방풍실, 보관실, 퇴식대, 샤워실, 고압, 저압, 계단실, 복도, EPS, WC, 입구, 출구, 상부 OPEN, DA는 면적 실이 아니다.
     folded = name.upper()
+    if is_excluded_area_label(text):
+        return False
     if any(token in folded for token in ("노출콘크리트", "질식소화덮개", "주차", "창고", "차고", "화장실", "입구", "출구", "상부OPEN")):
         return False
     if folded in {"DA", "D.A", "D.A.", "WC", "W.C", "W.C.", "상부"}:
@@ -131,6 +147,8 @@ def is_region_label(text: str) -> bool:
     name = norm_name(text)
     folded = name.upper()
     if "창고" in folded or "차고" in folded:
+        return True
+    if is_excluded_area_label(text):
         return True
     return folded in {"DA", "D.A", "D.A."}
 
@@ -608,30 +626,47 @@ def _snap_endpoints(lines: list[LineString], tol: float) -> list[LineString]:
 
 
 def _cap_wall_ends(lines: list[LineString], tol: float) -> list[LineString]:
-    """끝점이 다른 벽선에서 tol 안에 있으면 그 선까지 잇는다. 이중선 벽의 끝막음이다."""
+    """열린 끝점을 tol 안에서 가장 가까운 다른 벽선 몇 개에만 잇는다.
+
+    이중선 벽의 끝막음이다. tol 안의 선을 전부 잇면 끝점마다 선이 생겨
+    층 전체가 수만 선이 된다.
+    """
     if not lines:
         return lines
     tree = STRtree(lines)
     extra: list[LineString] = []
     seen: set[tuple[tuple[float, float], tuple[float, float]]] = set()
+    seen_ends: set[tuple[float, float]] = set()
     for ln in lines:
         for xy in (ln.coords[0], ln.coords[-1]):
-            pt = Point(xy)
+            ax, ay = float(xy[0]), float(xy[1])
+            end = (round(ax, 1), round(ay, 1))
+            if end in seen_ends:
+                continue
+            seen_ends.add(end)
+            pt = Point(ax, ay)
+            hits: list[tuple[float, LineString]] = []
             for idx in tree.query(pt.buffer(tol)):
                 other = lines[int(idx)]
+                if other is ln:
+                    continue
                 dist = float(other.distance(pt))
                 if dist <= 0.5 or dist > tol:
                     continue
+                hits.append((dist, other))
+            if not hits:
+                continue
+            hits.sort(key=lambda item: item[0])
+            for _dist, other in hits[:CAP_PER_END]:
                 nearest = other.interpolate(other.project(pt))
-                a = (round(pt.x, 1), round(pt.y, 1))
                 b = (round(float(nearest.x), 1), round(float(nearest.y), 1))
-                if a == b:
+                if end == b:
                     continue
-                key = tuple(sorted((a, b)))
+                key = tuple(sorted((end, b)))
                 if key in seen:
                     continue
                 seen.add(key)
-                extra.append(LineString([(pt.x, pt.y), (float(nearest.x), float(nearest.y))]))
+                extra.append(LineString([(ax, ay), (float(nearest.x), float(nearest.y))]))
     return lines + extra
 
 
@@ -681,7 +716,7 @@ def _node_lines(lines: list[LineString]):
 
 def _face_at(lines: list[LineString], x: float, y: float) -> Polygon | None:
     lines = [ln for ln in lines if ln.length > 0.5]
-    if len(lines) < 3:
+    if len(lines) < 3 or len(lines) > MAX_FACE_LINES:
         return None
     noded = _node_lines(lines)
     if noded is None:
@@ -1335,12 +1370,17 @@ def _closed_lines(msp, segs, origin, boxes, open_doors):
             return lines, found, x_axes, y_axes, swings
         pad += 8000
     extra = _wallish_lines(msp, lines, origin, pad + 2000)
-    closed = _cap_wall_ends(lines + extra, WALL_CAP_MM) if extra else lines
-    found = _face_at(closed, lx, ly) if extra else None
+    merged = lines + extra
+    if extra and len(merged) <= MAX_FACE_LINES:
+        closed = _cap_wall_ends(merged, WALL_CAP_MM)
+        found = _face_at(closed, lx, ly)
+    else:
+        found = None
     if found is None:
         extra.extend(_continuing_wall_lines(msp, lines, origin, pad + 2000))
-        if extra:
-            closed = _cap_wall_ends(lines + extra, WALL_CAP_MM)
+        merged = lines + extra
+        if extra and len(merged) <= MAX_FACE_LINES:
+            closed = _cap_wall_ends(merged, WALL_CAP_MM)
             found = _face_at(closed, lx, ly)
     if found is not None and not _touches_window(found, origin, pad + 2000):
         return closed, found, x_axes, y_axes, swings
