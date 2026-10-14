@@ -29,6 +29,9 @@ class ExcludedAreaLabelTests(unittest.TestCase):
             "수납장-1",
             "하부장",
             "하부장-1",
+            "상부장",
+            "상부장-1",
+            "주방상부장",
             "옷봉설치",
             "옷봉 설치",
             "장비",
@@ -72,8 +75,11 @@ class ExcludedAreaLabelTests(unittest.TestCase):
         self.assertFalse(evaluate_room.is_equipment_label("ELEV"))
         self.assertFalse(evaluate_room.is_equipment_label("ELEV-1"))
         self.assertFalse(evaluate_room.is_equipment_label("E.V"))
-        self.assertFalse(evaluate_room.is_excluded_area_label("ELEV-1"))
-        self.assertTrue(evaluate_room.is_room_label("ELEV-1"))
+        for text in ("ELEV", "ELEV.", "ELEV-1", "ELEV. HALL", "ELEV. 홀"):
+            self.assertTrue(evaluate_room.is_excluded_area_label(text), text)
+            self.assertFalse(evaluate_room.is_room_label(text), text)
+        self.assertFalse(evaluate_room.is_excluded_area_label("HALL"))
+        self.assertFalse(evaluate_room.is_excluded_area_label("홀"))
 
     def test_ordinary_room_names_stay(self):
         self.assertTrue(evaluate_room.is_room_label("교실"))

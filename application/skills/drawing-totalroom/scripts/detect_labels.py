@@ -249,7 +249,7 @@ def _divide_shared_faces(msp, boxes, segs, detected: list[dict], door: str) -> l
 def _divide_on_dividers(msp, boxes, segs, detected: list[dict], door: str) -> list[dict]:
     """한 면에 라벨이 여러 개이면 그 사이의 벽이 아닌 선으로 면을 나눈다.
 
-    창고·차고·화장실·방풍실·보관실·퇴식대·샤워실·고압·저압·계단실·복도·승강기·EPS·OPEN·오픈·홀-·홈-·입구·출구·양치공간·청소도구함·청소도구실·실외기실·조경·배경·평면도·비품고을·항습기·화물·휠체어·린넨실·오물처리실·구급자·응급환자·의료가스실·기계실·분전함·세척실·탕비실·물품·스트레쳐·E.V·WC·DA 쪽은 실로 남기지 않는다.
+    창고·차고·화장실·방풍실·보관실·퇴식대·샤워실·고압·저압·계단실·복도·승강기·EPS·OPEN·오픈·홀-·홈-·입구·출구·양치공간·청소도구함·청소도구실·실외기실·조경·배경·평면도·비품고을·항습기·화물·휠체어·린넨실·오물처리실·구급자·응급환자·의료가스실·기계실·분전함·세척실·탕비실·물품·스트레쳐·E.V·ELEV·ELEV. HALL·ELEV. 홀·WC·DA 쪽은 실로 남기지 않는다.
     """
     labels = [
         (x, y, text)
@@ -555,7 +555,7 @@ def detect(dxf_path: Path, meta_path: Path, door: str = "close") -> dict:
         "labels": public_labels,
         "skipped": skipped,
         "rules": {
-            "labels": "Korean room names, or Latin names with 2+ letters and a digit; stacked lines within 1.8 text heights are joined top to bottom; fixture callouts such as 미니바, 옷장, 신발장, 수납장, 하부장, 옷봉설치, 장비, 데스크, 서랍, 온수기, 살균기, 소독기, 도어, 테이블, 정수기, 휴대폰장, 게시판, 렉장, 랙장, 냉장고, 제빙기, 머신, 커피, 전자레인지, 텀블러, 세척기, EV, 화분, 화장대, 월풀욕조, 욕조, (장애인) and non-area names 방풍실, 보관실, 퇴식대, 샤워실, 고압, 저압, 계단실, 복도, 승강기, EPS, OPEN, 오픈, 홀-, 홈-, 입구, 출구, 양치공간, 청소도구함, 청소도구실, 실외기실, 조경, 배경, 평면도, 비품고을, 항습기, 화물, 휠체어, 린넨실, 오물처리실, (장애인, 구급자, 응급환자, 의료가스실, 기계실, 분전함, 세척실, 탕비실, 물품, 스트레쳐, E.V are excluded",
+            "labels": "Korean room names, or Latin names with 2+ letters and a digit; stacked lines within 1.8 text heights are joined top to bottom; fixture callouts such as 미니바, 옷장, 신발장, 수납장, 하부장, 상부장, 옷봉설치, 장비, 데스크, 서랍, 온수기, 살균기, 소독기, 도어, 테이블, 정수기, 휴대폰장, 게시판, 렉장, 랙장, 냉장고, 제빙기, 머신, 커피, 전자레인지, 텀블러, 세척기, EV, 화분, 화장대, 월풀욕조, 욕조, (장애인) and non-area names 방풍실, 보관실, 퇴식대, 샤워실, 고압, 저압, 계단실, 복도, 승강기, EPS, OPEN, 오픈, 홀-, 홈-, 입구, 출구, 양치공간, 청소도구함, 청소도구실, 실외기실, 조경, 배경, 평면도, 비품고을, 항습기, 화물, 휠체어, 린넨실, 오물처리실, (장애인, 구급자, 응급환자, 의료가스실, 기계실, 분전함, 세척실, 탕비실, 물품, 스트레쳐, E.V, ELEV, ELEV. HALL, ELEV. 홀 are excluded",
             "font": "PNG text is the TEXT stored on each label layer, drawn by the floor sheet renderer",
             "png": "rendered from floor_label_detected.dxf",
             "door": door,

@@ -166,5 +166,27 @@ class DoorLeafTests(unittest.TestCase):
         self.assertAlmostEqual(face.area / 1_000_000.0, 6.0, delta=0.2)
 
 
+class CornerEntityTests(unittest.TestCase):
+    def test_corner_square_closes_an_open_room(self):
+        doc = ezdxf.new()
+        msp = doc.modelspace()
+        wall = {"layer": "WALL"}
+        msp.add_line((0, 200), (0, 3000), dxfattribs=wall)
+        msp.add_line((0, 3000), (4000, 3000), dxfattribs=wall)
+        msp.add_line((4000, 3000), (4000, 0), dxfattribs=wall)
+        msp.add_line((4000, 0), (800, 0), dxfattribs=wall)
+        msp.add_lwpolyline(
+            [(0, -400), (800, -400), (800, 200), (0, 200)],
+            close=True,
+            dxfattribs={"layer": "BASE"},
+        )
+        segs = room.wall_segments(msp, [])
+
+        face, _x, _y, _swings = room._room_lines(msp, segs, (2000.0, 1500.0), [], [])
+
+        self.assertIsNotNone(face)
+        self.assertAlmostEqual(face.area / 1_000_000.0, 11.84, delta=0.3)
+
+
 if __name__ == "__main__":
     unittest.main()

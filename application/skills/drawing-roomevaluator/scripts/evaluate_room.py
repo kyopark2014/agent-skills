@@ -90,7 +90,7 @@ def _roomish(text: str) -> bool:
 
 
 def is_excluded_area_label(text: str) -> bool:
-    """면적과 실 라벨에서 빼는 이름. 방풍실, 보관실, 퇴식대, 샤워실, 고압, 저압, 계단실, 복도, 승강기, EPS, OPEN, 홀-, 홈-, 입구, 출구, 양치공간, 청소도구함, 청소도구실, 실외기실, 오픈, 조경, 배경, 평면도, 비품고을, 항습기, 화물, 휠체어, 린넨실, 오물처리실, (장애인, 구급자, 응급환자, 의료가스실, 기계실, 분전함, 세척실, 탕비실, 물품, 스트레쳐, E.V."""
+    """면적과 실 라벨에서 빼는 이름. 방풍실, 보관실, 퇴식대, 샤워실, 고압, 저압, 계단실, 복도, 승강기, EPS, OPEN, 홀-, 홈-, 입구, 출구, 양치공간, 청소도구함, 청소도구실, 실외기실, 오픈, 조경, 배경, 평면도, 비품고을, 항습기, 화물, 휠체어, 린넨실, 오물처리실, (장애인, 구급자, 응급환자, 의료가스실, 기계실, 분전함, 세척실, 탕비실, 물품, 스트레쳐, E.V, ELEV. ELEV. HALL과 ELEV. 홀도 포함한다."""
     name = norm_name(text)
     folded = name.upper()
     if (
@@ -124,6 +124,7 @@ def is_excluded_area_label(text: str) -> bool:
         or "스트레쳐" in folded
         or "스트레처" in folded
         or re.fullmatch(r"EV(?:[#＃-]?\d+)?", folded.replace(".", "")) is not None
+        or "ELEV" in folded.replace(".", "")
         or folded.startswith("홀-")
         or folded.startswith("홈-")
     ):
@@ -143,6 +144,7 @@ def is_equipment_label(text: str) -> bool:
         for token in (
             "수납장",
             "하부장",
+            "상부장",
             "옷봉설치",
             "장비",
             "데스크",
@@ -1742,6 +1744,103 @@ def _gap_entity_lines(msp, lines: list[LineString], origin: tuple[float, float],
     return kept
 
 
+def _corner_entity_lines(msp, lines: list[LineString], origin: tuple[float, float], pad: float) -> list[LineString]:
+    """벽 끝에 닿아 다른 벽까지 이어진 작은 엔터티.
+
+    열린 실의 모서리에 놓인 사각형처럼, 끊긴 벽 끝과 다른 벽을 같이 닿으면
+    그 변으로 실을 닫는다. 한 변이 2 m를 넘으면 넣지 않는다.
+    """
+    if not lines:
+        return []
+    ox, oy = origin
+    tree = STRtree(lines)
+    free: list[Point] = []
+    for ln in lines:
+        if ln.length < 400.0:
+            continue
+        x0, y0 = float(ln.coords[0][0]), float(ln.coords[0][1])
+        x1, y1 = float(ln.coords[-1][0]), float(ln.coords[-1][1])
+        length = math.hypot(x1 - x0, y1 - y0)
+        ux, uy = (x1 - x0) / length, (y1 - y0) / length
+        for x, y, dx, dy in ((x0, y0, -ux, -uy), (x1, y1, ux, uy)):
+            if abs(x - ox) > pad or abs(y - oy) > pad:
+                continue
+            pt = Point(x, y)
+            closed_end = False
+            for hit in tree.query(pt.buffer(80.0)):
+                other = lines[int(hit)]
+                if other is ln or float(other.distance(pt)) > 80.0:
+                    continue
+                c0, c1 = other.coords[0], other.coords[-1]
+                span = math.hypot(float(c1[0]) - float(c0[0]), float(c1[1]) - float(c0[1])) or 1.0
+                oux = (float(c1[0]) - float(c0[0])) / span
+                ouy = (float(c1[1]) - float(c0[1])) / span
+                parallel = abs(dx * oux + dy * ouy) >= 0.98
+                nearest = other.interpolate(other.project(pt))
+                along = (float(nearest.x) - x) * dx + (float(nearest.y) - y) * dy
+                if parallel and along > 20.0:
+                    closed_end = True
+                    break
+                if not parallel and other.length > 400.0:
+                    closed_end = True
+                    break
+            if not closed_end:
+                free.append(pt)
+    if not free:
+        return []
+    kept: list[LineString] = []
+    seen: set[tuple] = set()
+    for entity in msp:
+        if entity.dxftype() != "LWPOLYLINE" or not entity.closed:
+            continue
+        if getattr(entity.dxf, "layer", None) != BASE_LAYER:
+            continue
+        pts = [(float(a), float(b)) for a, b in entity.get_points("xy")]
+        if len(pts) >= 2 and pts[0] == pts[-1]:
+            pts = pts[:-1]
+        if len(pts) < 4:
+            continue
+        xs = [point[0] for point in pts]
+        ys = [point[1] for point in pts]
+        width, height = max(xs) - min(xs), max(ys) - min(ys)
+        if min(width, height) < 200.0 or max(width, height) > 2000.0:
+            continue
+        cx, cy = (min(xs) + max(xs)) * 0.5, (min(ys) + max(ys)) * 0.5
+        if abs(cx - ox) > pad or abs(cy - oy) > pad:
+            continue
+        ring = LineString(pts + [pts[0]])
+        touched = [pt for pt in free if float(ring.distance(pt)) <= 120.0]
+        if not touched:
+            continue
+        spans_gap = any(
+            float(a.distance(b)) >= 200.0
+            for index, a in enumerate(touched)
+            for b in touched[index + 1 :]
+        )
+        other_wall = False
+        if not spans_gap:
+            for ln in lines:
+                if float(ring.distance(ln)) > 120.0:
+                    continue
+                if any(float(ln.distance(pt)) <= 120.0 for pt in touched):
+                    continue
+                other_wall = True
+                break
+        if not spans_gap and not other_wall:
+            continue
+        count = len(pts)
+        for index in range(count):
+            start, end = pts[index], pts[(index + 1) % count]
+            if math.hypot(end[0] - start[0], end[1] - start[1]) <= 0.5:
+                continue
+            key = tuple(sorted(((round(start[0], 1), round(start[1], 1)), (round(end[0], 1), round(end[1], 1)))))
+            if key in seen:
+                continue
+            seen.add(key)
+            kept.append(LineString([start, end]))
+    return kept
+
+
 def _entity_face(lines, added, origin, reach):
     """추가 선으로 라벨이 닫히면 그 선 묶음과 면을 돌려준다. 창에 닿으면 버린다."""
     if not added or len(lines) + len(added) > MAX_FACE_LINES:
@@ -1842,6 +1941,13 @@ def _closed_lines(msp, segs, origin, boxes, open_doors):
         # 앞에서 넣은 보조선은 실을 닫지 못했다. 끊긴 구간 안의 선만 더한다.
         gap = _gap_entity_lines(msp, lines, origin, reach)
         closed, found = _best_open_face(lines, gap, origin, reach)
+    if found is None:
+        # 벽 끝에 닿아 다른 벽으로 이어진 작은 엔터티로 모서리를 닫는다.
+        # 라벨 근처만 본다. 멀리 있는 엔터티까지 넣으면 여러 실이 한 면이 된다.
+        corner_entity = _corner_entity_lines(msp, lines, origin, min(reach, 8000.0))
+        closed, found = _best_open_face(lines, corner_entity, origin, reach)
+        if found is not None and max(found.bounds[2] - found.bounds[0], found.bounds[3] - found.bounds[1]) > 8000.0:
+            found = None
     if found is not None:
         return closed, found, x_axes, y_axes, swings
     return None, None, [], [], []
