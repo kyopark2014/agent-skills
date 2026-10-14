@@ -57,6 +57,42 @@ class UploadDrawingTests(unittest.TestCase):
         self.assertEqual(ready["status"], "ready")
         self.assertIsNone(ready["drawing_id"])
 
+    def test_latest_start_is_listed_first(self):
+        with tempfile.TemporaryDirectory() as raw:
+            folder = Path(raw)
+            (folder / "new.dxf").write_bytes(b"new")
+            (folder / "mid.dxf").write_bytes(b"mid")
+            (folder / "old.dxf").write_bytes(b"old")
+            os.utime(folder / "new.dxf", (1_700_000_000, 1_700_000_300))
+            os.utime(folder / "mid.dxf", (1_700_000_000, 1_700_000_200))
+            os.utime(folder / "old.dxf", (1_700_000_000, 1_700_000_100))
+            task_map = {
+                "files": {
+                    "old.dxf": {
+                        "file_name": "old.dxf",
+                        "started_at": "2026-10-15T09:00:00+09:00",
+                        "task_id": "a" * 32,
+                    },
+                    "mid.dxf": {
+                        "file_name": "mid.dxf",
+                        "started_at": "2026-10-15T01:00:00+09:00",
+                        "task_id": "b" * 32,
+                    },
+                }
+            }
+            with (
+                patch("application.utils.get_user_upload_dir", return_value=str(folder)),
+                patch(
+                    "application.services.upload_drawing_service._load_task_map",
+                    return_value=task_map,
+                ),
+            ):
+                files = list_upload_drawings("ksdyb", {"drawings": []})
+        self.assertEqual(
+            [item["file_name"] for item in files],
+            ["old.dxf", "mid.dxf", "new.dxf"],
+        )
+
     def test_source_path_counts_as_used(self):
         with tempfile.TemporaryDirectory() as raw:
             folder = Path(raw)

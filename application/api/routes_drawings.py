@@ -7,10 +7,12 @@ import os
 import re
 import shutil
 import unicodedata
+from datetime import datetime
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse
+from pydantic import BaseModel
 
 from application.api.routes_auth import require_user_id
 from application import utils
@@ -91,6 +93,115 @@ def _write_catalog(artifacts: Path, catalog: dict) -> None:
     temporary.replace(path)
 
 
+_DRAWING_EXTS = {".dwg", ".dxf", ".dwf"}
+
+
+class DrawingTaskLink(BaseModel):
+    file_name: str
+    task_id: str
+    drawing_id: str | None = None
+
+
+def _task_map_path(artifacts: Path) -> Path:
+    return artifacts / "drawing_task_map.json"
+
+
+def _file_key(file_name: str) -> str:
+    name = unicodedata.normalize("NFC", os.path.basename(str(file_name or "").replace("\\", "/").strip()))
+    return name.casefold()
+
+
+def _clean_upload_name(file_name: str) -> str:
+    name = unicodedata.normalize("NFC", os.path.basename(str(file_name or "").replace("\\", "/").strip()))
+    if (
+        not name
+        or name in {".", ".."}
+        or "/" in name
+        or "\\" in name
+        or name != os.path.basename(name)
+    ):
+        raise HTTPException(status_code=400, detail="파일 이름이 올바르지 않습니다.")
+    if Path(name).suffix.lower() not in _DRAWING_EXTS:
+        raise HTTPException(status_code=400, detail="dwg, dxf, dwf 파일만 다룰 수 있습니다.")
+    return name
+
+
+def _load_task_map(artifacts: Path) -> dict:
+    path = _task_map_path(artifacts)
+    if not path.is_file():
+        return {"files": {}}
+    try:
+        loaded = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {"files": {}}
+    files = loaded.get("files") if isinstance(loaded, dict) else None
+    if not isinstance(files, dict):
+        return {"files": {}}
+    return {"files": files}
+
+
+def _write_task_map(artifacts: Path, payload: dict) -> None:
+    path = _task_map_path(artifacts)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(".json.tmp")
+    temporary.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    temporary.replace(path)
+
+
+def remember_drawing_task(
+    artifacts: Path,
+    *,
+    file_name: str,
+    task_id: str,
+    drawing_id: str | None = None,
+    started_at: str | None = None,
+) -> dict:
+    """Remember the newest task started from an uploaded drawing file."""
+    name = _clean_upload_name(file_name)
+    stamp = (started_at or datetime.now().astimezone().isoformat(timespec="seconds")).strip()
+    safe_drawing = _safe_id(drawing_id) if drawing_id else None
+    payload = _load_task_map(artifacts)
+    files = payload["files"]
+    key = _file_key(name)
+    previous = files.get(key) if isinstance(files.get(key), dict) else None
+    if previous and str(previous.get("started_at") or "") > stamp:
+        return previous
+    record = {
+        "file_name": name,
+        "drawing_id": safe_drawing or (previous or {}).get("drawing_id") or None,
+        "task_id": task_id,
+        "started_at": stamp,
+    }
+    files[key] = record
+    _write_task_map(artifacts, payload)
+    return record
+
+
+def _latest_task_id(files: dict, *, drawing_id: str, source_filename: str) -> str | None:
+    file_key = _file_key(source_filename) if source_filename else ""
+    best_at = ""
+    best_id: str | None = None
+    for item in files.values():
+        if not isinstance(item, dict):
+            continue
+        task_id = str(item.get("task_id") or "").strip()
+        started_at = str(item.get("started_at") or "")
+        if not task_id:
+            continue
+        item_drawing = _safe_id(item.get("drawing_id"))
+        item_key = _file_key(str(item.get("file_name") or ""))
+        matched = bool(drawing_id and item_drawing == drawing_id) or bool(file_key and item_key == file_key)
+        if not matched:
+            continue
+        if best_id is None or started_at >= best_at:
+            best_at = started_at
+            best_id = task_id
+    return best_id
+
+
 def _summary(entry: dict) -> dict | None:
     drawing_id = _safe_id(entry.get("drawing_id"))
     if not drawing_id:
@@ -112,10 +223,16 @@ def _list_stamp(item: dict) -> str:
 
 def list_drawings(artifacts: Path) -> dict:
     catalog = load_drawing_catalog(artifacts)
+    files = _load_task_map(artifacts)["files"]
     drawings = []
     for entry in catalog["drawings"]:
         item = _summary(entry)
         if item:
+            item["task_id"] = _latest_task_id(
+                files,
+                drawing_id=item["drawing_id"],
+                source_filename=item["source_filename"],
+            )
             drawings.append(item)
     drawings.sort(key=_list_stamp, reverse=True)
     return {"drawings": drawings}
@@ -251,6 +368,26 @@ def delete_drawing(artifacts: Path, drawing_id: str) -> dict:
         "folder": summary["folder"],
         "source_deleted": source_deleted,
     }
+
+
+@router.post("/task-link")
+def link_drawing_task(body: DrawingTaskLink, request: Request) -> dict:
+    """Map the task created by 시작 to the uploaded drawing. A later start wins."""
+    user_id = require_user_id(request)
+    task_id = body.task_id.strip()
+    if not re.fullmatch(r"[0-9a-fA-F-]{16,80}", task_id):
+        raise HTTPException(status_code=400, detail="작업 번호가 올바르지 않습니다.")
+    from application.task_store import get_task
+
+    if get_task(task_id, user_id) is None:
+        raise HTTPException(status_code=404, detail="작업을 찾지 못했습니다.")
+    record = remember_drawing_task(
+        _artifacts_dir(user_id),
+        file_name=body.file_name,
+        task_id=task_id,
+        drawing_id=body.drawing_id,
+    )
+    return {"ok": True, **record}
 
 
 @router.get("")

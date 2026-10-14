@@ -8,6 +8,7 @@ interface Props {
   onBack: () => void;
   onOpenUploads?: () => void;
   onOpen: (drawingId: string) => void;
+  onOpenLog: (taskId: string) => void;
 }
 
 function formatCreatedAt(value: string | undefined): string {
@@ -24,7 +25,7 @@ function formatCreatedAt(value: string | undefined): string {
   });
 }
 
-export function DrawingListView({ onMenuClick, onBack, onOpenUploads, onOpen }: Props) {
+export function DrawingListView({ onMenuClick, onBack, onOpenUploads, onOpen, onOpenLog }: Props) {
   const [drawings, setDrawings] = useState<DrawingSummary[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -143,11 +144,21 @@ export function DrawingListView({ onMenuClick, onBack, onOpenUploads, onOpen }: 
                       </button>
                       <button
                         type="button"
-                        className="drawing-list-btn drawing-list-btn-danger"
+                        className="drawing-list-btn"
                         disabled={busy}
                         onClick={() => setPendingDelete(drawing)}
                       >
                         {busy ? "삭제 중…" : "삭제"}
+                      </button>
+                      <button
+                        type="button"
+                        className="drawing-list-btn"
+                        disabled={busy || !drawing.task_id}
+                        onClick={() => {
+                          if (drawing.task_id) onOpenLog(drawing.task_id);
+                        }}
+                      >
+                        로그
                       </button>
                     </div>
                   </li>

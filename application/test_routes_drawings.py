@@ -12,7 +12,12 @@ from fastapi import HTTPException
 
 from unittest.mock import patch
 
-from application.api.routes_drawings import _artifacts_dir, list_drawings, list_floor_catalog
+from application.api.routes_drawings import (
+    _artifacts_dir,
+    list_drawings,
+    list_floor_catalog,
+    remember_drawing_task,
+)
 
 
 class DrawingIdTests(unittest.TestCase):
@@ -149,6 +154,47 @@ class DrawingIdTests(unittest.TestCase):
                 [item["drawing_id"] for item in listed["drawings"]],
                 ["newer_edit", "created_only", "older_edit"],
             )
+
+    def test_latest_start_is_the_drawing_log_task(self):
+        with tempfile.TemporaryDirectory() as raw:
+            artifacts = Path(raw)
+            (artifacts / "drawing_list.json").write_text(
+                json.dumps(
+                    {
+                        "drawings": [
+                            {
+                                "drawing_id": "hotel",
+                                "folder": "hotel",
+                                "source_filename": "073.경주부티호텔 (1).dxf",
+                                "created_at": "2026-10-15T01:00:00+09:00",
+                                "status": "ready",
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            remember_drawing_task(
+                artifacts,
+                file_name="073.경주부티호텔 (1).dxf",
+                task_id="11111111-1111-1111-1111-111111111111",
+                started_at="2026-10-15T01:00:00+09:00",
+            )
+            remember_drawing_task(
+                artifacts,
+                file_name="073.경주부티호텔 (1).dxf",
+                task_id="22222222-2222-2222-2222-222222222222",
+                drawing_id="hotel",
+                started_at="2026-10-15T07:00:00+09:00",
+            )
+            remember_drawing_task(
+                artifacts,
+                file_name="073.경주부티호텔 (1).dxf",
+                task_id="00000000-0000-0000-0000-000000000000",
+                started_at="2026-10-15T02:00:00+09:00",
+            )
+            listed = list_drawings(artifacts)
+            self.assertEqual(listed["drawings"][0]["task_id"], "22222222-2222-2222-2222-222222222222")
 
 
 if __name__ == "__main__":

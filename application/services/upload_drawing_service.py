@@ -12,7 +12,13 @@ from datetime import datetime, timezone
 
 from application import unicode_paths
 from application import utils
-from application.api.routes_drawings import _LOCAL_DRAWING_OWNER, _safe_id
+from application.api.routes_drawings import (
+    _LOCAL_DRAWING_OWNER,
+    _artifacts_dir,
+    _file_key,
+    _load_task_map,
+    _safe_id,
+)
 
 DRAWING_UPLOAD_EXTENSIONS = {".dwg", ".dxf", ".dwf"}
 
@@ -170,6 +176,32 @@ def _list_local_uploads(user_id: str | None) -> list[dict]:
     return list(merged.values())
 
 
+def _selection_times(user_id: str | None) -> dict[str, str]:
+    """Map each uploaded file to the latest time 시작 was pressed for it."""
+    try:
+        loaded = _load_task_map(_artifacts_dir(user_id or ""))
+    except Exception:
+        return {}
+    stamps: dict[str, str] = {}
+    for item in loaded.get("files", {}).values():
+        if not isinstance(item, dict):
+            continue
+        started = str(item.get("started_at") or "")
+        if not started:
+            continue
+        key = _file_key(str(item.get("file_name") or ""))
+        if key and started >= stamps.get(key, ""):
+            stamps[key] = started
+    return stamps
+
+
+def _upload_list_rank(item: dict, selected: dict[str, str]) -> tuple[int, str]:
+    stamp = selected.get(_file_key(str(item.get("file_name") or "")), "")
+    if stamp:
+        return (1, stamp)
+    return (0, str(item.get("created_at") or ""))
+
+
 def list_upload_drawings(user_id: str | None, catalog: dict) -> list[dict]:
     """List dwg/dxf/dwf uploads and mark ones already present in the drawing catalog."""
     index = _catalog_drawing_ids(catalog if isinstance(catalog, dict) else {})
@@ -192,7 +224,8 @@ def list_upload_drawings(user_id: str | None, catalog: dict) -> list[dict]:
                 "workspace_path": workspace_path,
             }
         )
-    files.sort(key=lambda item: item.get("created_at") or "", reverse=True)
+    selected = _selection_times(user_id)
+    files.sort(key=lambda item: _upload_list_rank(item, selected), reverse=True)
     return files
 
 

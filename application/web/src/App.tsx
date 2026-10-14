@@ -451,6 +451,15 @@ export default function App() {
       name: file.file_name,
       size: file.size,
     });
+    try {
+      await api.linkDrawingTask({
+        file_name: file.file_name,
+        task_id: task.id,
+        drawing_id: file.drawing_id,
+      });
+    } catch (err) {
+      uiError("drawing:task-link failed", err);
+    }
     setTasks((prev) => [task, ...prev]);
     setActiveTaskId(task.id);
     setMessages([]);
@@ -896,6 +905,9 @@ export default function App() {
               setActiveDrawingId(drawingId);
               setDrawingReturnView("drawings");
               setView("drawing");
+            }}
+            onOpenLog={(taskId) => {
+              void handleSelectTask(taskId);
             }}
           />
         ) : (

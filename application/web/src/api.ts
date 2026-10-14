@@ -122,6 +122,7 @@ export interface DrawingSummary {
   created_at: string;
   updated_at?: string;
   status: string;
+  task_id?: string | null;
 }
 
 export interface DrawingFloor {
@@ -452,6 +453,15 @@ export const api = {
   },
   getAdminDashboard: () => request<DashboardStats>("/api/admin/dashboard"),
   listDrawings: () => request<{ drawings: DrawingSummary[] }>("/api/drawings"),
+  linkDrawingTask: (body: { file_name: string; task_id: string; drawing_id?: string | null }) =>
+    request<{ ok: boolean; task_id: string }>("/api/drawings/task-link", {
+      method: "POST",
+      body: JSON.stringify({
+        file_name: body.file_name,
+        task_id: body.task_id,
+        drawing_id: body.drawing_id || null,
+      }),
+    }),
   getDrawingFloors: (drawingId: string) =>
     request<DrawingCatalog>(`/api/drawings/${encodeURIComponent(drawingId)}/floors`),
   deleteDrawing: (drawingId: string) =>
