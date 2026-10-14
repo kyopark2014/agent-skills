@@ -21418,7 +21418,7 @@ def _promote_room_enclosure(msp, anchors: list[tuple[float, float]]) -> int:
 def _excluded_area_text(text: str) -> bool:
     """면적에서 빼는 실명 중, 둘러싼 선을 벽으로 올릴 대상.
 
-    OPEN, 홀·홈, 입구, 출구, 양치공간, 청소도구함, 청소도구실, 오픈, 조경, 배경, 평면도, 비품고을, 항습기, 화물, 휠체어, 린넨실, 오물처리실, (장애인, 구급자, 응급환자, 의료가스실, 기계실, 분전함, 세척실, 탕비실, 물품, 스트레쳐, E.V는 라벨에서만 빼고 벽으로 올리지 않는다.
+    OPEN, 홀·홈, 입구, 출구, 양치공간, 청소도구함, 청소도구실, 실외기실, 오픈, 조경, 배경, 평면도, 비품고을, 항습기, 화물, 휠체어, 린넨실, 오물처리실, (장애인, 구급자, 응급환자, 의료가스실, 기계실, 분전함, 세척실, 탕비실, 물품, 스트레쳐, E.V는 라벨에서만 빼고 벽으로 올리지 않는다.
     """
     compact = text.replace(" ", "")
     folded = compact.upper()
@@ -21429,6 +21429,7 @@ def _excluded_area_text(text: str) -> bool:
         or "양치공간" in compact
         or "청소도구함" in compact
         or "청소도구실" in compact
+        or "실외기실" in compact
         or "오픈" in compact
         or "조경" in compact
         or "배경" in compact

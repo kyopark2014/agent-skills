@@ -90,7 +90,7 @@ def _roomish(text: str) -> bool:
 
 
 def is_excluded_area_label(text: str) -> bool:
-    """면적과 실 라벨에서 빼는 이름. 방풍실, 보관실, 퇴식대, 샤워실, 고압, 저압, 계단실, 복도, 승강기, EPS, OPEN, 홀-, 홈-, 입구, 출구, 양치공간, 청소도구함, 청소도구실, 오픈, 조경, 배경, 평면도, 비품고을, 항습기, 화물, 휠체어, 린넨실, 오물처리실, (장애인, 구급자, 응급환자, 의료가스실, 기계실, 분전함, 세척실, 탕비실, 물품, 스트레쳐, E.V."""
+    """면적과 실 라벨에서 빼는 이름. 방풍실, 보관실, 퇴식대, 샤워실, 고압, 저압, 계단실, 복도, 승강기, EPS, OPEN, 홀-, 홈-, 입구, 출구, 양치공간, 청소도구함, 청소도구실, 실외기실, 오픈, 조경, 배경, 평면도, 비품고을, 항습기, 화물, 휠체어, 린넨실, 오물처리실, (장애인, 구급자, 응급환자, 의료가스실, 기계실, 분전함, 세척실, 탕비실, 물품, 스트레쳐, E.V."""
     name = norm_name(text)
     folded = name.upper()
     if (
@@ -100,6 +100,7 @@ def is_excluded_area_label(text: str) -> bool:
         or "양치공간" in folded
         or "청소도구함" in folded
         or "청소도구실" in folded
+        or "실외기실" in folded
         or "오픈" in folded
         or "조경" in folded
         or "배경" in folded
@@ -141,6 +142,16 @@ def is_equipment_label(text: str) -> bool:
         token in folded
         for token in (
             "수납장",
+            "하부장",
+            "옷봉설치",
+            "장비",
+            "데스크",
+            "서랍",
+            "온수기",
+            "살균기",
+            "소독기",
+            "도어",
+            "테이블",
             "신발장",
             "정수기",
             "휴대폰장",
@@ -432,12 +443,37 @@ def _segment_on_open_door(x0: float, y0: float, x1: float, y1: float, open_doors
     return False
 
 
+def _door_leaf_rectangle(entity) -> bool:
+    """문짝으로 그린 얇은 닫힌 사각형.
+
+    끝의 짧은 변이 이웃 문짝과 이어지면 실 한가운데에 벽이 생긴다.
+    개구를 막는 문선은 직선이라 여기 해당하지 않는다.
+    """
+    if entity.dxftype() != "LWPOLYLINE" or not entity.closed:
+        return False
+    if entity.dxf.layer != DOOR_LAYER:
+        return False
+    pts = [(float(a), float(b)) for a, b in entity.get_points("xy")]
+    if pts and pts[0] == pts[-1]:
+        pts = pts[:-1]
+    if len(pts) != 4:
+        return False
+    lengths = [
+        math.hypot(pts[(i + 1) % 4][0] - pts[i][0], pts[(i + 1) % 4][1] - pts[i][1])
+        for i in range(4)
+    ]
+    short, long = min(lengths), max(lengths)
+    return short <= 80.0 and 500.0 <= long <= 1700.0
+
+
 def wall_segments(msp, boxes, *, include_door: bool = True, open_doors=None) -> list[tuple[float, float, float, float]]:
     segs: list[tuple[float, float, float, float]] = []
     layers = BOUNDARY_LAYERS if include_door else (WALL_LAYER, WINDOW_LAYER, COLUMN_LAYER)
     for e in msp:
-        # DOOR 선은 경계다. open_doors 에 있는 문짝만 뺀다.
+        # DOOR 선은 경계다. 문짝 사각형과 open_doors 의 문짝은 뺀다.
         if e.dxf.layer not in layers:
+            continue
+        if e.dxf.layer == DOOR_LAYER and _door_leaf_rectangle(e):
             continue
         t = e.dxftype()
         parts: list[tuple[float, float, float, float]] = []
@@ -1706,11 +1742,60 @@ def _gap_entity_lines(msp, lines: list[LineString], origin: tuple[float, float],
     return kept
 
 
+def _entity_face(lines, added, origin, reach):
+    """추가 선으로 라벨이 닫히면 그 선 묶음과 면을 돌려준다. 창에 닿으면 버린다."""
+    if not added or len(lines) + len(added) > MAX_FACE_LINES:
+        return None, None
+    closed = _cap_wall_ends(list(lines) + list(added), WALL_CAP_MM)
+    found = _face_at(closed, origin[0], origin[1])
+    if found is None or _touches_window(found, origin, reach):
+        return None, None
+    return closed, found
+
+
+def _larger_inside(candidate, current) -> bool:
+    """같은 테두리 안에서만 더 넓은 면을 고른다. 옆 실로 번지면 버린다."""
+    if current is None:
+        return True
+    if candidate.area <= current.area * 1.01:
+        return False
+    minx, miny, maxx, maxy = current.bounds
+    pad = 400.0
+    cminx, cminy, cmaxx, cmaxy = candidate.bounds
+    return (
+        cminx >= minx - pad
+        and cminy >= miny - pad
+        and cmaxx <= maxx + pad
+        and cmaxy <= maxy + pad
+    )
+
+
+def _best_open_face(lines, added, origin, reach):
+    """열린 실만. 짧은 엔터티가 안을 가르면 긴 엔터티로 닫힌 더 큰 면을 쓴다.
+
+    벽만으로 이미 닫힌 실에는 호출하지 않는다.
+    """
+    long_added = [ln for ln in added if ln.length >= 1500.0]
+    full_lines, full = _entity_face(lines, added, origin, reach)
+    long_lines, long_face = _entity_face(lines, long_added, origin, reach)
+    # 이미 한 실 크기인 면만 키운다. 여러 실이 한 면으로 새면 짧은 선을 빼지 않는다.
+    if (
+        full is not None
+        and long_face is not None
+        and max(full.bounds[2] - full.bounds[0], full.bounds[3] - full.bounds[1]) <= 12000.0
+        and _larger_inside(long_face, full)
+    ):
+        return long_lines, long_face
+    if full is not None:
+        return full_lines, full
+    return None, None
+
+
 def _closed_lines(msp, segs, origin, boxes, open_doors):
     """라벨이 들어 있는 닫힌 면과, 그 면을 만든 벽선.
 
-    벽만으로 닫히지 않으면, 벽 끝에 붙은 벽처럼 보이는 선까지 경계로 쓴다.
-    그래도 열리면, 끊긴 구간 안의 선을 벽으로 보고 벽 끝과 잇는다.
+    벽만으로 닫히면 그 면을 그대로 쓴다.
+    열릴 때만 엔터티로 닫고, 그 안을 짧은 선이 가르면 더 큰 면을 고른다.
     """
     lx, ly = origin
     pad = 12000.0
@@ -1745,28 +1830,19 @@ def _closed_lines(msp, segs, origin, boxes, open_doors):
             found = _face_at(closed, lx, ly)
             if found is not None and not _touches_window(found, origin, pad + 2000):
                 return closed, found, x_axes, y_axes, swings
-    extra = _wallish_lines(msp, lines, origin, pad + 2000)
-    merged = lines + extra
-    if extra and len(merged) <= MAX_FACE_LINES:
-        closed = _cap_wall_ends(merged, WALL_CAP_MM)
-        found = _face_at(closed, lx, ly)
-    else:
-        found = None
+    reach = pad + 2000
+    extra = _wallish_lines(msp, lines, origin, reach)
+    closed, found = _best_open_face(lines, extra, origin, reach)
     if found is None:
-        extra.extend(_opening_entity_lines(msp, lines, origin, pad + 2000))
-        extra.extend(_continuing_wall_lines(msp, lines, origin, pad + 2000))
-        merged = lines + extra
-        if extra and len(merged) <= MAX_FACE_LINES:
-            closed = _cap_wall_ends(merged, WALL_CAP_MM)
-            found = _face_at(closed, lx, ly)
-    if found is None or _touches_window(found, origin, pad + 2000):
-        # 앞에서 넣은 보조선은 실을 닫지 못했고 선을 너무 늘린다. 끊긴 구간의 선만 더한다.
-        gap = _gap_entity_lines(msp, lines, origin, pad + 2000)
-        merged = lines + gap
-        if gap and len(merged) <= MAX_FACE_LINES:
-            closed = _cap_wall_ends(merged, WALL_CAP_MM)
-            found = _face_at(closed, lx, ly)
-    if found is not None and not _touches_window(found, origin, pad + 2000):
+        extra = list(extra)
+        extra.extend(_opening_entity_lines(msp, lines, origin, reach))
+        extra.extend(_continuing_wall_lines(msp, lines, origin, reach))
+        closed, found = _best_open_face(lines, extra, origin, reach)
+    if found is None:
+        # 앞에서 넣은 보조선은 실을 닫지 못했다. 끊긴 구간 안의 선만 더한다.
+        gap = _gap_entity_lines(msp, lines, origin, reach)
+        closed, found = _best_open_face(lines, gap, origin, reach)
+    if found is not None:
         return closed, found, x_axes, y_axes, swings
     return None, None, [], [], []
 

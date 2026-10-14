@@ -26,11 +26,16 @@ function fileNameFromRef(ref: string): string {
   const trimmed = (ref || "").trim();
   if (!trimmed) return "file";
   try {
-    const noQuery = trimmed.split("?")[0].split("#")[0];
-    const parts = noQuery.split("/");
+    // `#`와 `?`는 URL 조각·쿼리일 때만 버린다. 로컬 파일명에 들어 있으면 이름의 일부다.
+    let path = trimmed;
+    if (/^https?:\/\//i.test(trimmed)) {
+      path = new URL(trimmed).pathname;
+    }
+    const parts = path.split("/");
     return decodeURIComponent(parts[parts.length - 1] || "file");
   } catch {
-    return "file";
+    const parts = trimmed.split("/");
+    return parts[parts.length - 1] || "file";
   }
 }
 
@@ -118,15 +123,23 @@ function AttachmentMedia({ refs }: { refs: string[] }) {
                   href={openUrl}
                   target="_blank"
                   rel="noopener noreferrer"
-                  title={`${path}\n클릭하여 새 탭에서 열기`}
                 >
                   <span className="message-loaded-file-name">{label}</span>
+                  <span className="message-loaded-file-tip" role="tooltip">
+                    {label}
+                    <span className="message-loaded-file-tip-hint">
+                      클릭하여 새 탭에서 열기
+                    </span>
+                  </span>
                 </a>
               );
             }
             return (
-              <div key={path} className="message-loaded-file" title={path}>
+              <div key={path} className="message-loaded-file">
                 <span className="message-loaded-file-name">{label}</span>
+                <span className="message-loaded-file-tip" role="tooltip">
+                  {label}
+                </span>
               </div>
             );
           })}

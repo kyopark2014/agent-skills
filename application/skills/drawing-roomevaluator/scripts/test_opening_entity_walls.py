@@ -97,5 +97,74 @@ class GapEntityWallTests(unittest.TestCase):
         self.assertIsNone(face)
 
 
+class OpenRoomMaxAreaTests(unittest.TestCase):
+    def test_closed_room_keeps_its_wall_face(self):
+        doc = ezdxf.new()
+        msp = doc.modelspace()
+        wall = {"layer": "WALL"}
+        msp.add_line((0, 0), (8000, 0), dxfattribs=wall)
+        msp.add_line((8000, 0), (8000, 6000), dxfattribs=wall)
+        msp.add_line((8000, 6000), (0, 6000), dxfattribs=wall)
+        msp.add_line((0, 6000), (0, 0), dxfattribs=wall)
+        base = {"layer": "BASE"}
+        msp.add_line((2000, 2500), (3200, 2500), dxfattribs=base)
+        msp.add_line((2000, 2650), (3200, 2650), dxfattribs=base)
+        segs = room.wall_segments(msp, [])
+
+        face, _x, _y, _swings = room._room_lines(msp, segs, (4000.0, 4000.0), [], [])
+
+        self.assertIsNotNone(face)
+        self.assertAlmostEqual(face.area / 1_000_000.0, 48.0, delta=1.0)
+
+    def test_open_room_uses_the_larger_entity_face(self):
+        doc = ezdxf.new()
+        msp = doc.modelspace()
+        wall = {"layer": "WALL"}
+        msp.add_line((0, 0), (0, 3000), dxfattribs=wall)
+        msp.add_line((0, 3000), (3500, 3000), dxfattribs=wall)
+        msp.add_line((3500, 3000), (3500, 0), dxfattribs=wall)
+        base = {"layer": "BASE"}
+        msp.add_line((0, 0), (3500, 0), dxfattribs=base)
+        msp.add_line((0, 120), (3500, 120), dxfattribs=base)
+        msp.add_line((400, 0), (400, 1100), dxfattribs=base)
+        msp.add_line((550, 0), (550, 1100), dxfattribs=base)
+        msp.add_line((2950, 0), (2950, 1100), dxfattribs=base)
+        msp.add_line((3100, 0), (3100, 1100), dxfattribs=base)
+        segs = room.wall_segments(msp, [])
+
+        face, _x, _y, _swings = room._room_lines(msp, segs, (1750.0, 2000.0), [], [])
+
+        self.assertIsNotNone(face)
+        self.assertAlmostEqual(face.area / 1_000_000.0, 10.5, delta=1.0)
+
+
+class DoorLeafTests(unittest.TestCase):
+    def test_leaf_rectangle_does_not_cut_a_closed_room(self):
+        doc = ezdxf.new()
+        msp = doc.modelspace()
+        wall = {"layer": "WALL"}
+        msp.add_line((1000, 0), (3000, 0), dxfattribs=wall)
+        msp.add_line((3000, 0), (3000, 3000), dxfattribs=wall)
+        msp.add_line((3000, 3000), (1000, 3000), dxfattribs=wall)
+        msp.add_line((1000, 3000), (1000, 0), dxfattribs=wall)
+        msp.add_lwpolyline(
+            [(1100, 3000), (1100, 2200), (1120, 2200), (1120, 3000)],
+            close=True,
+            dxfattribs={"layer": "DOOR"},
+        )
+        msp.add_lwpolyline(
+            [(3050, 3000), (3050, 2200), (3070, 2200), (3070, 3000)],
+            close=True,
+            dxfattribs={"layer": "DOOR"},
+        )
+        msp.add_line((1400, 3000), (2200, 3000), dxfattribs={"layer": "DOOR"})
+        segs = room.wall_segments(msp, [])
+
+        face, _x, _y, _swings = room._room_lines(msp, segs, (2000.0, 2600.0), [], [])
+
+        self.assertIsNotNone(face)
+        self.assertAlmostEqual(face.area / 1_000_000.0, 6.0, delta=0.2)
+
+
 if __name__ == "__main__":
     unittest.main()

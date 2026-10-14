@@ -37,13 +37,15 @@ interface Props {
   onResumeQueue?: () => void;
   onStop?: () => void;
   onSend: (text: string, files?: string[]) => void;
+  /** Task whose uploads stay attached across screen changes. */
+  taskId?: string | null;
   onRagUploadComplete?: (message: string) => void;
 }
 
 const RAG_ACCEPT =
   ".pdf,.txt,.md,.csv,.doc,.docx,.ppt,.pptx,.xls,.xlsx,.html,.htm,.json,.py,.js";
 const LOAD_ACCEPT =
-  ".pdf,.txt,.md,.markdown,.csv,.doc,.docx,.ppt,.pptx,.xls,.xlsx,.html,.htm,.json,.py,.js,.ts,.tsx,.jsx,.yml,.yaml,.xml,.rst,.dxf,.png,.jpg,.jpeg,.webp,.gif";
+  ".pdf,.txt,.md,.markdown,.csv,.doc,.docx,.ppt,.pptx,.xls,.xlsx,.html,.htm,.json,.py,.js,.ts,.tsx,.jsx,.yml,.yaml,.xml,.rst,.dxf,.dwg,.png,.jpg,.jpeg,.webp,.gif";
 const IMAGE_ACCEPT = "image/png,image/jpeg,image/webp,image/gif,.png,.jpg,.jpeg,.webp,.gif";
 const MIN_INPUT_HEIGHT = 24;
 const MAX_INPUT_HEIGHT = 160;
@@ -65,6 +67,7 @@ export function ChatInput({
   onResumeQueue,
   onStop,
   onSend,
+  taskId = null,
   onRagUploadComplete,
 }: Props) {
   const [value, setValue] = useState("");
@@ -104,7 +107,7 @@ export function ChatInput({
     onDragOver,
     onDragLeave,
     onDrop,
-  } = useFileUpload({ disabled });
+  } = useFileUpload({ disabled, taskId });
 
   // Documents 「복사」 → attach md chip immediately.
   useEffect(() => {
@@ -560,13 +563,12 @@ export function ChatInput({
         {loadedFiles.length > 0 && (
           <div className="chat-loaded-files" aria-label="로드된 파일">
             {loadedFiles.map((item) => (
-              <div key={item.path} className="chat-loaded-file" title={item.path}>
+              <div key={item.path} className="chat-loaded-file">
                 <a
                   className="chat-loaded-file-open"
                   href={`/api/files/view/${encodeURIComponent(item.name)}`}
                   target="_blank"
                   rel="noopener noreferrer"
-                  title={`${item.name}\n클릭하여 새 탭에서 열기`}
                 >
                   <span className="chat-loaded-file-icon" aria-hidden="true">
                     <svg width="14" height="14" viewBox="0 0 16 16">
@@ -591,6 +593,12 @@ export function ChatInput({
                         {formatFileSize(item.size)}
                       </span>
                     )}
+                  </span>
+                  <span className="chat-loaded-file-tip" role="tooltip">
+                    {item.name}
+                    <span className="chat-loaded-file-tip-hint">
+                      클릭하여 새 탭에서 열기
+                    </span>
                   </span>
                 </a>
                 <button

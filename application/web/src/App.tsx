@@ -80,6 +80,8 @@ export default function App() {
   >({});
   /** True while polling /run after refresh when messages end on user. */
   const [recoveringTaskId, setRecoveringTaskId] = useState<string | null>(null);
+  /** Stops re-polling a draft once /run says the agent is no longer active. */
+  const [recoverySettledKey, setRecoverySettledKey] = useState<string | null>(null);
   const { getStreamForTask, sendMessage, stopMessage } = useChatStream();
   const emptyTaskBootstrapRef = useRef<Promise<Task> | null>(null);
   const tasksBootstrappedForUserRef = useRef<string | null>(null);
@@ -93,11 +95,15 @@ export default function App() {
 
   const activeTask = tasks.find((t) => t.id === activeTaskId) ?? null;
   const activeStream = getStreamForTask(activeTaskId);
-  const lastMessageRole = messages[messages.length - 1]?.role;
+  const lastMessage = messages[messages.length - 1];
+  const recoveryKey = lastMessage
+    ? `${activeTaskId}:${lastMessage.id}:${lastMessage.status ?? "complete"}:${lastMessage.content.length}:${lastMessage.tool_events?.length ?? 0}`
+    : "";
   const needsRecovery =
     Boolean(activeTaskId) &&
     !activeStream.streaming &&
-    lastMessageRole === "user";
+    (lastMessage?.role === "user" || lastMessage?.status === "streaming") &&
+    recoverySettledKey !== recoveryKey;
   const isRecovering =
     Boolean(activeTaskId) && recoveringTaskId === activeTaskId;
   const showWaiting = activeStream.streaming || isRecovering;
@@ -140,7 +146,7 @@ export default function App() {
     return latest;
   }, []);
 
-  /** After refresh: if last message is user, poll /run until assistant arrives. */
+  /** After refresh: poll until a streaming draft is finished or the agent is gone. */
   useEffect(() => {
     if (!activeTaskId) {
       setRecoveringTaskId(null);
@@ -155,9 +161,17 @@ export default function App() {
     let timer: ReturnType<typeof setTimeout> | null = null;
     let attempts = 0;
     const taskId = activeTaskId;
+    const settledKey = recoveryKey;
 
     setRecoveringTaskId(taskId);
     uiLog("run:recovery start", { taskId });
+
+    function finishRecovery() {
+      if (!cancelled && activeTaskIdRef.current === taskId) {
+        setRecoverySettledKey(settledKey);
+        setRecoveringTaskId((prev) => (prev === taskId ? null : prev));
+      }
+    }
 
     async function poll() {
       if (cancelled || activeTaskIdRef.current !== taskId) return;
@@ -166,7 +180,9 @@ export default function App() {
         const run = await appDataService.getTaskRun(taskId);
         if (cancelled || activeTaskIdRef.current !== taskId) return;
 
-        if (
+        if (run.status === "running") {
+          await loadMessages(taskId);
+        } else if (
           run.status === "done" ||
           run.status === "error" ||
           run.status === "idle" ||
@@ -179,22 +195,20 @@ export default function App() {
             hydrated: run.hydrated,
           });
           await loadMessages(taskId);
-          if (!cancelled && activeTaskIdRef.current === taskId) {
-            setRecoveringTaskId((prev) => (prev === taskId ? null : prev));
-          }
+          finishRecovery();
           return;
         }
 
         // running / pending — keep waiting
         if (attempts >= RUN_RECOVERY_MAX_ATTEMPTS) {
           uiLog("run:recovery timeout", { taskId, attempts });
-          setRecoveringTaskId((prev) => (prev === taskId ? null : prev));
+          finishRecovery();
           return;
         }
       } catch (err) {
         uiError("run:recovery poll failed", err);
         if (attempts >= 5) {
-          setRecoveringTaskId((prev) => (prev === taskId ? null : prev));
+          finishRecovery();
           return;
         }
       }
@@ -210,7 +224,7 @@ export default function App() {
       cancelled = true;
       if (timer) clearTimeout(timer);
     };
-  }, [activeTaskId, needsRecovery, loadMessages]);
+  }, [activeTaskId, needsRecovery, loadMessages, recoveryKey]);
 
   useEffect(() => {
     (async () => {
@@ -849,6 +863,7 @@ export default function App() {
                 onResumeQueue={handleResumeQueue}
                 onStop={handleStop}
                 onSend={handleSend}
+                taskId={activeTaskId}
                 onRagUploadComplete={handleRagUploadComplete}
               />
             }

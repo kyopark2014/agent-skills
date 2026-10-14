@@ -29,6 +29,8 @@ _DATA_DIR = os.path.join(_APPLICATION_DIR, "data")
 _GLOBAL_DB_PATH = working_db_path()
 
 DEFAULT_MODEL = "Claude 5.0 Sonnet"
+MESSAGE_STATUS_STREAMING = "streaming"
+MESSAGE_STATUS_COMPLETE = "complete"
 
 _USER_SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS tasks (
@@ -54,6 +56,7 @@ CREATE TABLE IF NOT EXISTS messages (
   content TEXT,
   images_json TEXT,
   tool_events_json TEXT,
+  status TEXT DEFAULT 'complete',
   created_at TEXT,
   FOREIGN KEY (task_id) REFERENCES tasks(id)
 );
@@ -87,6 +90,7 @@ CREATE TABLE IF NOT EXISTS messages (
   content TEXT,
   images_json TEXT,
   tool_events_json TEXT,
+  status TEXT DEFAULT 'complete',
   created_at TEXT,
   FOREIGN KEY (task_id) REFERENCES tasks(id)
 );
@@ -144,6 +148,7 @@ def _apply_task_column_migrations(conn: sqlite3.Connection) -> None:
         "ALTER TABLE tasks ADD COLUMN pinned INTEGER DEFAULT 0",
         "ALTER TABLE tasks ADD COLUMN memory_enabled INTEGER DEFAULT 1",
         "ALTER TABLE tasks ADD COLUMN llm_gateway_enabled INTEGER DEFAULT 0",
+        "ALTER TABLE messages ADD COLUMN status TEXT DEFAULT 'complete'",
     ):
         try:
             conn.execute(stmt)
@@ -242,6 +247,7 @@ def _migrate_user_from_legacy(user_db_path: str, user_id: str) -> None:
                     "content",
                     "images_json",
                     "tool_events_json",
+                    "status",
                     "created_at",
                 )
                 if c in legacy_msg_cols
@@ -379,6 +385,12 @@ def _row_to_task(row: sqlite3.Row) -> dict[str, Any]:
     }
 
 
+def _message_status(row: sqlite3.Row) -> str:
+    if "status" not in row.keys() or not row["status"]:
+        return MESSAGE_STATUS_COMPLETE
+    return str(row["status"])
+
+
 def _row_to_message(row: sqlite3.Row) -> dict[str, Any]:
     return {
         "id": row["id"],
@@ -387,8 +399,23 @@ def _row_to_message(row: sqlite3.Row) -> dict[str, Any]:
         "content": row["content"] or "",
         "images": json.loads(row["images_json"] or "[]"),
         "tool_events": json.loads(row["tool_events_json"] or "[]"),
+        "status": _message_status(row),
         "created_at": row["created_at"],
     }
+
+
+def _latest_message_row(
+    conn: sqlite3.Connection, task_id: str
+) -> sqlite3.Row | None:
+    return conn.execute(
+        """
+        SELECT * FROM messages
+        WHERE task_id = ?
+        ORDER BY created_at DESC
+        LIMIT 1
+        """,
+        (task_id,),
+    ).fetchone()
 
 
 def list_tasks(user_id: str, limit: int = 100) -> list[dict[str, Any]]:
@@ -551,6 +578,38 @@ def list_messages(task_id: str, user_id: str) -> list[dict[str, Any]]:
     return [_row_to_message(r) for r in rows]
 
 
+def _write_message_payload(
+    conn: sqlite3.Connection,
+    *,
+    message_id: str,
+    task_id: str,
+    content: str,
+    images: list[str],
+    tool_events: list[dict[str, Any]],
+    status: str,
+    updated_at: str,
+) -> None:
+    conn.execute(
+        """
+        UPDATE messages
+        SET content = ?, images_json = ?, tool_events_json = ?, status = ?
+        WHERE id = ? AND task_id = ?
+        """,
+        (
+            content,
+            json.dumps(images, ensure_ascii=False),
+            json.dumps(tool_events, ensure_ascii=False),
+            status,
+            message_id,
+            task_id,
+        ),
+    )
+    conn.execute(
+        "UPDATE tasks SET updated_at = ? WHERE id = ?",
+        (updated_at, task_id),
+    )
+
+
 def add_message(
     task_id: str,
     role: str,
@@ -562,37 +621,134 @@ def add_message(
 ) -> dict[str, Any]:
     message_id = str(uuid.uuid4())
     now = _now_iso()
+    image_list = images or []
+    tool_event_list = tool_events or []
     with _connect_user(user_id) as conn:
-        conn.execute(
-            """
-            INSERT INTO messages (
-              id, task_id, role, content, images_json, tool_events_json, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                message_id,
-                task_id,
-                role,
-                content,
-                json.dumps(images or [], ensure_ascii=False),
-                json.dumps(tool_events or [], ensure_ascii=False),
-                now,
-            ),
-        )
-        title_update = None
-        if role == "user":
-            row = conn.execute(
-                "SELECT title FROM tasks WHERE id = ?", (task_id,)
-            ).fetchone()
-            if row and (row["title"] or "New task") in ("New task", ""):
-                title_update = content.strip()[:50] or "New task"
+        last = _latest_message_row(conn, task_id) if role == "assistant" else None
+        if (
+            last is not None
+            and last["role"] == "assistant"
+            and _message_status(last) == MESSAGE_STATUS_STREAMING
+        ):
+            message_id = last["id"]
+            _write_message_payload(
+                conn,
+                message_id=message_id,
+                task_id=task_id,
+                content=content,
+                images=image_list,
+                tool_events=tool_event_list,
+                status=MESSAGE_STATUS_COMPLETE,
+                updated_at=now,
+            )
+        else:
+            conn.execute(
+                """
+                INSERT INTO messages (
+                  id, task_id, role, content, images_json, tool_events_json,
+                  status, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    message_id,
+                    task_id,
+                    role,
+                    content,
+                    json.dumps(image_list, ensure_ascii=False),
+                    json.dumps(tool_event_list, ensure_ascii=False),
+                    MESSAGE_STATUS_COMPLETE,
+                    now,
+                ),
+            )
+            title_update = None
+            if role == "user":
+                row = conn.execute(
+                    "SELECT title FROM tasks WHERE id = ?", (task_id,)
+                ).fetchone()
+                if row and (row["title"] or "New task") in ("New task", ""):
+                    title_update = content.strip()[:50] or "New task"
 
-        conn.execute(
-            "UPDATE tasks SET updated_at = ?"
-            + (", title = ?" if title_update else "")
-            + " WHERE id = ?",
-            ([now, title_update, task_id] if title_update else [now, task_id]),
-        )
+            conn.execute(
+                "UPDATE tasks SET updated_at = ?"
+                + (", title = ?" if title_update else "")
+                + " WHERE id = ?",
+                ([now, title_update, task_id] if title_update else [now, task_id]),
+            )
+    _after_write(user_id)
+    with _connect_user(user_id) as conn:
+        row = conn.execute(
+            "SELECT * FROM messages WHERE id = ?", (message_id,)
+        ).fetchone()
+    return _row_to_message(row) if row else {}
+
+
+def upsert_streaming_message(
+    task_id: str,
+    user_id: str,
+    content: str,
+    *,
+    images: list[str] | None = None,
+    tool_events: list[dict[str, Any]] | None = None,
+) -> dict[str, Any] | None:
+    """Insert or overwrite the open assistant draft for a task.
+
+    The same row is updated until ``add_message`` marks it complete, so a
+    refresh mid-stream can read the text that was already on screen.
+    """
+    image_list = images or []
+    tool_event_list = tool_events or []
+    if not (content or "").strip() and not tool_event_list and not image_list:
+        return None
+
+    now = _now_iso()
+    with _connect_user(user_id) as conn:
+        last = _latest_message_row(conn, task_id)
+        if (
+            last is not None
+            and last["role"] == "assistant"
+            and _message_status(last) == MESSAGE_STATUS_COMPLETE
+        ):
+            return _row_to_message(last)
+        if (
+            last is not None
+            and last["role"] == "assistant"
+            and _message_status(last) == MESSAGE_STATUS_STREAMING
+        ):
+            message_id = last["id"]
+            _write_message_payload(
+                conn,
+                message_id=message_id,
+                task_id=task_id,
+                content=content,
+                images=image_list,
+                tool_events=tool_event_list,
+                status=MESSAGE_STATUS_STREAMING,
+                updated_at=now,
+            )
+        else:
+            message_id = str(uuid.uuid4())
+            conn.execute(
+                """
+                INSERT INTO messages (
+                  id, task_id, role, content, images_json, tool_events_json,
+                  status, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    message_id,
+                    task_id,
+                    "assistant",
+                    content,
+                    json.dumps(image_list, ensure_ascii=False),
+                    json.dumps(tool_event_list, ensure_ascii=False),
+                    MESSAGE_STATUS_STREAMING,
+                    now,
+                ),
+            )
+            conn.execute(
+                "UPDATE tasks SET updated_at = ? WHERE id = ?",
+                (now, task_id),
+            )
     _after_write(user_id)
     with _connect_user(user_id) as conn:
         row = conn.execute(

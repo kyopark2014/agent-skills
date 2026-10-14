@@ -1,4 +1,11 @@
-import { useCallback, useEffect, useRef, useState, type DragEvent } from "react";
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useSyncExternalStore,
+  useState,
+  type DragEvent,
+} from "react";
 import { fileUploadService } from "../services/fileUploadService";
 
 export interface AttachedImage {
@@ -74,68 +81,140 @@ export function collectClipboardImages(clipboardData: DataTransfer | null): File
   return files;
 }
 
-interface UseFileUploadOptions {
-  disabled?: boolean;
+
+interface UploadSession {
+  uploading: boolean;
+  uploadError: string | null;
+  attachments: AttachedImage[];
+  loadedFiles: UploadLoadedFile[];
 }
 
-export function useFileUpload({ disabled = false }: UseFileUploadOptions = {}) {
-  const [uploading, setUploading] = useState(false);
-  const [uploadError, setUploadError] = useState<string | null>(null);
-  const [attachments, setAttachments] = useState<AttachedImage[]>([]);
-  const [loadedFiles, setLoadedFiles] = useState<LoadedFile[]>([]);
-  const attachmentsRef = useRef<AttachedImage[]>([]);
-  const uploadingRef = useRef(false);
+interface UploadLoadedFile {
+  path: string;
+  name: string;
+  size: number;
+}
 
-  attachmentsRef.current = attachments;
-  uploadingRef.current = uploading;
+const EMPTY_SESSION: UploadSession = {
+  uploading: false,
+  uploadError: null,
+  attachments: [],
+  loadedFiles: [],
+};
+
+const uploadSessions = new Map<string, UploadSession>();
+const uploadSessionListeners = new Map<string, Set<() => void>>();
+
+function uploadSessionKey(taskId: string | null | undefined): string {
+  const trimmed = (taskId ?? "").trim();
+  return trimmed || "__pending__";
+}
+
+function getUploadSession(key: string): UploadSession {
+  return uploadSessions.get(key) ?? EMPTY_SESSION;
+}
+
+function setUploadSession(key: string, next: UploadSession) {
+  if (
+    !next.uploading &&
+    !next.uploadError &&
+    next.attachments.length === 0 &&
+    next.loadedFiles.length === 0
+  ) {
+    uploadSessions.delete(key);
+  } else {
+    uploadSessions.set(key, next);
+  }
+  uploadSessionListeners.get(key)?.forEach((listener) => listener());
+}
+
+function updateUploadSession(
+  key: string,
+  updater: (prev: UploadSession) => UploadSession,
+) {
+  setUploadSession(key, updater(getUploadSession(key)));
+}
+
+function subscribeUploadSession(key: string, listener: () => void) {
+  let listeners = uploadSessionListeners.get(key);
+  if (!listeners) {
+    listeners = new Set();
+    uploadSessionListeners.set(key, listeners);
+  }
+  listeners.add(listener);
+  return () => {
+    listeners.delete(listener);
+    if (listeners.size === 0) uploadSessionListeners.delete(key);
+  };
+}
+
+interface UseFileUploadOptions {
+  disabled?: boolean;
+  /** Keeps the in-progress upload when the chat screen unmounts. */
+  taskId?: string | null;
+}
+
+export function useFileUpload({ disabled = false, taskId = null }: UseFileUploadOptions = {}) {
+  const sessionKey = uploadSessionKey(taskId);
+  const sessionKeyRef = useRef(sessionKey);
+  sessionKeyRef.current = sessionKey;
+  const session = useSyncExternalStore(
+    useCallback((listener) => subscribeUploadSession(sessionKey, listener), [sessionKey]),
+    useCallback(() => getUploadSession(sessionKey), [sessionKey]),
+    useCallback(() => getUploadSession(sessionKey), [sessionKey]),
+  );
+  const { uploading, uploadError, attachments, loadedFiles } = session;
 
   useEffect(() => {
     if (!uploadError) return;
-    const timer = window.setTimeout(
-      () => setUploadError(null),
-      ERROR_MESSAGE_DISPLAY_DURATION_MS,
-    );
+    const key = sessionKey;
+    const timer = window.setTimeout(() => {
+      updateUploadSession(key, (prev) =>
+        prev.uploadError ? { ...prev, uploadError: null } : prev,
+      );
+    }, ERROR_MESSAGE_DISPLAY_DURATION_MS);
     return () => window.clearTimeout(timer);
-  }, [uploadError]);
+  }, [sessionKey, uploadError]);
 
-  useEffect(() => {
-    return () => {
-      for (const item of attachmentsRef.current) {
-        if (item.previewUrl.startsWith("blob:")) {
-          URL.revokeObjectURL(item.previewUrl);
-        }
-      }
-    };
+  const clearUploadError = useCallback(() => {
+    updateUploadSession(sessionKeyRef.current, (prev) =>
+      prev.uploadError ? { ...prev, uploadError: null } : prev,
+    );
   }, []);
 
-  const clearUploadError = useCallback(() => setUploadError(null), []);
-
   const uploadImageFile = useCallback(async (file: File) => {
-    setUploading(true);
-    setUploadError(null);
+    updateUploadSession(sessionKeyRef.current, (prev) => ({
+      ...prev,
+      uploading: true,
+      uploadError: null,
+    }));
     const previewUrl = URL.createObjectURL(file);
     try {
       const result = await fileUploadService.uploadImage(file);
-      setAttachments((prev) => [
+      updateUploadSession(sessionKeyRef.current, (session) => {
+        const prev = session.attachments;
+        const nextValue = ((prev) => [
         ...prev,
         {
           url: result.url,
           name: result.file_name,
           previewUrl,
         },
-      ]);
+      ])(prev);
+        return { ...session, attachments: nextValue };
+      });
     } catch (err) {
       URL.revokeObjectURL(previewUrl);
       console.error("Image upload failed", err);
-      setUploadError("이미지 업로드에 실패했습니다. 다시 시도해 주세요.");
+      updateUploadSession(sessionKeyRef.current, (prev) => ({ ...prev, uploadError: "이미지 업로드에 실패했습니다. 다시 시도해 주세요." }));
     } finally {
-      setUploading(false);
+      updateUploadSession(sessionKeyRef.current, (prev) => ({ ...prev, uploading: false }));
     }
   }, []);
 
   const uploadImageFiles = useCallback(
     async (files: File[]) => {
-      if (files.length === 0 || disabled || uploadingRef.current) return;
+      if (files.length === 0 || disabled || getUploadSession(sessionKeyRef.current).uploading) return;
       for (const file of files) {
         await uploadImageFile(normalizeImageFile(file, "uploaded_image"));
       }
@@ -145,17 +224,20 @@ export function useFileUpload({ disabled = false }: UseFileUploadOptions = {}) {
 
   const uploadRagFile = useCallback(
     async (file: File, onComplete?: (message: string) => void) => {
-      if (disabled || uploadingRef.current) return;
-      setUploading(true);
-      setUploadError(null);
+      if (disabled || getUploadSession(sessionKeyRef.current).uploading) return;
+      updateUploadSession(sessionKeyRef.current, (prev) => ({
+        ...prev,
+        uploading: true,
+        uploadError: null,
+      }));
       try {
         const result = await fileUploadService.uploadToRag(file);
         onComplete?.(result.message);
       } catch (err) {
         console.error("Document upload failed", err);
-        setUploadError("파일 업로드에 실패했습니다. 다시 시도해 주세요.");
+        updateUploadSession(sessionKeyRef.current, (prev) => ({ ...prev, uploadError: "파일 업로드에 실패했습니다. 다시 시도해 주세요." }));
       } finally {
-        setUploading(false);
+        updateUploadSession(sessionKeyRef.current, (prev) => ({ ...prev, uploading: false }));
       }
     },
     [disabled],
@@ -163,13 +245,18 @@ export function useFileUpload({ disabled = false }: UseFileUploadOptions = {}) {
 
   const loadWorkspaceFiles = useCallback(
     async (files: File[]) => {
-      if (files.length === 0 || disabled || uploadingRef.current) return;
-      setUploading(true);
-      setUploadError(null);
+      if (files.length === 0 || disabled || getUploadSession(sessionKeyRef.current).uploading) return;
+      updateUploadSession(sessionKeyRef.current, (prev) => ({
+        ...prev,
+        uploading: true,
+        uploadError: null,
+      }));
       try {
         for (const file of files) {
           const result = await fileUploadService.loadFile(file);
-          setLoadedFiles((prev) => {
+          updateUploadSession(sessionKeyRef.current, (session) => {
+            const prev = session.loadedFiles;
+            const nextValue = ((prev) => {
             const next = prev.filter((item) => item.path !== result.workspace_path);
             return [
               ...next,
@@ -179,6 +266,8 @@ export function useFileUpload({ disabled = false }: UseFileUploadOptions = {}) {
                 size: file.size,
               },
             ];
+          })(prev);
+            return { ...session, loadedFiles: nextValue };
           });
         }
       } catch (err) {
@@ -192,16 +281,18 @@ export function useFileUpload({ disabled = false }: UseFileUploadOptions = {}) {
             detail = err.message;
           }
         }
-        setUploadError(detail);
+        updateUploadSession(sessionKeyRef.current, (prev) => ({ ...prev, uploadError: detail }));
       } finally {
-        setUploading(false);
+        updateUploadSession(sessionKeyRef.current, (prev) => ({ ...prev, uploading: false }));
       }
     },
     [disabled],
   );
 
   const removeAttachment = useCallback((url: string) => {
-    setAttachments((prev) => {
+    updateUploadSession(sessionKeyRef.current, (session) => {
+      const prev = session.attachments;
+      const nextValue = ((prev) => {
       const next: AttachedImage[] = [];
       for (const item of prev) {
         if (item.url === url) {
@@ -213,11 +304,17 @@ export function useFileUpload({ disabled = false }: UseFileUploadOptions = {}) {
         next.push(item);
       }
       return next;
+    })(prev);
+      return { ...session, attachments: nextValue };
     });
   }, []);
 
   const removeLoadedFile = useCallback((path: string) => {
-    setLoadedFiles((prev) => prev.filter((item) => item.path !== path));
+    updateUploadSession(sessionKeyRef.current, (session) => {
+      const prev = session.loadedFiles;
+      const nextValue = ((prev) => prev.filter((item) => item.path !== path))(prev);
+      return { ...session, loadedFiles: nextValue };
+    });
   }, []);
 
   const attachExistingFile = useCallback(
@@ -226,7 +323,9 @@ export function useFileUpload({ disabled = false }: UseFileUploadOptions = {}) {
       const path = (file.path || "").trim();
       const name = (file.name || "").trim();
       if (!path || !name) return;
-      setLoadedFiles((prev) => {
+      updateUploadSession(sessionKeyRef.current, (session) => {
+        const prev = session.loadedFiles;
+        const nextValue = ((prev) => {
         const next = prev.filter((item) => item.path !== path);
         return [
           ...next,
@@ -236,21 +335,27 @@ export function useFileUpload({ disabled = false }: UseFileUploadOptions = {}) {
             size: Number.isFinite(file.size) && file.size > 0 ? file.size : 0,
           },
         ];
+      })(prev);
+        return { ...session, loadedFiles: nextValue };
       });
     },
     [disabled],
   );
 
   const clearAttachments = useCallback(() => {
-    setAttachments((prev) => {
+    updateUploadSession(sessionKeyRef.current, (session) => {
+      const prev = session.attachments;
+      const nextValue = ((prev) => {
       for (const item of prev) {
         if (item.previewUrl.startsWith("blob:")) {
           URL.revokeObjectURL(item.previewUrl);
         }
       }
       return [];
+    })(prev);
+      return { ...session, attachments: nextValue };
     });
-    setLoadedFiles([]);
+    updateUploadSession(sessionKeyRef.current, (prev) => ({ ...prev, loadedFiles: [] }));
   }, []);
 
   const [dragOver, setDragOver] = useState(false);
@@ -258,7 +363,7 @@ export function useFileUpload({ disabled = false }: UseFileUploadOptions = {}) {
 
   const onDragEnter = useCallback(
     (e: DragEvent) => {
-      if (disabled || uploadingRef.current) return;
+      if (disabled || getUploadSession(sessionKeyRef.current).uploading) return;
       if (![...e.dataTransfer.types].includes("Files")) return;
       e.preventDefault();
       dragDepthRef.current += 1;
@@ -269,7 +374,7 @@ export function useFileUpload({ disabled = false }: UseFileUploadOptions = {}) {
 
   const onDragOver = useCallback(
     (e: DragEvent) => {
-      if (disabled || uploadingRef.current) return;
+      if (disabled || getUploadSession(sessionKeyRef.current).uploading) return;
       if (![...e.dataTransfer.types].includes("Files")) return;
       e.preventDefault();
       e.dataTransfer.dropEffect = "copy";
@@ -291,7 +396,7 @@ export function useFileUpload({ disabled = false }: UseFileUploadOptions = {}) {
       e.preventDefault();
       dragDepthRef.current = 0;
       setDragOver(false);
-      if (disabled || uploadingRef.current) return;
+      if (disabled || getUploadSession(sessionKeyRef.current).uploading) return;
       const imageFiles = Array.from(e.dataTransfer.files ?? []).filter(isImageFile);
       await uploadImageFiles(imageFiles);
     },
@@ -304,7 +409,7 @@ export function useFileUpload({ disabled = false }: UseFileUploadOptions = {}) {
     attachments,
     loadedFiles,
     dragOver,
-    isUploading: () => uploadingRef.current,
+    isUploading: () => getUploadSession(sessionKeyRef.current).uploading,
     clearUploadError,
     uploadImageFiles,
     uploadRagFile,

@@ -31,6 +31,10 @@ AGENT_STREAM_MAX_SECONDS = 14400
 # After SSE times out / client disconnects, wait this long for the agent
 # worker to finish so the final answer can still be persisted for refresh.
 LATE_PERSIST_WAIT_SECONDS = 1800
+# Write the visible partial answer while tokens are still arriving.
+STREAMING_CHECKPOINT_SECONDS = 2.0
+# Copy the working DB to durable storage less often than the SQLite upsert.
+STREAMING_FLUSH_SECONDS = 5.0
 DEFAULT_IMAGE_PROMPT = "첨부한 이미지를 분석해주세요."
 DEFAULT_FILE_PROMPT = "첨부한 파일을 분석해주세요."
 
@@ -388,7 +392,11 @@ def _spawn_late_persist(
 
             # Another path (SSE finally / hydrate) may have already written.
             existing = task_store.list_messages(task_id, user_id)
-            if existing and existing[-1].get("role") == "assistant":
+            if (
+                existing
+                and existing[-1].get("role") == "assistant"
+                and existing[-1].get("status") != task_store.MESSAGE_STATUS_STREAMING
+            ):
                 # Text-only hydrate may have won the race — backfill tools.
                 last = existing[-1]
                 if events and not (last.get("tool_events") or []):
@@ -447,8 +455,57 @@ def _spawn_late_persist(
 
 
 def _messages_need_assistant(task_id: str, user_id: str) -> bool:
+    """True until the latest row is a finished assistant message.
+
+    A ``streaming`` draft still needs the final overwrite.
+    """
     messages = task_store.list_messages(task_id, user_id)
-    return not messages or messages[-1].get("role") != "assistant"
+    if not messages:
+        return True
+    last = messages[-1]
+    if last.get("role") != "assistant":
+        return True
+    return last.get("status") == task_store.MESSAGE_STATUS_STREAMING
+
+def _checkpoint_streaming_draft(
+    *,
+    task_id: str | None,
+    user_id: str | None,
+    streamed_text: str,
+    tool_events: list[dict[str, Any]],
+    images: list[str] | None,
+    state: dict[str, Any],
+    force: bool = False,
+) -> None:
+    """Upsert the in-progress assistant row so a refresh can show it."""
+    if not task_id or not user_id:
+        return
+    content = streamed_text or ""
+    events = list(tool_events)
+    image_list = list(images or [])
+    if not content.strip() and not events and not image_list:
+        return
+    now = time.monotonic()
+    if not force and now - float(state.get("at") or 0) < STREAMING_CHECKPOINT_SECONDS:
+        return
+    try:
+        task_store.upsert_streaming_message(
+            task_id,
+            user_id,
+            content,
+            images=image_list,
+            tool_events=events,
+        )
+    except Exception:
+        logger.exception("Failed to checkpoint streaming assistant draft")
+        return
+    state["at"] = now
+    if force or now - float(state.get("flushed_at") or 0) >= STREAMING_FLUSH_SECONDS:
+        try:
+            flush_persist(user_id)
+        except Exception:
+            logger.exception("Failed to flush streaming assistant draft")
+        state["flushed_at"] = now
 
 
 def _persist_assistant_now(
@@ -600,6 +657,7 @@ def chat_stream(task_id: str, body: ChatRequest, request: Request):
         tool_meta: dict[str, dict[str, Any]] = {}
         streamed_text = ""
         sse_closed_early = False
+        checkpoint_state: dict[str, Any] = {"at": 0.0, "flushed_at": 0.0}
         should_kick_graph = False
 
         try:
@@ -660,6 +718,19 @@ def chat_stream(task_id: str, body: ChatRequest, request: Request):
                 )
                 for event in events_to_emit:
                     yield _sse_event(event)
+                if not (
+                    result_holder.get("cancelled")
+                    or run_cancel.is_cancelled(task_id)
+                    or run_cancel.is_cancelled(runtime_session_id)
+                ):
+                    _checkpoint_streaming_draft(
+                        task_id=task_id,
+                        user_id=user_id,
+                        streamed_text=streamed_text,
+                        tool_events=tool_events,
+                        images=list(result_holder.get("images") or []),
+                        state=checkpoint_state,
+                    )
 
             if "error" in result_holder:
                 error_text = f"Error: {result_holder['error']}"
@@ -721,7 +792,21 @@ def chat_stream(task_id: str, body: ChatRequest, request: Request):
                     "SSE disconnected after cancel; skip server persist "
                     "(client stop message)"
                 )
-            elif not sse_closed_early and _messages_need_assistant(task_id, user_id):
+            else:
+                _checkpoint_streaming_draft(
+                    task_id=task_id,
+                    user_id=user_id,
+                    streamed_text=streamed_text,
+                    tool_events=tool_events,
+                    images=list(result_holder.get("images") or []),
+                    state=checkpoint_state,
+                    force=True,
+                )
+            if (
+                not user_cancelled
+                and not sse_closed_early
+                and _messages_need_assistant(task_id, user_id)
+            ):
                 already_final = bool(
                     (result_holder.get("content") or "").strip()
                 ) or ("error" in result_holder)

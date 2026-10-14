@@ -248,6 +248,14 @@ def _resolve_tool_events_for_hydrate(
     return []
 
 
+def _is_streaming_assistant(message: dict[str, Any] | None) -> bool:
+    return bool(
+        message
+        and message.get("role") == "assistant"
+        and message.get("status") == task_store.MESSAGE_STATUS_STREAMING
+    )
+
+
 def _hydrate_assistant_if_needed(
     *,
     task_id: str,
@@ -266,6 +274,25 @@ def _hydrate_assistant_if_needed(
     messages = task_store.list_messages(task_id, user_id)
     if messages and messages[-1].get("role") == "assistant":
         last = messages[-1]
+        if _is_streaming_assistant(last):
+            if not content and not events:
+                return False
+            task_store.add_message(
+                task_id,
+                "assistant",
+                content,
+                user_id=user_id,
+                images=images or [],
+                tool_events=events,
+            )
+            flush_persist(user_id)
+            logger.info(
+                "Finalized streaming assistant from run query (%s chars, %s events) task=%s",
+                len(content),
+                len(events),
+                task_id,
+            )
+            return True
         existing_events = last.get("tool_events") or []
         if events and not existing_events:
             updated = task_store.update_message_tool_events(
@@ -319,10 +346,14 @@ def query_task_run(task_id: str, user_id: str) -> dict[str, Any]:
 
     session_id = task.get("runtime_session_id") or task_id
     messages = task_store.list_messages(task_id, user_id)
-    last_role = messages[-1]["role"] if messages else None
+    last = messages[-1] if messages else None
+    last_role = last["role"] if last else None
+    last_streaming = _is_streaming_assistant(last)
 
-    # 1) Messages already complete → idle (still allow tool_events backfill)
-    if last_role == "assistant":
+    # 1) Messages already complete → idle (still allow tool_events backfill).
+    # A streaming draft is not finished; keep it visible and let the registry
+    # decide whether the agent is still running.
+    if last_role == "assistant" and not last_streaming:
         last = messages[-1]
         existing_events = last.get("tool_events") or []
         hydrated = False
@@ -351,13 +382,15 @@ def query_task_run(task_id: str, user_id: str) -> dict[str, Any]:
     # 2) In-process registry (browser refresh while same process still runs)
     reg = run_registry.get(task_id)
     if reg and reg.get("status") == "running":
+        draft_content = (last.get("content") or "") if last_streaming and last else ""
+        draft_images = list(last.get("images") or []) if last_streaming and last else []
         return {
             "task_id": task_id,
             "status": "running",
-            "content": "",
-            "images": [],
+            "content": draft_content,
+            "images": draft_images,
             "error": None,
-            "source": "registry",
+            "source": "registry" if not last_streaming else "messages",
             "hydrated": False,
         }
 
@@ -372,7 +405,7 @@ def query_task_run(task_id: str, user_id: str) -> dict[str, Any]:
             registry_events=reg.get("tool_events") or [],
         )
         hydrated = False
-        if (content or tool_events) and last_role == "user":
+        if (content or tool_events) and (last_role == "user" or last_streaming):
             hydrated = _hydrate_assistant_if_needed(
                 task_id=task_id,
                 user_id=user_id,
@@ -430,6 +463,18 @@ def query_task_run(task_id: str, user_id: str) -> dict[str, Any]:
             "images": [],
             "error": None,
             "source": "checkpoint",
+            "hydrated": False,
+        }
+
+    # Stream died after a draft was saved. Keep that row on screen.
+    if last_streaming and last:
+        return {
+            "task_id": task_id,
+            "status": "idle",
+            "content": last.get("content") or "",
+            "images": last.get("images") or [],
+            "error": None,
+            "source": "messages",
             "hydrated": False,
         }
 

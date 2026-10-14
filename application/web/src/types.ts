@@ -33,6 +33,8 @@ export interface Message {
   content: string;
   images: string[];
   tool_events: ToolEvent[];
+  /** `streaming` is a partial assistant row overwritten when the turn finishes. */
+  status?: "streaming" | "complete";
   created_at: string;
 }
 

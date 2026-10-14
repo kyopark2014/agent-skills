@@ -83,7 +83,15 @@ export function ChatThread({
           {messages.map((m) => (
             <MessageFromRecord key={m.id} message={m} />
           ))}
-          {streaming && (
+          {streaming && messages[messages.length - 1]?.status === "streaming" && (
+            <div className="message-row assistant">
+              <div className="streaming-indicator" aria-label="Thinking">
+                Thinking
+                <span className="thinking-ellipsis" aria-hidden="true" />
+              </div>
+            </div>
+          )}
+          {streaming && messages[messages.length - 1]?.status !== "streaming" && (
             <>
               {streamEvents.length > 0 || streamText ? (
                 <MessageBubble
