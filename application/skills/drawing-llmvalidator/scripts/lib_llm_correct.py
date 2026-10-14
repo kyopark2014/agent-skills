@@ -728,23 +728,23 @@ def demote_closed_furniture_boxes(
 _MEETING_RE = re.compile(r"^접견실")
 
 
-def demote_meeting_room_interiors(
+def _demote_enclosed_interiors(
     msp,
     segs: list[AxisSeg],
+    label_test,
     *,
     exclude_ids: set[int] | None = None,
     inset_mm: float = 250.0,
 ) -> set[int]:
-    """접견실 내부의 의자·프로젝터 받침대는 벽이 아니다.
+    """라벨을 감싼 외곽 안쪽에 선 전체가 들어간 것만 제거한다.
 
-    실명 라벨을 감싼 외곽 안쪽에 선 전체가 들어간 것만 제거한다.
     외벽과 H-Beam 기둥은 남긴다.
     """
     exclude_ids = exclude_ids or set()
     labels = [
         (x, y)
         for x, y, s in _iter_text_labels(msp)
-        if _MEETING_RE.search(s.strip())
+        if label_test(s)
     ]
     if not labels:
         return set()
@@ -825,6 +825,46 @@ def demote_meeting_room_interiors(
             demote.add(id(s.entity))
             break
     return demote
+
+
+def demote_meeting_room_interiors(
+    msp,
+    segs: list[AxisSeg],
+    *,
+    exclude_ids: set[int] | None = None,
+    inset_mm: float = 250.0,
+) -> set[int]:
+    """접견실 내부의 의자·프로젝터 받침대는 벽이 아니다."""
+    return _demote_enclosed_interiors(
+        msp,
+        segs,
+        lambda text: bool(_MEETING_RE.search(text.strip())),
+        exclude_ids=exclude_ids,
+        inset_mm=inset_mm,
+    )
+
+
+def demote_bed_ward_interiors(
+    msp,
+    segs: list[AxisSeg],
+    *,
+    exclude_ids: set[int] | None = None,
+    inset_mm: float = 250.0,
+) -> set[int]:
+    """2인실#1, 4인실#2처럼 인실# 글자 안쪽은 벽이 아니다.
+
+    외곽은 남겨 그 글자가 방 하나로 잡히게 한다.
+    """
+    def _match(text: str) -> bool:
+        return "인실#" in text.replace(" ", "").replace("＃", "#")
+
+    return _demote_enclosed_interiors(
+        msp,
+        segs,
+        _match,
+        exclude_ids=exclude_ids,
+        inset_mm=inset_mm,
+    )
 
 
 _SERVING_RE = re.compile(r"배식대")
@@ -5022,8 +5062,30 @@ def protect_stair_enclosure_entities(
     return protect
 
 
+_AIR_SHOWER_RE = re.compile(r"AIR\s*SHOWER|에어\s*샤워", re.IGNORECASE)
+
+
+def _is_air_shower_text(text: str) -> bool:
+    return _AIR_SHOWER_RE.search(text) is not None
+
+
+def _near_air_shower(msp, cx: float, cy: float, *, radius_mm: float = 2500.0) -> bool:
+    """X 중심 2.5 m 안에 AIR SHOWER·에어샤워 글자가 있으면 샤프트가 아니다."""
+    limit = radius_mm * radius_mm
+    for x, y, text in _iter_text_labels(msp):
+        if not _is_air_shower_text(text):
+            continue
+        if (x - cx) ** 2 + (y - cy) ** 2 <= limit:
+            return True
+    return False
+
+
 def find_elevator_shafts(msp) -> list[dict[str, float]]:
-    """엘리베이터 샤프트 — 교차 대각선(X) 쌍 → 중심·반폭·반높이."""
+    """엘리베이터 샤프트 — 교차 대각선(X) 쌍 → 중심·반폭·반높이.
+
+    AIR SHOWER·에어샤워 글자 옆 X는 샤프트가 아니다. 그 X에 걸린 긴 벽을
+    엘리베이터 문면으로 내리지 않는다.
+    """
     diags: list[tuple[float, float, float, float, float, float, float, float]] = []
     for e in _entities(msp):
         if _dxftype(e) != "LINE":
@@ -5062,7 +5124,7 @@ def find_elevator_shafts(msp) -> list[dict[str, float]]:
         if any(math.hypot(sh["cx"] - u["cx"], sh["cy"] - u["cy"]) < 1500.0 for u in uniq):
             continue
         uniq.append(sh)
-    return uniq
+    return [sh for sh in uniq if not _near_air_shower(msp, sh["cx"], sh["cy"])]
 
 
 def find_elevator_shaft_centers(msp) -> list[tuple[float, float]]:
@@ -16520,7 +16582,7 @@ def close_leaking_wall_ends(msp) -> int:
             continue
         name = ev.norm_name(text)
         folded = name.upper()
-        if ev.is_excluded_area_label(text) or any(token in folded for token in ("도로", "부지", "인승", "ELEV", "창고", "차고", "화장실", "입구", "출구", "상부OPEN")):
+        if ev.is_excluded_area_label(text) or any(token in folded for token in ("도로", "부지", "인승", "ELEV", "승강기", "창고", "차고", "화장실", "입구", "출구", "상부OPEN")):
             continue
         if folded in {"WC", "W.C", "W.C."} or folded.startswith("WC(") or folded.startswith("W.C("):
             continue
@@ -21356,7 +21418,7 @@ def _promote_room_enclosure(msp, anchors: list[tuple[float, float]]) -> int:
 def _excluded_area_text(text: str) -> bool:
     """면적에서 빼는 실명 중, 둘러싼 선을 벽으로 올릴 대상.
 
-    OPEN, 홀·홈, 입구, 출구, 양치공간, 청소도구함, 오픈, 조경, 배경, 평면도, 비품고을은 라벨에서만 빼고 벽으로 올리지 않는다.
+    OPEN, 홀·홈, 입구, 출구, 양치공간, 청소도구함, 청소도구실, 오픈, 조경, 배경, 평면도, 비품고을, 항습기, 화물, 휠체어, 린넨실, 오물처리실, (장애인, 구급자, 응급환자, 의료가스실, 기계실, 분전함, 세척실, 탕비실, 물품, 스트레쳐, E.V는 라벨에서만 빼고 벽으로 올리지 않는다.
     """
     compact = text.replace(" ", "")
     folded = compact.upper()
@@ -21366,11 +21428,30 @@ def _excluded_area_text(text: str) -> bool:
         or "출구" in compact
         or "양치공간" in compact
         or "청소도구함" in compact
+        or "청소도구실" in compact
         or "오픈" in compact
         or "조경" in compact
         or "배경" in compact
         or "평면도" in compact
         or "비품고을" in compact
+        or "항습기" in compact
+        or "화물" in compact
+        or "휠체어" in compact
+        or "린넨실" in compact
+        or "오물처리실" in compact
+        or "구급자" in compact
+        or "응급환자" in compact
+        or "의료가스실" in compact
+        or "기계실" in compact
+        or "분전함" in compact
+        or "세척실" in compact
+        or "(장애인" in compact
+        or "（장애인" in compact
+        or "탕비실" in compact
+        or "물품" in compact
+        or "스트레쳐" in compact
+        or "스트레처" in compact
+        or re.fullmatch(r"EV(?:[#＃-]?\d+)?", folded.replace(".", "")) is not None
         or compact.startswith("홀-")
         or compact.startswith("홈-")
     ):
@@ -22196,7 +22277,7 @@ def promote_slanted_double_walls(msp) -> int:
 
 
 def promote_service_core_walls(msp) -> int:
-    """EPS, PS, 엘리베이터, 계단은 벽이다.
+    """EPS, PS, ELEV, 승강기, 계단은 벽이다.
 
     글자가 들어 있는 외곽과 벽 두께를 올리고, 계단 디딤도 벽으로 둔다.
     문 스윙과 샤프트 안 X는 변 길이로 걸러 남긴다.
@@ -22206,7 +22287,7 @@ def promote_service_core_walls(msp) -> int:
     for x, y, text in _iter_text_labels(msp):
         token = text.strip().upper().replace(" ", "")
         shaft = token.replace(".", "")
-        if re.fullmatch(r"(?:EPS|PS)(?:[#＃-]?\d+)?", shaft) or token.startswith("ELEV") or shaft.startswith("ELEV"):
+        if re.fullmatch(r"(?:EPS|PS)(?:[#＃-]?\d+)?", shaft) or token.startswith("ELEV") or shaft.startswith("ELEV") or "승강기" in token:
             anchors.append((x, y))
     n = _promote_core_rectangles(msp, segs, anchors)
     n += _promote_stair_runs(msp, segs)
@@ -22280,6 +22361,7 @@ def apply_corrections(
     if do_box_demote:
         furn_ids = demote_fitness_equipment(msp, segs, exclude_ids=hbeam_ids)
         furn_ids |= demote_meeting_room_interiors(msp, segs, exclude_ids=hbeam_ids)
+        furn_ids |= demote_bed_ward_interiors(msp, segs, exclude_ids=hbeam_ids)
         furn_ids |= demote_landscape_walls(msp, segs, exclude_ids=hbeam_ids)
         furn_ids |= demote_serving_counter_walls(msp, segs, exclude_ids=hbeam_ids)
         promote = [s for s in promote if id(s.entity) not in furn_ids]
@@ -22311,6 +22393,7 @@ def apply_corrections(
         furniture_box_demote = demote_closed_furniture_boxes(msp, exclude_ids=hbeam_ids)
         fitness_demote = demote_fitness_equipment(msp, segs, exclude_ids=hbeam_ids)
         fitness_demote |= demote_meeting_room_interiors(msp, segs, exclude_ids=hbeam_ids)
+        fitness_demote |= demote_bed_ward_interiors(msp, segs, exclude_ids=hbeam_ids)
         fitness_demote |= demote_serving_counter_walls(msp, segs, exclude_ids=hbeam_ids)
         landscape_demote = demote_landscape_walls(msp, segs, exclude_ids=hbeam_ids)
         demote_ids |= furniture_box_demote
@@ -22408,6 +22491,7 @@ def apply_corrections(
         post_furn = demote_closed_furniture_boxes(msp, exclude_ids=hbeam_ids)
         post_furn |= demote_fitness_equipment(msp, segs_after, exclude_ids=hbeam_ids)
         post_furn |= demote_meeting_room_interiors(msp, segs_after, exclude_ids=hbeam_ids)
+        post_furn |= demote_bed_ward_interiors(msp, segs_after, exclude_ids=hbeam_ids)
         post_furn |= demote_serving_counter_walls(msp, segs_after, exclude_ids=hbeam_ids)
         post_furn |= demote_landscape_walls(msp, segs_after, exclude_ids=hbeam_ids)
         for e in _entities(msp):

@@ -1,4 +1,4 @@
-"""방풍실, 보관실, 퇴식대, 샤워실, 고압, 저압, 계단실, 복도, EPS, OPEN, 홀-, 홈-, 입구, 출구, 양치공간, 청소도구함, 오픈, 조경, 배경, 평면도, 비품고을은 면적 실명이 아니다."""
+"""방풍실, 보관실, 퇴식대, 샤워실, 고압, 저압, 계단실, 복도, 승강기, EPS, OPEN, 홀-, 홈-, 입구, 출구, 양치공간, 청소도구함, 청소도구실, 오픈, 조경, 배경, 평면도, 비품고을, 항습기, 화물은 면적 실명이 아니다."""
 
 from __future__ import annotations
 
@@ -13,9 +13,46 @@ import evaluate_room
 
 class ExcludedAreaLabelTests(unittest.TestCase):
     def test_named_non_area_rooms_are_not_labels(self):
-        for text in ("방풍실-1", "소모품보관실", "퇴식대", "샤워실", "남샤워실-1", "고압", "저압반", "계단실-2", "복도", "복도-1", "E.P.S", "EPS", "P.S", "OPEN", "상부 OPEN", "홀-4", "홈-1", "입구", "출구", "장비반입구", "비상출구", "양치공간", "양치공간-1", "양치 공간-2", "청소도구함", "청소 도구함", "청소도구함-1", "오픈", "상부 오픈", "조경", "외부조경", "배경", "평면도", "1층 평면도", "비품고을", "비품 고을"):
+        for text in ("방풍실-1", "소모품보관실", "퇴식대", "샤워실", "남샤워실-1", "고압", "저압반", "계단실-2", "복도", "복도-1", "E.P.S", "EPS", "P.S", "OPEN", "상부 OPEN", "홀-4", "홈-1", "입구", "출구", "장비반입구", "비상출구", "양치공간", "양치공간-1", "양치 공간-2", "청소도구함", "청소 도구함", "청소도구함-1", "청소도구실", "청소 도구실", "청소도구실-1", "청소도구실#1", "오픈", "상부 오픈", "조경", "외부조경", "배경", "평면도", "1층 평면도", "비품고을", "비품 고을", "승강기", "승강기-1", "승강기#2", "항습기", "항습기-1", "화물", "화물-1", "계단실#2", "계단실＃2", "복도#2", "E.V", "E.V#2", "E.V-1", "EV＃2", "휠체어", "휠체어#2", "린넨실", "린넨실#2", "오물처리실", "오물처리실#1", "(장애인)", "(장애인)화장실", "구급자", "응급환자", "의료가스실", "의료가스실-1", "기계실", "기계실#2", "분전함", "분전함-1", "세척실", "세척실(남)", "장비보관실", "물품보관실", "보관실#1", "탕비실", "탕비실#2", "물품", "물품#1", "스트레쳐", "스트레쳐#2", "스트레처#1"):
             self.assertFalse(evaluate_room.is_room_label(text), text)
             self.assertTrue(evaluate_room.is_region_label(text), text)
+
+    def test_stair_shares_a_face_like_a_bathroom(self):
+        for text in ("화장실", "화장실-1", "계단실", "계단실-2", "계단실#2", "계단실＃2", "WC"):
+            self.assertTrue(evaluate_room.is_split_anchor(text), text)
+            self.assertFalse(evaluate_room.is_room_label(text), text)
+        self.assertFalse(evaluate_room.is_split_anchor("교실"))
+
+    def test_equipment_callouts_are_not_area_labels(self):
+        for text in (
+            "수납장",
+            "수납장-1",
+            "신발장",
+            "정수기",
+            "휴대폰장",
+            "게시판",
+            "렉장",
+            "랙장",
+            "냉장고",
+            "제빙기",
+            "머신",
+            "커피",
+            "커피머신",
+            "전자랜지",
+            "전자레인지",
+            "템블러",
+            "텀블러",
+            "세척기",
+            "식기세척기",
+        ):
+            self.assertFalse(evaluate_room.is_room_label(text), text)
+            self.assertFalse(evaluate_room.is_region_label(text), text)
+            self.assertTrue(evaluate_room.is_equipment_label(text), text)
+        self.assertFalse(evaluate_room.is_equipment_label("ELEV"))
+        self.assertFalse(evaluate_room.is_equipment_label("ELEV-1"))
+        self.assertFalse(evaluate_room.is_equipment_label("E.V"))
+        self.assertFalse(evaluate_room.is_excluded_area_label("ELEV-1"))
+        self.assertTrue(evaluate_room.is_room_label("ELEV-1"))
 
     def test_ordinary_room_names_stay(self):
         self.assertTrue(evaluate_room.is_room_label("교실"))

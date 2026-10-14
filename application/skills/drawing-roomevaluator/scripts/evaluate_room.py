@@ -90,7 +90,7 @@ def _roomish(text: str) -> bool:
 
 
 def is_excluded_area_label(text: str) -> bool:
-    """면적과 실 라벨에서 빼는 이름. 방풍실, 보관실, 퇴식대, 샤워실, 고압, 저압, 계단실, 복도, EPS, OPEN, 홀-, 홈-, 입구, 출구, 양치공간, 청소도구함, 오픈, 조경, 배경, 평면도, 비품고을."""
+    """면적과 실 라벨에서 빼는 이름. 방풍실, 보관실, 퇴식대, 샤워실, 고압, 저압, 계단실, 복도, 승강기, EPS, OPEN, 홀-, 홈-, 입구, 출구, 양치공간, 청소도구함, 청소도구실, 오픈, 조경, 배경, 평면도, 비품고을, 항습기, 화물, 휠체어, 린넨실, 오물처리실, (장애인, 구급자, 응급환자, 의료가스실, 기계실, 분전함, 세척실, 탕비실, 물품, 스트레쳐, E.V."""
     name = norm_name(text)
     folded = name.upper()
     if (
@@ -99,19 +99,65 @@ def is_excluded_area_label(text: str) -> bool:
         or "출구" in folded
         or "양치공간" in folded
         or "청소도구함" in folded
+        or "청소도구실" in folded
         or "오픈" in folded
         or "조경" in folded
         or "배경" in folded
         or "평면도" in folded
         or "비품고을" in folded
+        or "항습기" in folded
+        or "화물" in folded
+        or "휠체어" in folded
+        or "린넨실" in folded
+        or "오물처리실" in folded
+        or "구급자" in folded
+        or "응급환자" in folded
+        or "의료가스실" in folded
+        or "기계실" in folded
+        or "분전함" in folded
+        or "세척실" in folded
+        or "(장애인" in folded
+        or "（장애인" in folded
+        or "탕비실" in folded
+        or "물품" in folded
+        or "스트레쳐" in folded
+        or "스트레처" in folded
+        or re.fullmatch(r"EV(?:[#＃-]?\d+)?", folded.replace(".", "")) is not None
         or folded.startswith("홀-")
         or folded.startswith("홈-")
     ):
         return True
-    if any(token in folded for token in ("방풍실", "보관실", "퇴식대", "샤워실", "고압", "저압", "계단실", "복도")):
+    if any(token in folded for token in ("방풍실", "보관실", "퇴식대", "샤워실", "고압", "저압", "계단실", "복도", "승강기")):
         return True
     shaft = folded.replace(".", "")
     return re.fullmatch(r"(?:EPS|PS)(?:[#＃-]?\d+)?", shaft) is not None
+
+
+def is_equipment_label(text: str) -> bool:
+    """면적을 잡지 않는 집기·설비 표기. E.V는 여기가 아니라 면적 제외 이름이다."""
+    name = norm_name(text)
+    folded = name.upper().replace(".", "")
+    return any(
+        token in folded
+        for token in (
+            "수납장",
+            "신발장",
+            "정수기",
+            "휴대폰장",
+            "게시판",
+            "렉장",
+            "랙장",
+            "냉장고",
+            "제빙기",
+            "머신",
+            "커피",
+            "전자랜지",
+            "전자레인지",
+            "템블러",
+            "텀블러",
+            "세척기",
+        )
+    )
 
 
 def is_room_label(text: str) -> bool:
@@ -119,7 +165,7 @@ def is_room_label(text: str) -> bool:
     name = norm_name(text)
     # 마감·비치·주차 안내, 창고, 차고, 화장실, 방풍실, 보관실, 퇴식대, 샤워실, 고압, 저압, 계단실, 복도, EPS, WC, 입구, 출구, 상부 OPEN, DA는 면적 실이 아니다.
     folded = name.upper()
-    if is_excluded_area_label(text):
+    if is_excluded_area_label(text) or is_equipment_label(text):
         return False
     if any(token in folded for token in ("노출콘크리트", "질식소화덮개", "주차", "창고", "차고", "화장실", "입구", "출구", "상부OPEN")):
         return False
@@ -148,7 +194,7 @@ def is_split_anchor(text: str) -> bool:
         return False
     name = norm_name(text)
     folded = name.upper()
-    if "화장실" in folded:
+    if "화장실" in folded or "계단실" in folded:
         return True
     if folded in {"WC", "W.C", "W.C."}:
         return True

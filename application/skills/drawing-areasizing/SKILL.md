@@ -1,7 +1,7 @@
 ---
 name: drawing-areasizing
 description: >-
-  CAD/DXF 도면을 층별 추출, 벽 검출, Vision LLM 벽 검증, 라벨 실 면적 조사까지
+  CAD/DXF/DWG 도면을 층별 추출, 벽 검출, Vision LLM 벽 검증, 라벨 실 면적 조사까지
   한 번에 수행합니다. 도면 분석, 면적 조사, 실명 면적, 전체 실 면적, area sizing,
   "이 도면 면적 뽑아" 요청 시 이 스킬을 사용합니다. 내부에서 drawing-devider,
   drawing-walldetector, drawing-llmvalidator, drawing-totalroom 을 순서대로
@@ -26,7 +26,7 @@ drawing-totalroom      floor_label_detected
 
 ## When to Use
 
-- DXF·평면도에서 **추출부터 라벨 실 면적까지** 한 번에 필요할 때
+- DXF·DWG·평면도에서 **추출부터 라벨 실 면적까지** 한 번에 필요할 때. DWG는 drawing-devider가 DXF로 바꾼 뒤 이어서 처리한다
 - "도면 분석", "면적 조사", "실명 면적", "전체 실 면적"
 - 건물 이름만 있고 네 단계를 이어서 달라고 할 때
 
@@ -86,7 +86,7 @@ test -d "$ARTIFACTS_DIR"
 2. 건물·프로젝트 이름은 `drawings[].source_filename`에 맞춘다. 공백·대소문자는 무시하고, 그 말이 파일명에 들어 있으면 그 도면이다. 없으면 `drawing_id`, `folder`를 같은 방식으로 본다. 없거나 둘 이상이면 `source_filename`을 보여주고 고르게 한다.
 3. 사용자가 층을 지정하면 그 층만 네 단계 모두 처리한다. `1층`은 `1F`, `지하1층`은 `B1F`, `옥상`은 `RF`. `floor`가 없고 `name_confirmed`가 false이면 `title`에 그 층 표기가 있는 항목이 후보다. 후보가 둘 이상이면 `floor`와 `title`을 보여주고 고른다.
 4. 층을 말하지 않으면, ①에서 발견된 층(`discovered_floors`, 도곽이면 `sheet_XX` 포함)을 순서대로 모두 처리한다. `sheet_XX`는 층 이름이 미확정인 도곽이지, 빼 두는 층이 아니다.
-5. 원본 DXF만 있고 목록에 없으면 `drawing-devider`로 추출한 뒤 그 `drawing_id`를 대상으로 삼는다. 원본 DXF는 수정하지 않는다.
+5. 원본 DXF 또는 DWG만 있고 목록에 없으면 `drawing-devider`로 추출한 뒤 그 `drawing_id`를 대상으로 삼는다. `--dxf`에 DWG 경로를 그대로 넣는다. 원본 파일은 수정하지 않는다.
 
 ## Workflow
 

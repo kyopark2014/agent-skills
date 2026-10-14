@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
-지원동 DXF → 층별 floor_original.dxf (+ .png) 전처리.
+지원동 DXF/DWG → 층별 floor_original.dxf (+ .png) 전처리.
+DWG는 도면 폴더의 DXF로 바꾼 뒤 같은 경로로 추출한다.
 
 원본은 XREF/블록 중심(277MB)이라 modelspace 순회만으로는 도면이 거의 없다.
 해당 층 INSERT만 골라 explode한 뒤 `floors/<F>/floor_original.dxf`를 만든다.
@@ -46,6 +47,7 @@ _SKILLS_DIR = SCRIPTS_DIR.parents[1]
 if str(_SKILLS_DIR) not in sys.path:
     sys.path.insert(0, str(_SKILLS_DIR))
 
+from lib_dwg import DwgConvertError, ensure_dxf  # noqa: E402
 from lib_korean_dxf import apply_korean_text, read_dxf  # noqa: E402
 from lib_render import render_floor_original_preview  # noqa: E402
 from lib_sheet import discover_layout, normalize_floor_token  # noqa: E402
@@ -1118,19 +1120,27 @@ def extract_sheet_floor(
 
 
 def default_dxf_path() -> Path:
-    """ARTIFACTS_DIR 또는 cwd에서 *.dxf 탐색. 없으면 --dxf 필수."""
+    """ARTIFACTS_DIR 또는 cwd에서 DXF, 없으면 DWG. 없으면 --dxf 필수."""
     for base in (resolve_artifacts_dir(), Path.cwd()):
-        matches = sorted(base.glob("*.dxf"))
-        if matches:
-            return matches[0]
+        found = _first_drawing(base)
+        if found is not None:
+            return found
         raw = base / "raw"
         if raw.is_dir():
-            matches = sorted(raw.glob("*.dxf"))
-            if matches:
-                return matches[0]
+            found = _first_drawing(raw)
+            if found is not None:
+                return found
     raise FileNotFoundError(
-        "입력 DXF를 찾지 못했습니다. --dxf <path> 로 지정하세요."
+        "입력 DXF/DWG를 찾지 못했습니다. --dxf <path> 로 지정하세요."
     )
+
+
+def _first_drawing(base: Path) -> Path | None:
+    for pattern in ("*.dxf", "*.dwg"):
+        matches = sorted(base.glob(pattern))
+        if matches:
+            return matches[0]
+    return None
 
 
 def parse_floor_spec(raw: str) -> list[str] | None:
@@ -1218,7 +1228,12 @@ def main() -> int:
     parser = argparse.ArgumentParser(
         description="원본 DXF → floors/<F>/floor_original.dxf (+ .png)"
     )
-    parser.add_argument("--dxf", type=Path, default=None, help="입력 DXF (기본: ARTIFACTS_DIR/*.dxf)")
+    parser.add_argument(
+        "--dxf",
+        type=Path,
+        default=None,
+        help="입력 DXF 또는 DWG (기본: ARTIFACTS_DIR/*.dxf, 없으면 *.dwg). DWG는 도면 폴더의 DXF로 바꾼 뒤 추출",
+    )
     parser.add_argument(
         "--floor",
         default="5F",
@@ -1284,8 +1299,12 @@ def main() -> int:
     parser.add_argument("--no-text", action="store_true", help="TEXT/MTEXT 제외")
     args = parser.parse_args()
 
-    dxf_path = args.dxf or default_dxf_path()
+    source_path = args.dxf or default_dxf_path()
     out_dir = args.out or resolve_artifacts_dir()
+    try:
+        dxf_path = ensure_dxf(source_path, out_dir / args.drawing_id)
+    except (DwgConvertError, FileNotFoundError) as exc:
+        raise SystemExit(str(exc)) from exc
 
     if args.workers is not None and args.workers < 1:
         raise SystemExit("--workers 는 1 이상이어야 합니다")
@@ -1375,7 +1394,7 @@ def main() -> int:
     run_summary = summary
     summary = merge_extract_summary(meta_path, summary)
     meta_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
-    list_path = upsert_drawing_list(out_dir, args.drawing_id, dxf_path, layout, run_summary)
+    list_path = upsert_drawing_list(out_dir, args.drawing_id, source_path, layout, run_summary)
     print(f"\nsummary → {meta_path}")
     print(f"drawing list → {list_path}")
     return 1 if any("error" in item for item in summary) else 0

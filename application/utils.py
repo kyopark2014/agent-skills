@@ -108,6 +108,7 @@ LOAD_FILE_ALLOWED_EXTENSIONS = {
     ".xml",
     ".rst",
     ".dxf",
+    ".dwg",
     ".png",
     ".jpg",
     ".jpeg",
@@ -716,6 +717,10 @@ def get_contents_type(file_name):
         content_type = "text/markdown"
     elif lower.endswith((".html", ".htm")):
         content_type = "text/html; charset=utf-8"
+    elif lower.endswith(".dxf"):
+        content_type = "image/vnd.dxf"
+    elif lower.endswith(".dwg"):
+        content_type = "image/vnd.dwg"
     else:
         content_type = "no info"
     return content_type

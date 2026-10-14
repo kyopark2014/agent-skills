@@ -15,6 +15,7 @@ _SCRIPTS = Path(__file__).resolve().parent
 if str(_SCRIPTS) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS))
 
+from lib_dwg import DwgConvertError, ensure_dxf  # noqa: E402
 from lib_sheet import discover_layout, floor_sort_key, is_floor_name  # noqa: E402
 from lib_split import (  # noqa: E402
     count_types,
@@ -198,9 +199,15 @@ def main() -> int:
     out.mkdir(parents=True, exist_ok=True)
 
     raw_info = None
-    if args.raw_dxf and args.raw_dxf.is_file():
-        print(f"analyzing raw {args.raw_dxf} ...", flush=True)
-        raw_info = analyze_raw(args.raw_dxf)
+    raw_path = args.raw_dxf
+    if raw_path is not None and raw_path.suffix.lower() == ".dwg":
+        try:
+            raw_path = ensure_dxf(raw_path, out)
+        except (DwgConvertError, FileNotFoundError) as exc:
+            raise SystemExit(str(exc)) from exc
+    if raw_path and raw_path.is_file():
+        print(f"analyzing raw {raw_path} ...", flush=True)
+        raw_info = analyze_raw(raw_path)
 
     floors_data: dict[str, dict] = {}
     floor_files: list[Path] = []

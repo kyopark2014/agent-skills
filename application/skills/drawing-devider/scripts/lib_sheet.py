@@ -4,6 +4,7 @@
 XA-S-{N}F 평면 블록이 없는 도면용 폴백.
 modelspace와 얕은 INSERT에서 큰 축정렬 사각형과
 '1층 평면도', 'B1F', '지하1층' 같은 제목을 짝짓는다.
+층 표기가 없고 시설 평면도 제목과 도면번호만 있으면 도면번호로 나눈다.
 그것도 없으면 종이공간 제목과 켜진 평면 뷰포트를 쓴다.
 """
 
@@ -53,7 +54,11 @@ def normalize_floor_token(floor: str) -> str:
     if m:
         suffix = f"_{int(m.group(2))}" if m.group(2) else ""
         return f"PH{suffix}"
-    raise ValueError(f"층 형식 오류: {floor!r} (예: 5F, B1F, 1F_2, RF, RF_2, sheet_01)")
+    matched = re.fullmatch(r"([A-Z]{2,6})-?(\d{2,4})(?:_(\d+))?", s)
+    if matched and matched.group(1) not in {"RF", "PH", "SHEET"}:
+        suffix = f"_{int(matched.group(3))}" if matched.group(3) else ""
+        return f"{matched.group(1)}{matched.group(2)}{suffix}"
+    raise ValueError(f"층 형식 오류: {floor!r} (예: 5F, B1F, 1F_2, RF, RF_2, sheet_01, AA406)")
 
 
 def is_floor_name(name: str) -> bool:
@@ -80,6 +85,9 @@ def floor_sort_key(floor: str) -> tuple:
     matched = re.fullmatch(r"sheet_(\d+)", floor)
     if matched:
         return (5, int(matched.group(1)), 0, floor)
+    matched = re.fullmatch(r"([A-Z]{2,6})(\d{2,4})(?:_(\d+))?", floor)
+    if matched:
+        return (6, matched.group(1), int(matched.group(2)), int(matched.group(3) or 1))
     return (2, 0, 0, floor)
 
 
@@ -154,6 +162,37 @@ def _strip_equipment_prefix(raw: str) -> str:
             continue
         break
     return " ".join(tokens[index:])
+
+
+_DRAWING_NUMBER = re.compile(r"^[A-Za-z]{2,6}-\d{2,4}$")
+_PLAN_WORD = re.compile(r"평면도|단면도|입면도|배치도|PLAN|SECTION|ELEVATION", re.I)
+
+
+def parse_drawing_number(value: str) -> str | None:
+    """표제란 도면번호. 'AA-406' → 'AA406'. 층 토큰이나 실명은 아니다."""
+    raw = plain_text(value).replace(" ", "")
+    if not _DRAWING_NUMBER.fullmatch(raw):
+        return None
+    letters, number = raw.split("-")
+    return f"{letters.upper()}{number}"
+
+
+def parse_plan_title(value: str) -> str | None:
+    """층 번호 없이 시설 이름만 있는 평면도 제목.
+
+    '피트니스센터, 에듀센터, 관리사무소 평면도', '스카이커뮤니티 평,입,단면도'처럼
+    층 표기가 없어도 도곽 제목으로 쓴다. 이미 층 제목인 문자열은 여기서 다루지 않는다.
+    """
+    raw = _collapse_spaced_glyphs(plain_text(value))
+    if not raw or len(raw) > 96 or len(raw) < 4:
+        return None
+    if parse_floor_label(raw):
+        return None
+    if not _PLAN_WORD.search(raw):
+        return None
+    if raw.upper() in {"평면도", "단면도", "입면도", "배치도", "PLAN", "SECTION", "ELEVATION"}:
+        return None
+    return raw
 
 
 def parse_floor_label(value: str) -> str | None:
@@ -488,7 +527,7 @@ def _inside(rect, x: float, y: float, pad: float = 0.0) -> bool:
 
 
 def _title_score(hit: _TextHit) -> float:
-    bonus = 3.0 if re.search(r"평면|PLAN|FLOOR|배치", hit.text, re.I) else 1.0
+    bonus = 3.0 if re.search(r"평면|단면|입면|PLAN|FLOOR|SECTION|배치", hit.text, re.I) else 1.0
     return max(hit.height, 1.0) * bonus
 
 
@@ -654,10 +693,94 @@ def _assign_sheet_ids(frames: list[SheetFrame], warnings: list[str]) -> list[She
     return out
 
 
+def _hits_inside(rect, hits: list[_TextHit], rects) -> list[_TextHit]:
+    found = [hit for hit in hits if _inside(rect, hit.x, hit.y)]
+    if found:
+        return found
+    pad = min(rect[2] - rect[0], rect[3] - rect[1]) * 0.08
+    return [
+        hit
+        for hit in hits
+        if _inside(rect, hit.x, hit.y, pad)
+        and not any(_inside(other, hit.x, hit.y) for other in rects if other != rect)
+    ]
+
+
+def _frames_from_plan_sheets(
+    rects,
+    plans: list[_TextHit],
+    numbers: list[_TextHit],
+    named: list[SheetFrame],
+    warnings: list[str],
+    *,
+    bare_rects: list[tuple[float, float, float, float]] | None = None,
+) -> list[SheetFrame]:
+    """층 번호가 없는 시설 평면도를 도곽마다 도면번호로 남긴다.
+
+    안쪽 칸이 많아 부모 테두리가 빠져도, 도면번호가 들어 있는 바깥 도곽은 남긴다.
+    한 도곽 안의 하위 제목은 나누지 않는다. 도면번호가 없으면 sheet_XX 다.
+    """
+    bare = set(bare_rects or rects)
+    candidates = []
+    for rect in rects:
+        if any(_sheets_overlap(rect, frame.bbox) for frame in named):
+            continue
+        inside_plans = _hits_inside(rect, plans, rects)
+        if not inside_plans:
+            continue
+        best = max(inside_plans, key=_title_score)
+        inside_numbers = _hits_inside(rect, numbers, rects)
+        token = None
+        if inside_numbers:
+            unique: dict[str, _TextHit] = {}
+            for hit in inside_numbers:
+                prev = unique.get(hit.floor)
+                if prev is None or _title_score(hit) > _title_score(prev):
+                    unique[hit.floor] = hit
+            if len(unique) == 1:
+                token = next(iter(unique))
+            else:
+                token = min(
+                    unique,
+                    key=lambda floor: (unique[floor].x - best.x) ** 2 + (unique[floor].y - best.y) ** 2,
+                )
+        if token is None and rect not in bare:
+            continue
+        candidates.append((rect, best, token))
+    candidates.sort(key=lambda item: _area(item[0]), reverse=True)
+    selected = []
+    for item in candidates:
+        if any(_sheets_overlap(item[0], prev[0]) for prev in selected):
+            continue
+        selected.append(item)
+
+    framed: list[SheetFrame] = []
+    pending: list[tuple[tuple[float, float, float, float], list[str]]] = []
+    numbered_boxes = [rect for rect, _best, token in selected if token]
+    for rect, best, token in selected:
+        if token:
+            framed.append(SheetFrame(token, plain_text(best.text), rect, best.height))
+            continue
+        if any(_inside(box, best.x, best.y) for box in numbered_boxes):
+            continue
+        pending.append((rect, [plain_text(best.text)]))
+    named_plans = _assign_sheet_ids(framed, warnings)
+    unresolved = _assign_unresolved_ids(pending, named + named_plans, warnings)
+    if named_plans:
+        warnings.append(
+            "층 표기가 없어 도면번호로 나눈 도곽입니다. "
+            + ", ".join(frame.floor for frame in named_plans)
+            + " 입니다."
+        )
+    return named_plans + unresolved
+
+
 def _collect_primitives(doc):
     rects: list[tuple[float, float, float, float]] = []
     lines: list[_Seg] = []
     texts: list[_TextHit] = []
+    plans: list[_TextHit] = []
+    numbers: list[_TextHit] = []
     truncated = False
 
     def take(entity) -> str | None:
@@ -678,14 +801,23 @@ def _collect_primitives(doc):
                 rects.append(rect)
             return None
         if kind in {"TEXT", "MTEXT"}:
-            label = parse_floor_label(_entity_text(entity))
-            if not label:
+            raw = _entity_text(entity)
+            label = parse_floor_label(raw)
+            number = None if label else parse_drawing_number(raw)
+            title = None if label or number else parse_plan_title(raw)
+            if not label and not number and not title:
                 return None
             try:
                 x, y = float(entity.dxf.insert.x), float(entity.dxf.insert.y)
             except Exception:
                 return None
-            texts.append(_TextHit(_entity_text(entity), label, x, y, _text_height(entity)))
+            height = _text_height(entity)
+            if label:
+                texts.append(_TextHit(raw, label, x, y, height))
+            elif number:
+                numbers.append(_TextHit(raw, number, x, y, height))
+            else:
+                plans.append(_TextHit(raw, "", x, y, height))
             return None
         if kind == "INSERT":
             return "descend"
@@ -702,7 +834,7 @@ def _collect_primitives(doc):
                 walk(children, depth + 1)
 
     walk(doc.modelspace(), 0)
-    return rects, lines, texts, truncated
+    return rects, lines, texts, plans, numbers, truncated
 
 
 def _viewport_model_bbox(viewport) -> tuple[float, float, float, float] | None:
@@ -889,13 +1021,16 @@ def discover_block_floors(doc) -> list[str]:
 
 
 def discover_sheet_floors(doc) -> LayoutDiscovery:
-    rects, lines, texts, truncated = _collect_primitives(doc)
+    rects, lines, texts, plans, numbers, truncated = _collect_primitives(doc)
     warnings: list[str] = []
     if truncated:
         warnings.append("긴 선이 많아 일부 선분 도곽은 건너뛰고 폴리라인 테두리를 우선합니다.")
     rects.extend(_rects_from_lines(lines))
-    rects = _dedupe_rects(rects)
-    frames = _frames_from(rects, texts, warnings)
+    deduped = _dedupe_rects(rects)
+    frames = _frames_from(deduped, texts, warnings)
+    frames.extend(
+        _frames_from_plan_sheets(rects, plans, numbers, frames, warnings, bare_rects=deduped)
+    )
     if not frames:
         warnings.append("도곽과 층 제목으로 구분할 층을 찾지 못했습니다.")
     return LayoutDiscovery(
