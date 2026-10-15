@@ -56,6 +56,85 @@ class VisionBathroomTests(unittest.TestCase):
         self.assertEqual(promoted, 0)
         self.assertEqual(line.dxf.layer, "BASE")
 
+    def test_line_mostly_outside_bathroom_stays_base(self):
+        """중점만 화장실 상자에 걸치고 밖으로 길게 빠진 선은 벽이 아니다."""
+        doc = ezdxf.new()
+        msp = doc.modelspace()
+        # 상자 폭 2.36 m, 선 길이 4.9 m → 상자 안 비율 ≈ 48%
+        long_hall = msp.add_line(
+            (7781525, 693830),
+            (7786425, 693830),
+            dxfattribs={"layer": "BASE"},
+        )
+        # 커버 ≈ 71%여도 밖으로 1.4 m 나가면 벽이 아니다.
+        long_partial = msp.add_line(
+            (7781525, 693200),
+            (7786425, 693200),
+            dxfattribs={"layer": "BASE"},
+        )
+        inside = msp.add_line(
+            (7782800, 693640),
+            (7784800, 693640),
+            dxfattribs={"layer": "BASE"},
+        )
+
+        promoted = lib_llm_correct.promote_vision_bathrooms(
+            msp,
+            [
+                {
+                    "label": "화장실",
+                    "xmin": 7782655,
+                    "ymin": 690805,
+                    "xmax": 7785015,
+                    "ymax": 694425,
+                },
+                {
+                    "label": "화장실",
+                    "xmin": 7781082,
+                    "ymin": 685634,
+                    "xmax": 7785015,
+                    "ymax": 694425,
+                },
+            ],
+        )
+
+        self.assertEqual(promoted, 1)
+        self.assertEqual(long_hall.dxf.layer, "BASE")
+        self.assertEqual(long_partial.dxf.layer, "BASE")
+        self.assertEqual(inside.dxf.layer, "WALL")
+
+    def test_room_row_divider_mostly_outside_bbox_stays_base(self):
+        doc = ezdxf.new()
+        msp = doc.modelspace()
+        # 이웃 WALL 두 줄 + 긴 BASE 이중선 (중점만 bbox 안)
+        msp.add_line((7781500, 686835), (7786500, 686835), dxfattribs={"layer": "WALL"})
+        msp.add_line((7781500, 689945), (7786500, 689945), dxfattribs={"layer": "WALL"})
+        long_hall = msp.add_line(
+            (7781525, 693830),
+            (7786425, 693830),
+            dxfattribs={"layer": "BASE"},
+        )
+        msp.add_line(
+            (7782235, 693640),
+            (7784305, 693640),
+            dxfattribs={"layer": "BASE"},
+        )
+        segs = lib_llm_correct.iter_axis_segs(msp, min_len_mm=70.0)
+        promoted = lib_llm_correct.promote_room_row_dividers(
+            segs,
+            [
+                {
+                    "label": "화장실",
+                    "xmin": 7782655,
+                    "ymin": 690805,
+                    "xmax": 7785015,
+                    "ymax": 694425,
+                }
+            ],
+        )
+        handles = {getattr(s.entity.dxf, "handle", None) for s in promoted}
+        self.assertNotIn(long_hall.dxf.handle, handles)
+
     def test_stair_and_elevator_boxes_promote_their_walls(self):
         doc = ezdxf.new()
         msp = doc.modelspace()

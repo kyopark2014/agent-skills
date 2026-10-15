@@ -635,6 +635,93 @@ def _pair_overlap(a: Seg, b: Seg, *, along_x: bool) -> float:
     return _overlap_1d(a.y0, a.y1, b.y0, b.y1)
 
 
+def _midline_centerline_keys(
+    group: list[Seg],
+    *,
+    mid_ortho,
+    along_x: bool,
+    thick_min: float,
+    thick_max: float,
+    min_overlap: float,
+    overlap_ratio: float,
+) -> set[tuple[int, int]]:
+    """이중선 한가운데 중심선 키.
+
+    직교 양쪽에 겹침이 충분한 이웃이 있고, 양쪽 간격이 비슷하며
+    바깥 두 면 간격이 벽 두께 대역이면 가운데 선은 벽면이 아니다.
+    """
+    items = sorted(group, key=mid_ortho)
+    found: set[tuple[int, int]] = set()
+    for i, m in enumerate(items):
+        mm = mid_ortho(m)
+        left: list[tuple[float, Seg]] = []
+        right: list[tuple[float, Seg]] = []
+        for j, other in enumerate(items):
+            if j == i:
+                continue
+            d = mid_ortho(other) - mm
+            ad = abs(d)
+            if ad < thick_min * 0.5 or ad > thick_max:
+                continue
+            ov = _pair_overlap(m, other, along_x=along_x)
+            need = max(min_overlap, overlap_ratio * min(m.length, other.length))
+            if ov < need:
+                continue
+            if d < 0:
+                left.append((ad, other))
+            else:
+                right.append((ad, other))
+        if not left or not right:
+            continue
+        d_l, _ = min(left, key=lambda t: t[0])
+        d_r, _ = min(right, key=lambda t: t[0])
+        outer = d_l + d_r
+        if not (thick_min <= outer <= thick_max):
+            continue
+        tol = max(15.0, 0.10 * min(d_l, d_r))
+        if abs(d_l - d_r) <= tol:
+            found.add(m.key)
+    return found
+
+
+# 기둥 축·CEN 격자: 층 전체를 가로지르는 긴 평행선이 여러 줄
+GRID_AXIS_MIN_LEN_MM = 10000.0
+GRID_AXIS_MIN_COUNT = 3
+GRID_AXIS_OVERLAP_RATIO = 0.50
+
+
+def _parallel_grid_axis_keys(
+    group: list[Seg],
+    *,
+    along_x: bool,
+    min_len_mm: float = GRID_AXIS_MIN_LEN_MM,
+    min_count: int = GRID_AXIS_MIN_COUNT,
+    overlap_ratio: float = GRID_AXIS_OVERLAP_RATIO,
+) -> set[tuple[int, int]]:
+    """층 스팬 긴 평행선이 여러 줄이면 기둥 축 격자로 보고 벽에서 뺀다.
+
+    CEN–CEN 이중선 짝, 짧은 벽면에 스친 긴 축선이 벽으로 오인되는 것을 막는다.
+    실 테두리(보통 12 m 미만 조각)나 외벽 장축 1–2줄은 min_count에 못 미쳐 유지된다.
+    """
+    long = [s for s in group if s.length >= min_len_mm]
+    if len(long) < min_count:
+        return set()
+    found: set[tuple[int, int]] = set()
+    need_peers = min_count - 1
+    for s in long:
+        peers = 0
+        for other in long:
+            if other.key == s.key:
+                continue
+            ov = _pair_overlap(s, other, along_x=along_x)
+            if ov >= overlap_ratio * min(s.length, other.length):
+                peers += 1
+                if peers >= need_peers:
+                    found.add(s.key)
+                    break
+    return found
+
+
 def _long_double_wall(
     a: Seg,
     b: Seg,
@@ -828,8 +915,27 @@ def _detect_wall_keys_one(
         n = len(items)
         long_faces: list[tuple[float, float]] = []
         along_x = along == "x"
+        centerlines = _midline_centerline_keys(
+            group,
+            mid_ortho=mid_ortho,
+            along_x=along_x,
+            thick_min=thick_min,
+            thick_max=thick_max,
+            min_overlap=min_overlap,
+            overlap_ratio=overlap_ratio,
+        )
+        grid_axes = _parallel_grid_axis_keys(group, along_x=along_x)
+        skip_face = centerlines | grid_axes
+
+        def mark_wall(*segs: Seg) -> None:
+            for s in segs:
+                if s.key not in skip_face:
+                    wall.add(s.key)
+
         for i in range(n):
             a = items[i]
+            if a.key in skip_face:
+                continue
             ma = mid_ortho(a)
             # neighbors within thickness band
             neighbors: list[tuple[float, Seg]] = []
@@ -864,22 +970,26 @@ def _detect_wall_keys_one(
                 partners = [(d, b) for d, b in neighbors if b.length >= partner_len]
                 if not partners:
                     continue
+            # 중심선·축 격자는 짝에서 빼고 바깥 면과 맞춘다.
+            partners = [(d, b) for d, b in partners if b.key not in skip_face]
+            if not partners:
+                continue
             d0, b0 = min(partners, key=lambda t: t[0])
             if not (thick_min <= d0 <= thick_max):
                 continue
             # 간벽은 여러 겹 필터로 빠진 짧은 조각도 본다. 조각 수는 조건이 아니다.
             for d_part, part in sorted(neighbors, key=lambda t: t[0]):
+                if part.key in skip_face:
+                    continue
                 if _broken_partition_pair(a, part, d_part, runs, part_cfg):
-                    wall.add(a.key)
-                    wall.add(part.key)
+                    mark_wall(a, part)
                     break
             else:
                 part = None
             if part is not None:
                 continue
             if _abuts_door_opening(a, b0, d0, along_x=along_x, slots=slots, cfg=door_cfg):
-                wall.add(a.key)
-                wall.add(b0.key)
+                mark_wall(a, b0)
                 continue
             if long_cfg.get("enabled"):
                 # 끝의 짧은 문짝은 여러 겹이 아니다.
@@ -888,15 +998,15 @@ def _detect_wall_keys_one(
                 long_neighbors = [
                     b
                     for _, b in neighbors
-                    if b.length >= neighbor_len
+                    if b.key not in skip_face
+                    and b.length >= neighbor_len
                     and _pair_overlap(a, b, along_x=along_x)
                     >= neighbor_ratio * min(a.length, b.length)
                 ]
                 crowded = len(long_neighbors) >= int(long_cfg["long_neighbor_count_gte"])
                 ov0 = _pair_overlap(a, b0, along_x=along_x)
                 if not crowded and _long_double_wall(a, b0, d0, ov0, long_cfg):
-                    wall.add(a.key)
-                    wall.add(b0.key)
+                    mark_wall(a, b0)
                     _remember_face(
                         long_faces,
                         ma,
@@ -911,8 +1021,7 @@ def _detect_wall_keys_one(
                 if _abuts_door_opening(
                     a, c, d2, along_x=along_x, slots=slots, cfg=door_cfg
                 ):
-                    wall.add(a.key)
-                    wall.add(c.key)
+                    mark_wall(a, c)
                     break
 
         if long_cfg.get("enabled") and long_faces:
@@ -923,20 +1032,23 @@ def _detect_wall_keys_one(
                 side_lo = [
                     s
                     for s in group
-                    if s.length >= piece_len and abs(mid_ortho(s) - lo) <= face_tol
+                    if s.key not in skip_face
+                    and s.length >= piece_len
+                    and abs(mid_ortho(s) - lo) <= face_tol
                 ]
                 side_hi = [
                     s
                     for s in group
-                    if s.length >= piece_len and abs(mid_ortho(s) - hi) <= face_tol
+                    if s.key not in skip_face
+                    and s.length >= piece_len
+                    and abs(mid_ortho(s) - hi) <= face_tol
                 ]
                 for left in side_lo:
                     for right in side_hi:
                         short = min(left.length, right.length)
                         ov = _pair_overlap(left, right, along_x=along_x)
                         if ov >= piece_ratio * short:
-                            wall.add(left.key)
-                            wall.add(right.key)
+                            mark_wall(left, right)
 
     h_segs = [s for s in cand if s.is_h]
     v_segs = [s for s in cand if s.is_v]
@@ -1418,6 +1530,8 @@ def classify_entities(
     - 두께 0으로 겹친 사각 공유 변은 벽이 아니다. 평행 이중선만 벽이다.
     - 글상자(TBOX) 변은 벽 면이 아니다. 나란한 중심선도 벽으로 올리지 않는다.
     - 기둥 축 격자(XC) 변은 벽 면이 아니다.
+    - 이중선 한가운데 중심선(CEN 축선 등)은 벽 면이 아니다. 바깥 면끼리만 짝한다.
+    - 10 m 이상 평행선이 3줄 이상이면 기둥 축 격자다. 벽 면이 아니다.
     """
     profiles = _wall_condition_profiles(conditions, project)
     angle_tol = max(float(profile["candidate"]["angle_tolerance_deg"]) for profile in profiles)

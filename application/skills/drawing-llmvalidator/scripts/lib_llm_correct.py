@@ -1603,6 +1603,134 @@ def _landscape_rock_centers(
     return out
 
 
+GRID_AXIS_MIN_LEN_MM = 10000.0
+GRID_AXIS_MIN_COUNT = 3
+GRID_AXIS_OVERLAP_RATIO = 0.50
+# 기둥 축 피치. 벽 두께(이중선)~멀리언 간격은 빼고, 건물 반대편 장축도 빼다.
+GRID_AXIS_PITCH_MIN_MM = 1500.0
+GRID_AXIS_PITCH_MAX_MM = 12000.0
+
+
+def _along_overlap_mm(a: AxisSeg, b: AxisSeg) -> float:
+    return max(0.0, min(a.along1, b.along1) - max(a.along0, b.along0))
+
+
+def _parallel_grid_axis_entity_ids(
+    segs: list[AxisSeg],
+    *,
+    min_len_mm: float = GRID_AXIS_MIN_LEN_MM,
+    min_count: int = GRID_AXIS_MIN_COUNT,
+    overlap_ratio: float = GRID_AXIS_OVERLAP_RATIO,
+    pitch_min_mm: float = GRID_AXIS_PITCH_MIN_MM,
+    pitch_max_mm: float = GRID_AXIS_PITCH_MAX_MM,
+    layers: set[str] | None = None,
+) -> set[int]:
+    """긴 평행선이 기둥 축 피치로 3줄 이상이면 격자 entity id.
+
+    길이·겹침만 보면 외벽·창호 이중선(간격 200 mm)도 격자로 내려간다.
+    이웃 줄은 축 피치(1.5–12 m) 안에 있을 때만 센다.
+    """
+    found: set[int] = set()
+    for is_v in (True, False):
+        pool = [
+            s
+            for s in segs
+            if ((is_v and s.is_v) or ((not is_v) and s.is_h))
+            and s.length >= min_len_mm
+            and (layers is None or s.layer in layers)
+        ]
+        if len(pool) < min_count:
+            continue
+        need_peers = min_count - 1
+        for s in pool:
+            peers = 0
+            for other in pool:
+                if id(other.entity) == id(s.entity):
+                    continue
+                pitch = abs(other.ortho - s.ortho)
+                if not (pitch_min_mm <= pitch <= pitch_max_mm):
+                    continue
+                ov = _along_overlap_mm(s, other)
+                if ov >= overlap_ratio * min(s.length, other.length):
+                    peers += 1
+                    if peers >= need_peers:
+                        found.add(id(s.entity))
+                        break
+    return found
+
+
+def _has_wall_thickness_mate(
+    seg: AxisSeg,
+    segs: list[AxisSeg],
+    *,
+    thick_min_mm: float = 30.0,
+    thick_max_mm: float = 420.0,
+    overlap_ratio: float = 0.5,
+) -> bool:
+    """벽 두께 대역의 평행 짝이 있으면 구조/창호 면이다. CEN 축이 아니다."""
+    for other in segs:
+        if other.is_h != seg.is_h:
+            continue
+        if id(other.entity) == id(seg.entity):
+            continue
+        pitch = abs(other.ortho - seg.ortho)
+        if not (thick_min_mm <= pitch <= thick_max_mm):
+            continue
+        if _along_overlap_mm(seg, other) >= overlap_ratio * min(
+            seg.length, other.length
+        ):
+            return True
+    return False
+
+
+def demote_parallel_grid_axis_walls(
+    segs: list[AxisSeg],
+    *,
+    exclude_ids: set[int] | None = None,
+) -> set[int]:
+    """기둥 축·CEN 격자처럼 층 스팬 긴 평행 WALL demote.
+
+    WALL·BASE를 함께 보고 격자를 인식한 뒤, WALL만 내린다.
+    축 피치(1.5–12 m) 밖이거나, 벽 두께 이중선 짝이 있으면 내리지 않는다.
+    """
+    exclude_ids = exclude_ids or set()
+    grid = _parallel_grid_axis_entity_ids(
+        segs, layers={WALL_LAYER, BASE_LAYER}
+    )
+    demote: set[int] = set()
+    for s in segs:
+        if s.layer != WALL_LAYER:
+            continue
+        eid = id(s.entity)
+        if eid in exclude_ids or eid not in grid:
+            continue
+        if _has_wall_thickness_mate(s, segs):
+            continue
+        demote.add(eid)
+    return demote
+
+
+def filter_promote_away_from_grid_axes(
+    promote: list[AxisSeg],
+    segs: list[AxisSeg],
+) -> list[AxisSeg]:
+    """축 격자 후보 BASE는 WALL로 올리지 않는다.
+
+    벽 두께 이중선은 격자가 아니므로 승격을 막지 않는다.
+    """
+    pool = list(segs) + list(promote)
+    grid = _parallel_grid_axis_entity_ids(
+        pool, layers={WALL_LAYER, BASE_LAYER}
+    )
+    if not grid:
+        return promote
+    return [
+        s
+        for s in promote
+        if id(s.entity) not in grid or _has_wall_thickness_mate(s, pool)
+    ]
+
+
 def demote_landscape_walls(
     msp,
     segs: list[AxisSeg],
@@ -2973,6 +3101,63 @@ def correct_door_leaves_and_flanks(msp) -> tuple[int, int]:
     return n_demote, n_promote
 
 
+# Vision promote 상자: 중점만 걸치고 밖으로 길게 나간 선은 벽으로 두지 않는다.
+PROMOTE_BBOX_MIN_COVER = 0.7
+# 상자 밖으로 나온 선 길이가 이보다 크면, 커버 비율이 높아도 올리지 않는다.
+PROMOTE_BBOX_MAX_OVERHANG_MM = 1000.0
+
+
+def _segment_bbox_cover_ratio(
+    x0: float,
+    y0: float,
+    x1: float,
+    y1: float,
+    box: dict[str, float],
+) -> float:
+    """선분 길이 중 bbox 안에 들어오는 비율 (0~1)."""
+    length = math.hypot(x1 - x0, y1 - y0)
+    if length <= 1e-9:
+        return 0.0
+    clipped = _clip_segment_t(
+        x0,
+        y0,
+        x1,
+        y1,
+        box["xmin"],
+        box["ymin"],
+        box["xmax"],
+        box["ymax"],
+    )
+    if clipped is None:
+        return 0.0
+    t0, t1 = clipped
+    return max(0.0, min(1.0, t1 - t0))
+
+
+def _mostly_inside_promote_bbox(
+    x0: float,
+    y0: float,
+    x1: float,
+    y1: float,
+    boxes: Iterable[dict[str, float]],
+    *,
+    min_cover: float = PROMOTE_BBOX_MIN_COVER,
+    max_overhang_mm: float = PROMOTE_BBOX_MAX_OVERHANG_MM,
+) -> bool:
+    """선 길이의 min_cover 이상이 한 bbox 안에 있고, 밖으로 나온 길이도 짧을 때 True."""
+    length = math.hypot(x1 - x0, y1 - y0)
+    if length <= 1e-9:
+        return False
+    for box in boxes:
+        cover = _segment_bbox_cover_ratio(x0, y0, x1, y1, box)
+        if cover < min_cover:
+            continue
+        overhang = length * (1.0 - cover)
+        if overhang <= max_overhang_mm:
+            return True
+    return False
+
+
 def promote_room_row_dividers(
     segs: list[AxisSeg],
     bboxes: Iterable[Any],
@@ -2980,7 +3165,10 @@ def promote_room_row_dividers(
     min_len_mm: float = 2500.0,
     neighbor_max_mm: float = 10000.0,
 ) -> list[AxisSeg]:
-    """연속 실 열에서 이웃 칸막이는 WALL인데 자신만 BASE인 이중선(긴 칸막이) 승격."""
+    """연속 실 열에서 이웃 칸막이는 WALL인데 자신만 BASE인 이중선(긴 칸막이) 승격.
+
+    상자 중점만 걸치고 밖으로 길게 빠진 선은 올리지 않는다.
+    """
     boxes = normalize_bbox_list(list(bboxes), field="promote_bboxes")
     if not boxes:
         return []
@@ -2992,11 +3180,7 @@ def promote_room_row_dividers(
     for s in base:
         if s.length < min_len_mm:
             continue
-        mx = (s.x0 + s.x1) * 0.5
-        my = (s.y0 + s.y1) * 0.5
-        if not any(
-            b["xmin"] <= mx <= b["xmax"] and b["ymin"] <= my <= b["ymax"] for b in boxes
-        ):
+        if not _mostly_inside_promote_bbox(s.x0, s.y0, s.x1, s.y1, boxes):
             continue
         if not _has_parallel_pair(s, base):
             continue
@@ -3239,7 +3423,10 @@ def promote_in_bboxes(
     min_len_mm: float = 1000.0,
     gap_max_mm: float = 6000.0,
 ) -> list[AxisSeg]:
-    """Vision bbox 안에서도 'WALL 런 사이 갭' + 이중선만 승격."""
+    """Vision bbox 안에서도 'WALL 런 사이 갭' + 이중선만 승격.
+
+    상자 중점만 걸치고 밖으로 길게 빠진 선은 올리지 않는다.
+    """
     boxes = normalize_bbox_list(list(bboxes), field="promote_bboxes")
     if not boxes:
         return []
@@ -3249,12 +3436,8 @@ def promote_in_bboxes(
     )
     out: list[AxisSeg] = []
     for s in cands:
-        mx = (s.x0 + s.x1) * 0.5
-        my = (s.y0 + s.y1) * 0.5
-        for b in boxes:
-            if b["xmin"] <= mx <= b["xmax"] and b["ymin"] <= my <= b["ymax"]:
-                out.append(s)
-                break
+        if _mostly_inside_promote_bbox(s.x0, s.y0, s.x1, s.y1, boxes):
+            out.append(s)
     # also: vertical room dividers in bbox that have double-line but may not sit
     # in a collinear gap (orphan missing partition between red rooms)
     wall = [s for s in segs if s.layer == WALL_LAYER]
@@ -3263,12 +3446,7 @@ def promote_in_bboxes(
     for s in base:
         if s.length < max(min_len_mm, 2500.0) or not s.is_v:
             continue
-        mx = (s.x0 + s.x1) * 0.5
-        my = (s.y0 + s.y1) * 0.5
-        in_box = any(
-            b["xmin"] <= mx <= b["xmax"] and b["ymin"] <= my <= b["ymax"] for b in boxes
-        )
-        if not in_box:
+        if not _mostly_inside_promote_bbox(s.x0, s.y0, s.x1, s.y1, boxes):
             continue
         if not _has_parallel_pair(s, base):
             continue
@@ -21436,6 +21614,8 @@ def promote_vision_bathrooms(msp, bboxes) -> int:
     """Vision이 화장실·계단·승강기로 표시한 칸은 둘러싼 선과 기물을 모두 벽으로 올린다.
 
     문 스윙 호, 문 X, 승강기 샤프트 X, 계단 절단선은 그대로 둔다.
+    선은 길이의 대부분이 상자 안에 있을 때만 올린다. 중점만 걸치고
+    밖으로 길게 빠진 홀·복도 선은 벽으로 두지 않는다.
     """
     boxes = [
         box
@@ -21465,7 +21645,8 @@ def promote_vision_bathrooms(msp, bboxes) -> int:
                 dx, dy = abs(x1 - x0), abs(y1 - y0)
                 if max(dx, dy) > 0.0 and min(dx, dy) / max(dx, dy) > 0.35 and 400.0 <= length <= 6000.0:
                     continue
-                mx, my = (x0 + x1) * 0.5, (y0 + y1) * 0.5
+                if not _mostly_inside_promote_bbox(x0, y0, x1, y1, boxes):
+                    continue
             elif kind == "LWPOLYLINE":
                 points = _polyline_xy(entity)
                 if len(points) < 2:
@@ -21477,21 +21658,27 @@ def promote_vision_bathrooms(msp, bboxes) -> int:
                     continue
                 mx = sum(xs) / len(xs)
                 my = sum(ys) / len(ys)
+                if not _inside(mx, my):
+                    continue
             elif kind == "CIRCLE":
                 center = entity.dxf.center
                 if not (20.0 <= float(entity.dxf.radius) <= 400.0):
                     continue
                 mx, my = float(center.x), float(center.y)
+                if not _inside(mx, my):
+                    continue
             elif kind == "ARC":
                 if float(entity.dxf.radius) > 400.0:
                     continue
                 center = entity.dxf.center
                 mx, my = float(center.x), float(center.y)
+                if not _inside(mx, my):
+                    continue
             else:
                 continue
         except Exception:  # noqa: BLE001
             continue
-        if _inside(mx, my) and _paint_layer(entity, WALL_LAYER, WALL_COLOR):
+        if _paint_layer(entity, WALL_LAYER, WALL_COLOR):
             n += 1
     return n
 
@@ -23436,6 +23623,8 @@ def apply_corrections(
     # 엘리베이터 문·후면은 승격 금지 (측벽만 벽)
     if do_elevator_promote:
         promote = filter_promote_away_from_elevator_doors(promote, msp)
+    # 기둥 축 격자(CEN 장축 여러 줄)는 승격 금지
+    promote = filter_promote_away_from_grid_axes(promote, segs)
     # 운동기구·정원/조경은 승격 금지
     if do_box_demote:
         furn_ids = demote_fitness_equipment(msp, segs, exclude_ids=hbeam_ids)
@@ -23448,6 +23637,10 @@ def apply_corrections(
     open_hall_demote: set[int] = set()
     if do_open_hall_demote:
         open_hall_demote = demote_open_hall_center_walls(msp, segs)
+
+    grid_axis_demote = demote_parallel_grid_axis_walls(
+        segs, exclude_ids=hbeam_ids
+    )
 
     elev_door_demote: set[int] = set()
     if do_elevator_promote:
@@ -23513,6 +23706,13 @@ def apply_corrections(
             msp.delete_entity(e)
             n_demoted += 1
 
+    # 축 격자는 삭제하지 않고 BASE로 되돌린다 (후반 격자 판별에 남겨 둔다).
+    n_grid_axis_demoted = 0
+    for e in _entities(msp):
+        if id(e) in grid_axis_demote and _paint_layer(e, BASE_LAYER, BASE_COLOR):
+            n_demoted += 1
+            n_grid_axis_demoted += 1
+
     seen: set[tuple[float, float, float, float]] = set()
     n_promoted = n_door_side
     for s in promote:
@@ -23551,6 +23751,15 @@ def apply_corrections(
                 msp.delete_entity(e)
                 n_demoted += 1
                 n_open_hall_post += 1
+
+    # promote 로 다시 올라온 기둥 축 격자 → BASE로 되돌림
+    n_grid_axis_post = 0
+    segs_grid = iter_axis_segs(msp, min_len_mm=70.0)
+    post_grid = demote_parallel_grid_axis_walls(segs_grid, exclude_ids=hbeam_ids)
+    for e in _entities(msp):
+        if id(e) in post_grid and _paint_layer(e, BASE_LAYER, BASE_COLOR):
+            n_demoted += 1
+            n_grid_axis_post += 1
 
     # promote 로 다시 올라온 엘리베이터 문/후면 제거
     n_elev_door_post = 0
@@ -23857,6 +24066,14 @@ def apply_corrections(
     n_promoted += promote_slanted_double_walls(msp)
     # 앞선 문 처리가 가로·세로가 아닌 양개문은 닫지 않는다. 마지막에 힌지 사이를 잇는다.
     n_promoted += add_paired_swing_walls(msp)
+
+    # 후반 promote_* 가 다시 올린 축 격자도 BASE로 되돌린다.
+    segs_final = iter_axis_segs(msp, min_len_mm=70.0)
+    final_grid = demote_parallel_grid_axis_walls(segs_final, exclude_ids=hbeam_ids)
+    for e in _entities(msp):
+        if id(e) in final_grid and _paint_layer(e, BASE_LAYER, BASE_COLOR):
+            n_demoted += 1
+            n_grid_axis_post += 1
 
     n_wall = sum(1 for e in _entities(msp) if e.dxf.layer == WALL_LAYER)
     n_base = sum(1 for e in _entities(msp) if e.dxf.layer == BASE_LAYER)

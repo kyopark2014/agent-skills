@@ -7,14 +7,14 @@ import argparse
 import json
 import math
 import re
-from collections import defaultdict
+from collections import defaultdict, deque
 from pathlib import Path
 
 import ezdxf
 import shapely
 from PIL import Image, ImageDraw, ImageFont
 from shapely.errors import GEOSException
-from shapely.geometry import GeometryCollection, LineString, Point, Polygon, box
+from shapely.geometry import GeometryCollection, LineString, MultiPoint, Point, Polygon, box
 from shapely.ops import polygonize, unary_union
 from shapely.strtree import STRtree
 
@@ -314,6 +314,18 @@ WALL_PERIMETER_MIN = 0.90
 WALL_COVER_MM = 250.0
 SEED_REACH_MM = 25000.0
 SEED_BUFFER_STEPS_MM = (80.0, 160.0, 320.0, 640.0, 1000.0, 1400.0, 1800.0, 2400.0)
+CLUSTER_LINK_MM = 20000.0
+CLUSTER_REACH_MM = 45000.0
+CLUSTER_CELL_MM = 100.0
+CLUSTER_GROW_MIN_MM = 2000.0
+CLUSTER_GROW_MAX_MM = 30000.0
+CLUSTER_GROW_STEP_MM = 500.0
+CLUSTER_WALL_EDGE_MIN = 0.55
+CLUSTER_WALL_BLOCK_MM = 150.0
+CLUSTER_HULL_BUFFER_MM = 5000.0
+CLUSTER_HULL_PAD_MM = 8000.0
+CLUSTER_HULL_WALL_DENSITY_MIN = 0.40
+CLUSTER_MIN_SEEDS = 2
 
 
 def wall_perimeter_ratio(segs, pts) -> float:
@@ -2200,6 +2212,293 @@ def _seed_ring(mask, ox: float, oy: float, reach: float, cell: float, origin: tu
     return chosen
 
 
+
+def cluster_open_origins(
+    origins: list[tuple[float, float]],
+    link_mm: float = CLUSTER_LINK_MM,
+) -> list[list[tuple[float, float]]]:
+    """오픈 라벨 좌표를 link_mm 안의 묶음으로 나눈다. 2개 미만 묶음은 뺀다."""
+    if len(origins) < CLUSTER_MIN_SEEDS:
+        return []
+    parent = list(range(len(origins)))
+
+    def find(i: int) -> int:
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    for i, (x0, y0) in enumerate(origins):
+        for j in range(i + 1, len(origins)):
+            x1, y1 = origins[j]
+            if math.hypot(x1 - x0, y1 - y0) <= link_mm:
+                ri, rj = find(i), find(j)
+                if ri != rj:
+                    parent[rj] = ri
+    groups: dict[int, list[tuple[float, float]]] = {}
+    for i, origin in enumerate(origins):
+        groups.setdefault(find(i), []).append(origin)
+    return [group for group in groups.values() if len(group) >= CLUSTER_MIN_SEEDS]
+
+
+def cluster_hull_wall_density(segs, origins: list[tuple[float, float]]) -> float:
+    """씨앗 주변 상자의 벽 길이(m) / 면적(m²). 제목란처럼 벽이 드물면 낮다."""
+    if len(origins) < CLUSTER_MIN_SEEDS:
+        return 0.0
+    xs = [x for x, _y in origins]
+    ys = [y for _x, y in origins]
+    span = math.hypot(max(xs) - min(xs), max(ys) - min(ys))
+    pad = max(CLUSTER_HULL_BUFFER_MM, 0.5 * span + 8000.0)
+    zone = box(min(xs) - pad, min(ys) - pad, max(xs) + pad, max(ys) + pad)
+    if zone.is_empty or zone.area <= 0.0:
+        return 0.0
+    length = 0.0
+    for x0, y0, x1, y1, *_rest in segs:
+        line = LineString([(x0, y0), (x1, y1)])
+        if line.length < 40.0 or not zone.intersects(line):
+            continue
+        length += line.intersection(zone).length
+    return (length / 1000.0) / (zone.area / 1_000_000.0)
+
+
+def _cluster_wall_edge_ratio(region, wall) -> float:
+    """영역 테두리 중 벽에 닿는 변의 비율."""
+    import numpy as np
+
+    if not region.any():
+        return 0.0
+    inner = (
+        region
+        & np.roll(region, 1, axis=0)
+        & np.roll(region, -1, axis=0)
+        & np.roll(region, 1, axis=1)
+        & np.roll(region, -1, axis=1)
+    )
+    rows, cols = np.nonzero(region & ~inner)
+    covered = 0
+    total = 0
+    height, width = region.shape
+    for row, col in zip(rows.tolist(), cols.tolist()):
+        for n_row, n_col in (
+            (row - 1, col),
+            (row + 1, col),
+            (row, col - 1),
+            (row, col + 1),
+        ):
+            if not (0 <= n_row < height and 0 <= n_col < width) or not region[n_row, n_col]:
+                total += 1
+                if 0 <= n_row < height and 0 <= n_col < width and wall[n_row, n_col]:
+                    covered += 1
+    return covered / total if total else 0.0
+
+
+def _seed_cluster_face(
+    lines: list[LineString],
+    origins: list[tuple[float, float]],
+    blocked_faces=None,
+):
+    """방안 3 묶음. 겹치는 오픈 라벨을 씨앗으로 같이 넓혀 실을 잡는다.
+
+    벽선은 150 mm 두께로 막아 격자 틈으로 벽을 넘지 않는다. 이미 잡힌 실 면도
+    막아서 그쪽으로 새지 않는다. 씨앗 볼록껍질 밖 8 m까지만 퍼져 개구로 멀리
+    삐져나가지 않는다. 창 밖으로 새지 않는 범위에서 벽 테두리 비율이 가장 높은
+    거리로 확정한다.
+    """
+    try:
+        import numpy as np
+    except ImportError:
+        return None
+    if len(origins) < CLUSTER_MIN_SEEDS:
+        return None
+    ox = sum(x for x, _y in origins) / len(origins)
+    oy = sum(y for _x, y in origins) / len(origins)
+    span = max(max(abs(x - ox), abs(y - oy)) for x, y in origins) + 15000.0
+    reach = max(CLUSTER_REACH_MM, span)
+    cell = CLUSTER_CELL_MM
+    count = int(reach * 2.0 / cell)
+    window = box(ox - reach, oy - reach, ox + reach, oy + reach)
+    usable = [ln for ln in lines if ln.length > 40.0 and window.intersects(ln)]
+    if len(usable) < 3:
+        return None
+    wall = np.zeros((count, count), dtype=bool)
+
+    def paint(x0: float, y0: float, x1: float, y1: float, mask) -> None:
+        col = int((x0 - (ox - reach)) / cell)
+        row = int((y0 - (oy - reach)) / cell)
+        col_b = int((x1 - (ox - reach)) / cell)
+        row_b = int((y1 - (oy - reach)) / cell)
+        step_c = abs(col_b - col)
+        step_r = abs(row_b - row)
+        sign_c = 1 if col < col_b else -1
+        sign_r = 1 if row < row_b else -1
+        err = step_c - step_r
+        while True:
+            if 0 <= row < count and 0 <= col < count:
+                mask[row, col] = True
+            if col == col_b and row == row_b:
+                break
+            doubled = 2 * err
+            if doubled > -step_r:
+                err -= step_r
+                col += sign_c
+            if doubled < step_c:
+                err += step_c
+                row += sign_r
+
+    def paint_poly(poly, mask) -> None:
+        if poly is None or poly.is_empty:
+            return
+        parts = [poly] if poly.geom_type == "Polygon" else list(getattr(poly, "geoms", ()))
+        for part in parts:
+            if part.is_empty or part.geom_type != "Polygon":
+                continue
+            minx, miny, maxx, maxy = part.bounds
+            col0 = max(0, int((minx - (ox - reach)) / cell) - 1)
+            row0 = max(0, int((miny - (oy - reach)) / cell) - 1)
+            col1 = min(count - 1, int((maxx - (ox - reach)) / cell) + 1)
+            row1 = min(count - 1, int((maxy - (oy - reach)) / cell) + 1)
+            for row in range(row0, row1 + 1):
+                y = oy - reach + (row + 0.5) * cell
+                for col in range(col0, col1 + 1):
+                    x = ox - reach + (col + 0.5) * cell
+                    if part.covers(Point(x, y)):
+                        mask[row, col] = True
+
+    for line in usable:
+        coords = list(line.coords)
+        for start, end in zip(coords, coords[1:]):
+            paint(float(start[0]), float(start[1]), float(end[0]), float(end[1]), wall)
+    if not wall.any():
+        return None
+    # 벽 중심선만 있으면 격자 틈으로 넘어간다. 150 mm까지 막아 벽을 넘지 않게 한다.
+    block_px = CLUSTER_WALL_BLOCK_MM / cell
+    barrier = _seed_edt(wall) <= block_px
+    if blocked_faces:
+        for face in blocked_faces:
+            paint_poly(face, barrier)
+    free = ~barrier
+    seeds: list[tuple[int, int]] = []
+    for sx, sy in origins:
+        col = int((sx - (ox - reach)) / cell)
+        row = int((sy - (oy - reach)) / cell)
+        if not (0 <= row < count and 0 <= col < count):
+            continue
+        if not free[row, col]:
+            found = None
+            best = None
+            for d_row in range(-12, 13):
+                for d_col in range(-12, 13):
+                    n_row = row + d_row
+                    n_col = col + d_col
+                    if 0 <= n_row < count and 0 <= n_col < count and free[n_row, n_col]:
+                        dist2 = d_row * d_row + d_col * d_col
+                        if best is None or dist2 < best:
+                            best = dist2
+                            found = (n_row, n_col)
+            if found is None:
+                continue
+            seeds.append(found)
+        else:
+            seeds.append((row, col))
+    if len(seeds) < CLUSTER_MIN_SEEDS:
+        return None
+    # 씨앗 볼록껍질 밖 8 m까지만 허용. 개구로 멀리 둥글게 새는 삐죽 면을 막는다.
+    hull = MultiPoint([Point(x, y) for x, y in origins]).convex_hull.buffer(CLUSTER_HULL_PAD_MM)
+    allow = np.zeros((count, count), dtype=bool)
+    minx, miny, maxx, maxy = hull.bounds
+    col0 = max(0, int((minx - (ox - reach)) / cell) - 1)
+    row0 = max(0, int((miny - (oy - reach)) / cell) - 1)
+    col1 = min(count - 1, int((maxx - (ox - reach)) / cell) + 1)
+    row1 = min(count - 1, int((maxy - (oy - reach)) / cell) + 1)
+    for row in range(row0, row1 + 1):
+        y = oy - reach + (row + 0.5) * cell
+        for col in range(col0, col1 + 1):
+            x = ox - reach + (col + 0.5) * cell
+            if hull.covers(Point(x, y)):
+                allow[row, col] = True
+    free = free & allow
+    if any(not free[row, col] for row, col in seeds):
+        return None
+    dist = np.full((count, count), -1, dtype=np.int32)
+    queue = deque(seeds)
+    for row, col in seeds:
+        dist[row, col] = 0
+    while queue:
+        row, col = queue.popleft()
+        step = dist[row, col] + 1
+        for n_row, n_col in (
+            (row - 1, col),
+            (row + 1, col),
+            (row, col - 1),
+            (row, col + 1),
+        ):
+            if 0 <= n_row < count and 0 <= n_col < count and free[n_row, n_col] and dist[n_row, n_col] < 0:
+                dist[n_row, n_col] = step
+                queue.append((n_row, n_col))
+    if any(dist[row, col] < 0 for row, col in seeds):
+        return None
+    best = None
+    best_region = None
+    max_cells = int(CLUSTER_GROW_MAX_MM / cell)
+    min_cells = int(CLUSTER_GROW_MIN_MM / cell)
+    step_cells = max(1, int(CLUSTER_GROW_STEP_MM / cell))
+    for radius_cells in range(min_cells, max_cells + 1, step_cells):
+        region = (dist >= 0) & (dist <= radius_cells)
+        if (
+            region[0].any()
+            or region[-1].any()
+            or region[:, 0].any()
+            or region[:, -1].any()
+        ):
+            break
+        # 면은 barrier(벽 두께) 안쪽에서 멈추므로 테두리도 barrier에 닿는지 본다.
+        edge = _cluster_wall_edge_ratio(region, barrier)
+        if edge < CLUSTER_WALL_EDGE_MIN:
+            continue
+        area = float(region.sum()) * cell * cell
+        score = (edge, -area, radius_cells)
+        if best is None or score[:2] > best[:2]:
+            best = score
+            best_region = region.copy()
+    if best_region is None:
+        return None
+    chosen = None
+    for sx, sy in origins:
+        face = _seed_ring(best_region, ox, oy, reach, cell, (sx, sy))
+        if face is None:
+            continue
+        if chosen is None or face.area > chosen.area:
+            chosen = face
+    if chosen is None or chosen.area < 200_000.0:
+        return None
+    if blocked_faces:
+        obstacle = unary_union([face for face in blocked_faces if face is not None and not face.is_empty])
+        if not obstacle.is_empty:
+            clipped = chosen.difference(obstacle.buffer(80.0))
+            if clipped.is_empty:
+                return None
+            if clipped.geom_type == "MultiPolygon":
+                holding = [
+                    geom
+                    for geom in clipped.geoms
+                    if any(geom.covers(Point(sx, sy)) or geom.distance(Point(sx, sy)) <= 500.0 for sx, sy in origins)
+                ]
+                if not holding:
+                    return None
+                clipped = max(holding, key=lambda geom: geom.area)
+            if clipped.geom_type != "Polygon":
+                return None
+            chosen = clipped
+    inside = sum(
+        1
+        for sx, sy in origins
+        if chosen.covers(Point(sx, sy)) or chosen.distance(Point(sx, sy)) <= 500.0
+    )
+    if inside < CLUSTER_MIN_SEEDS:
+        return None
+    return chosen
+
+
 def _seed_face(lines: list[LineString], origin: tuple[float, float]):
     """방안 3. 라벨 반경 25 m를 100 mm 격자로 두고 벽까지 거리를 잰다.
 
@@ -2494,8 +2793,8 @@ def _room_lines(msp, segs, origin, boxes, open_doors):
     """라벨의 면. 앞에서 놓친 라벨만 다음 방안으로 넘긴다.
 
     방안 1은 벽이 닫힌 면이다. 방안 2는 이어진 벽으로 만든 면 중 둘레의 90% 이상이
-    벽인 경우다. 방안 3은 25 m 창을 100 mm 격자로 두고, 벽 두께 2.4 m 안에서
-    씨앗 공간이 창 밖으로 새지 않는 순간이다.
+    벽인 경우다.     방안 3은 한 라벨이면 25 m 창·벽 두께 2.4 m 씨앗이고, 여러 오픈 라벨 묶음은
+    detect 쪽에서 같이 넓혀 잡는다.
     """
     lines, found, x_axes, y_axes, swings = _closed_lines(msp, segs, origin, boxes, open_doors)
     if found is not None:

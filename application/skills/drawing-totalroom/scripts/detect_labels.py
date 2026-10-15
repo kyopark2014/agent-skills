@@ -195,6 +195,71 @@ def _record_face(msp, boxes, face, x_axes, y_axes, swings, x: float, y: float, d
     }
 
 
+def _detect_open_clusters(
+    msp,
+    boxes,
+    segs,
+    open_misses: list[tuple[float, float, str]],
+    detected: list[dict],
+    skipped: list[dict],
+    door: str,
+) -> tuple[list[dict], list[dict]]:
+    """방안 1·2·단일 씨앗에서 못 잡은 오픈 라벨을 묶음으로 넓혀 면을 만든다."""
+    if len(open_misses) < room.CLUSTER_MIN_SEEDS:
+        return detected, skipped
+    origins = [(x, y) for x, y, _text in open_misses]
+    origin_groups = room.cluster_open_origins(origins)
+    lines = [LineString([(x0, y0), (x1, y1)]) for x0, y0, x1, y1, *_rest in segs]
+    rescued: set[tuple[int, int]] = set()
+    for group in origin_groups:
+        group_set = {(round(x, 1), round(y, 1)) for x, y in group}
+        members = [
+            (x, y, text)
+            for x, y, text in open_misses
+            if (round(x, 1), round(y, 1)) in group_set
+        ]
+        if len(members) < room.CLUSTER_MIN_SEEDS:
+            continue
+        seeds = [(x, y) for x, y, _text in members]
+        density = room.cluster_hull_wall_density(segs, seeds)
+        if density < room.CLUSTER_HULL_WALL_DENSITY_MIN:
+            continue
+        blocked = []
+        for inst in detected:
+            poly = _host_polygon(inst)
+            if poly is not None:
+                blocked.append(poly)
+        face = room._seed_cluster_face(lines, seeds, blocked_faces=blocked)
+        if face is None:
+            continue
+        kept = 0
+        for x, y, text in members:
+            packed = _record_face(msp, boxes, face, [], [], [], x, y, door)
+            if packed is None:
+                continue
+            packed.update({"text": text, "x": x, "y": y, "name": room.norm_name(text)})
+            detected.append(packed)
+            rescued.add((round(x), round(y)))
+            kept += 1
+            print(
+                f"[cluster] {text}  {packed['area_m2']:.2f} m2 "
+                f"(묶음 {len(members)}, 벽밀도 {density:.2f})",
+                flush=True,
+            )
+        if kept:
+            print(
+                f"[cluster] face {face.area / 1_000_000.0:.2f} m2 shared by {kept} labels",
+                flush=True,
+            )
+    if rescued:
+        skipped = [
+            row
+            for row in skipped
+            if (round(row["x"]), round(row["y"])) not in rescued
+        ]
+    return detected, skipped
+
+
 def _divide_shared_faces(msp, boxes, segs, detected: list[dict], door: str) -> list[dict]:
     """한 면에 화장실·WC·계단실 글자가 있으면 벽 끝을 이어 그 부분을 면적에서 뺀다.
 
@@ -638,6 +703,7 @@ def detect(dxf_path: Path, meta_path: Path, door: str = "close") -> dict:
     segs = room.wall_segments(msp, boxes)
     detected: list[dict] = []
     skipped: list[dict] = []
+    open_misses: list[tuple[float, float, str]] = []
     for index, (x, y, text) in enumerate(seeds, start=1):
         if room.in_vision_bathroom(x, y, bathrooms):
             skipped.append(
@@ -655,12 +721,15 @@ def detect(dxf_path: Path, meta_path: Path, door: str = "close") -> dict:
         except Exception as exc:  # noqa: BLE001
             found, reason = None, str(exc) or exc.__class__.__name__
         if found is None:
+            if reason == "벽이 실을 닫지 않습니다" and "테라스" not in text:
+                open_misses.append((x, y, text))
             skipped.append({"text": text, "x": round(x, 1), "y": round(y, 1), "reason": reason})
             print(f"[{index}/{len(seeds)}] skip {text}: {reason}", flush=True)
             continue
         found.update({"text": text, "x": x, "y": y, "name": room.norm_name(text)})
         detected.append(found)
         print(f"[{index}/{len(seeds)}] {text}  {found['area_m2']:.2f} m2", flush=True)
+    detected, skipped = _detect_open_clusters(msp, boxes, segs, open_misses, detected, skipped, door)
     detected = _divide_shared_faces(msp, boxes, segs, detected, door)
     detected = _divide_on_dividers(msp, boxes, segs, detected, door)
     detected = _subtract_anchor_faces(msp, segs, detected)
