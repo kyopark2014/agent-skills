@@ -115,6 +115,11 @@ export interface SessionInfo {
   graph_pattern?: GraphPattern | string;
 }
 
+export interface DrawingFloorRef {
+  id: string;
+  title?: string | null;
+}
+
 export interface DrawingSummary {
   drawing_id: string;
   folder: string;
@@ -123,6 +128,7 @@ export interface DrawingSummary {
   updated_at?: string;
   status: string;
   task_id?: string | null;
+  floors?: DrawingFloorRef[];
 }
 
 export interface DrawingFloor {

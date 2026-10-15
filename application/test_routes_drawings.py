@@ -53,6 +53,10 @@ class DrawingIdTests(unittest.TestCase):
 
             listed = list_drawings(artifacts)
             self.assertEqual([item["drawing_id"] for item in listed["drawings"]], [drawing_id])
+            self.assertEqual(
+                listed["drawings"][0]["floors"],
+                [{"id": "1F", "title": "1 층 평 면 도"}],
+            )
 
             nfd_id = unicodedata.normalize("NFD", drawing_id)
             floors = list_floor_catalog(artifacts, nfd_id)

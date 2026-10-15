@@ -202,6 +202,25 @@ def _latest_task_id(files: dict, *, drawing_id: str, source_filename: str) -> st
     return best_id
 
 
+def _floor_refs(entry: dict) -> list[dict]:
+    refs: list[dict] = []
+    seen: set[str] = set()
+    for item in entry.get("floors") or []:
+        if not isinstance(item, dict):
+            continue
+        floor_id = _safe_id(item.get("floor"))
+        if not floor_id or floor_id in seen:
+            continue
+        seen.add(floor_id)
+        refs.append(
+            {
+                "id": floor_id,
+                "title": str(item.get("title") or "").strip(),
+            }
+        )
+    return refs
+
+
 def _summary(entry: dict) -> dict | None:
     drawing_id = _safe_id(entry.get("drawing_id"))
     if not drawing_id:
@@ -214,6 +233,7 @@ def _summary(entry: dict) -> dict | None:
         "created_at": str(entry.get("created_at") or "").strip(),
         "updated_at": str(entry.get("updated_at") or "").strip(),
         "status": str(entry.get("status") or "pending").strip() or "pending",
+        "floors": _floor_refs(entry),
     }
 
 

@@ -77,6 +77,7 @@ export default function App() {
   const [drawingReturnView, setDrawingReturnView] = useState<"drawings" | "uploads">("drawings");
   const [chatDraft, setChatDraft] = useState<{ taskId: string; text: string } | null>(null);
   const [activeDrawingId, setActiveDrawingId] = useState<string | null>(null);
+  const [activeFloorId, setActiveFloorId] = useState<string | null>(null);
   const [queuedByTaskId, setQueuedByTaskId] = useState<
     Record<string, QueuedMessage[]>
   >({});
@@ -881,6 +882,7 @@ export default function App() {
           <DrawingView
             key={activeDrawingId}
             drawingId={activeDrawingId}
+            initialFloor={activeFloorId}
             onMenuClick={() => setSidebarOpen(true)}
             onBack={() => setView(drawingReturnView)}
           />
@@ -891,6 +893,7 @@ export default function App() {
             onBackToChat={() => setView("chat")}
             onOpen={(drawingId) => {
               setActiveDrawingId(drawingId);
+              setActiveFloorId(null);
               setDrawingReturnView("uploads");
               setView("drawing");
             }}
@@ -901,8 +904,9 @@ export default function App() {
             onMenuClick={() => setSidebarOpen(true)}
             onBack={() => setView("chat")}
             onOpenUploads={() => setView("uploads")}
-            onOpen={(drawingId) => {
+            onOpen={(drawingId, floorId) => {
               setActiveDrawingId(drawingId);
+              setActiveFloorId(floorId ?? null);
               setDrawingReturnView("drawings");
               setView("drawing");
             }}

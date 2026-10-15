@@ -17,6 +17,7 @@ type PreviewKind = (typeof PREVIEWS)[number]["kind"];
 
 interface Props {
   drawingId: string;
+  initialFloor?: string | null;
   onMenuClick?: () => void;
   onBack: () => void;
 }
@@ -60,8 +61,9 @@ function ZoomInIcon() {
   );
 }
 
-export function DrawingView({ drawingId, onMenuClick, onBack }: Props) {
+export function DrawingView({ drawingId, initialFloor, onMenuClick, onBack }: Props) {
   const [floor, setFloor] = useState("");
+  const [floorQuery, setFloorQuery] = useState("");
   const [kind, setKind] = useState<PreviewKind>("original");
   const [catalog, setCatalog] = useState<DrawingCatalog | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -84,6 +86,12 @@ export function DrawingView({ drawingId, onMenuClick, onBack }: Props) {
 
   const preview = PREVIEWS.find((item) => item.kind === kind) ?? PREVIEWS[0];
   const floors = catalog?.floors ?? [];
+  const floorNeedle = floorQuery.trim().toLowerCase();
+  const visibleFloors = floorNeedle
+    ? floors.filter((item) =>
+        [item.id, item.title].some((value) => (value || "").toLowerCase().includes(floorNeedle)),
+      )
+    : floors;
   const selected = floors.find((item) => item.id === floor);
   const available = selected ? Boolean(selected[kind]) : null;
   const src = floor ? imageSrc(drawingId, floor, kind) : "";
@@ -99,7 +107,10 @@ export function DrawingView({ drawingId, onMenuClick, onBack }: Props) {
       .then((data) => {
         if (cancelled) return;
         setCatalog(data);
+        const preferred =
+          initialFloor && data.floors.some((item) => item.id === initialFloor) ? initialFloor : "";
         const next =
+          preferred ||
           data.floors.find((item) => item.original || item.wall || item.validated || item.label)?.id ||
           data.floors[0]?.id ||
           "";
@@ -113,7 +124,7 @@ export function DrawingView({ drawingId, onMenuClick, onBack }: Props) {
     return () => {
       cancelled = true;
     };
-  }, [drawingId]);
+  }, [drawingId, initialFloor]);
 
   function beginImage() {
     setImageState("loading");
@@ -241,22 +252,43 @@ export function DrawingView({ drawingId, onMenuClick, onBack }: Props) {
       </header>
       <div className="drawing-body">
         <nav className="drawing-floors" aria-label="층 선택">
-          {floors.map((item) => (
-            <button
-              key={item.id}
-              type="button"
-              className={`drawing-floor-btn${floor === item.id ? " is-active" : ""}`}
-              aria-current={floor === item.id ? "true" : undefined}
-              title={item.status ? `${item.id} · ${item.status}` : item.id}
-              onClick={() => {
-                if (item.id === floor) return;
-                setFloor(item.id);
-                beginImage();
-              }}
-            >
-              {item.id}
-            </button>
-          ))}
+          {floors.length > 0 ? (
+            <input
+              type="search"
+              className="drawing-search-input"
+              value={floorQuery}
+              placeholder="층 검색"
+              aria-label="층 검색"
+              onChange={(event) => setFloorQuery(event.target.value)}
+            />
+          ) : null}
+          <div className="drawing-floor-list">
+            {visibleFloors.map((item) => {
+              const floorTitle = (item.title || "").trim();
+              return (
+                <button
+                  key={item.id}
+                  type="button"
+                  className={`drawing-floor-btn${floor === item.id ? " is-active" : ""}`}
+                  aria-current={floor === item.id ? "true" : undefined}
+                  title={floorTitle && floorTitle !== item.id ? `${item.id} · ${floorTitle}` : item.id}
+                  onClick={() => {
+                    if (item.id === floor) return;
+                    setFloor(item.id);
+                    beginImage();
+                  }}
+                >
+                  <span className="drawing-floor-id">{item.id}</span>
+                  {floorTitle && floorTitle !== item.id ? (
+                    <span className="drawing-floor-title">{floorTitle}</span>
+                  ) : null}
+                </button>
+              );
+            })}
+            {floorNeedle && visibleFloors.length === 0 ? (
+              <p className="drawing-floor-empty">일치하는 층이 없습니다.</p>
+            ) : null}
+          </div>
         </nav>
         <div className="drawing-main">
           <div className="drawing-toolbar">

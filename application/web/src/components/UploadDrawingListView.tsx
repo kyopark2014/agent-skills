@@ -45,6 +45,7 @@ export function UploadDrawingListView({
   const [deletingName, setDeletingName] = useState<string | null>(null);
   const [startingName, setStartingName] = useState<string | null>(null);
   const [pendingDelete, setPendingDelete] = useState<UploadDrawing | null>(null);
+  const [query, setQuery] = useState("");
 
   useEffect(() => {
     let cancelled = false;
@@ -92,6 +93,15 @@ export function UploadDrawingListView({
     }
   }
 
+  const needle = query.trim().toLowerCase();
+  const visible = needle
+    ? files.filter((file) =>
+        [file.file_name, file.status, file.drawing_id].some((value) =>
+          (value || "").toLowerCase().includes(needle),
+        ),
+      )
+    : files;
+
   async function start(file: UploadDrawing) {
     setStartingName(file.file_name);
     setError(null);
@@ -110,6 +120,16 @@ export function UploadDrawingListView({
           <MenuIcon className="sidebar-icon" />
         </button>
         <span className="main-header-title">Drawing</span>
+        {!loading && files.length > 0 ? (
+          <input
+            type="search"
+            className="drawing-search-input drawing-header-search"
+            value={query}
+            placeholder="파일명 검색"
+            aria-label="업로드 도면 검색"
+            onChange={(event) => setQuery(event.target.value)}
+          />
+        ) : null}
         <div className="drawing-header-actions">
           <button type="button" className="drawing-back-btn" onClick={onBackToDrawings}>
             도면 목록
@@ -130,6 +150,8 @@ export function UploadDrawingListView({
           ) : (
             <p className="drawing-list-empty">업로드된 dwg, dxf, dwf 도면이 없습니다.</p>
           )
+        ) : visible.length === 0 ? (
+          <p className="drawing-list-empty">일치하는 파일이 없습니다.</p>
         ) : (
           <>
             {error ? (
@@ -138,50 +160,52 @@ export function UploadDrawingListView({
               </p>
             ) : null}
             <ul className="drawing-list">
-              {files.map((file) => {
+              {visible.map((file) => {
                 const busy = deletingName === file.file_name || startingName === file.file_name;
                 const canView = Boolean(file.drawing_id);
                 return (
                   <li key={file.file_name} className="drawing-list-item">
-                    <div className="drawing-list-meta">
-                      <span className="drawing-list-name" title={file.file_name}>
-                        {file.file_name}
-                      </span>
-                      <span className="drawing-list-sub">
-                        생성 {formatCreatedAt(file.created_at)}
-                        {" · "}
-                        {formatFileSize(file.size)}
-                        {" · "}
-                        상태 {file.status}
-                      </span>
-                    </div>
-                    <div className="drawing-list-actions">
-                      <button
-                        type="button"
-                        className="drawing-list-btn"
-                        disabled={busy}
-                        onClick={() => void start(file)}
-                      >
-                        {startingName === file.file_name ? "시작 중…" : "시작"}
-                      </button>
-                      <button
-                        type="button"
-                        className="drawing-list-btn"
-                        disabled={!canView || busy}
-                        onClick={() => {
-                          if (file.drawing_id) onOpen(file.drawing_id);
-                        }}
-                      >
-                        보기
-                      </button>
-                      <button
-                        type="button"
-                        className="drawing-list-btn drawing-list-btn-danger"
-                        disabled={busy}
-                        onClick={() => setPendingDelete(file)}
-                      >
-                        {deletingName === file.file_name ? "삭제 중…" : "삭제"}
-                      </button>
+                    <div className="drawing-list-row">
+                      <div className="drawing-list-meta">
+                        <span className="drawing-list-name" title={file.file_name}>
+                          {file.file_name}
+                        </span>
+                        <span className="drawing-list-sub">
+                          생성 {formatCreatedAt(file.created_at)}
+                          {" · "}
+                          {formatFileSize(file.size)}
+                          {" · "}
+                          상태 {file.status}
+                        </span>
+                      </div>
+                      <div className="drawing-list-actions">
+                        <button
+                          type="button"
+                          className="drawing-list-btn"
+                          disabled={busy}
+                          onClick={() => void start(file)}
+                        >
+                          {startingName === file.file_name ? "시작 중…" : "시작"}
+                        </button>
+                        <button
+                          type="button"
+                          className="drawing-list-btn"
+                          disabled={!canView || busy}
+                          onClick={() => {
+                            if (file.drawing_id) onOpen(file.drawing_id);
+                          }}
+                        >
+                          보기
+                        </button>
+                        <button
+                          type="button"
+                          className="drawing-list-btn"
+                          disabled={busy}
+                          onClick={() => setPendingDelete(file)}
+                        >
+                          {deletingName === file.file_name ? "삭제 중…" : "삭제"}
+                        </button>
+                      </div>
                     </div>
                   </li>
                 );
