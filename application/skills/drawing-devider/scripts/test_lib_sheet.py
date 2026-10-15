@@ -53,6 +53,7 @@ class ParseFloorLabelTests(unittest.TestCase):
         )
         self.assertIsNone(lib_sheet.parse_plan_title("1층 평면도"))
         self.assertIsNone(lib_sheet.parse_plan_title("평면도"))
+        self.assertIsNone(lib_sheet.parse_plan_title("PLANNING.ARCHITECTURE.ENGINEERING"))
 
     def test_same_floor_control_and_demo_stay_one_sheet(self):
         rect = (0.0, 0.0, 126_000.0, 89_000.0)
@@ -97,6 +98,52 @@ class FacilityPlanSheetTests(unittest.TestCase):
         self.assertEqual(titles["AA409"], "경비실-2, 티카페, 경로당 평면도")
         self.assertEqual(titles["AA406"], "피트니스센터, 에듀센터, 관리사무소 평면도")
         self.assertTrue(any("도면번호" in note for note in found.warnings))
+
+    def test_defpoint_guides_and_repeated_floor_codes_stay_out_of_sheets(self):
+        import ezdxf
+
+        doc = ezdxf.new()
+        msp = doc.modelspace()
+
+        def border(x, y, w, h, layer="0"):
+            msp.add_lwpolyline(
+                [(x, y), (x + w, y), (x + w, y + h), (x, y + h)],
+                close=True,
+                dxfattribs={"layer": layer},
+            )
+
+        border(0, 0, 60_000, 40_000)
+        border(80_000, 0, 60_000, 40_000)
+        border(0, -30_000, 40_000, 12_000)
+        msp.add_line((0, 0), (200_000, 0), dxfattribs={"layer": "Defpoint"})
+        msp.add_line((0, 40_000), (200_000, 40_000), dxfattribs={"layer": "Defpoint"})
+        msp.add_line((0, 0), (0, 40_000), dxfattribs={"layer": "Defpoint"})
+        msp.add_line((200_000, 0), (200_000, 40_000), dxfattribs={"layer": "Defpoint"})
+        msp.add_text("경로당 평면도", dxfattribs={"insert": (20_000, 5_000), "height": 800})
+        msp.add_text(
+            "근린생활시설 1층 평면도",
+            dxfattribs={"insert": (90_000, 8_000), "height": 800},
+        )
+        msp.add_text(
+            "근린생활시설 2층 평면도",
+            dxfattribs={"insert": (90_000, 28_000), "height": 800},
+        )
+        for index in range(8):
+            msp.add_text(
+                "29F",
+                dxfattribs={"insert": (2_000 + index * 500, -22_000), "height": 400},
+            )
+
+        found = lib_sheet.discover_layout(doc, mode="sheet")
+
+        self.assertEqual([frame.floor for frame in found.sheets], ["sheet_01", "sheet_02"])
+        self.assertEqual(found.sheets[0].title, "미확정: 경로당 평면도")
+        self.assertEqual(
+            found.sheets[1].title,
+            "미확정: 근린생활시설 1층 평면도, 근린생활시설 2층 평면도",
+        )
+        self.assertLess(found.sheets[0].bbox[2] - found.sheets[0].bbox[0], 70_000)
+        self.assertTrue(any("29F" in note for note in found.warnings))
 
 
 class PaperspaceFloorTests(unittest.TestCase):

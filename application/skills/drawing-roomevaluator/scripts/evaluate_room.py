@@ -116,11 +116,89 @@ LABEL_ONLY_AREA_TOKENS = (
     "드라이기",
     "유사용",
     "상하부",
+    "유도등",
+    "단자함",
+    "소화전",
+    "다용도실",
+    "밸브",
+    "(근생)",
+    "（근생）",
+    "정화조",
+    "피난기",
+    "보관소",
+    "속도",
+    "탑승대기공간",
+    "탑승대기",
+    "주거",
+    "배수",
+    "비상용",
+    "ST(",
+    "ST（",
+    "탱크",
+    "실외기",
+    "마감",
+    "콘크리트",
+    "행거",
+    "클립바",
+    "수조",
+    "발전기실",
+    "집수정",
+    "ASD",
+    "W.C",
+    "세면대",
+    "ARM실",
+    "옷장",
+    "용수대",
+    "자동문",
+    "거울",
+    "세탁기",
+    "기기배치",
+    "폐쇄",
+    "장애인겸용",
+    "데크",
+    "비품고",
+    "전기실",
+    "충전소",
+    "급속",
+    "폐기품",
+    "폐기물",
+    "콤프레셔",
+    "설비실",
+    "경계선",
+    "대지안",
+    "벽부형",
+    "산책로",
+    "올라옴",
+    "수거함",
+    "배기",
+    "FSD",
+    "DORDI",
+    "승강식",
+    "OH4700",
+    "유모차보관",
+    "C1A",
+    "C2A",
+    "C3A",
+    "TC1",
+    "PW1000",
+    "AG1100",
+    "노출되는",
+    "자전거",
+    "피난구",
+    "DA-",
+    "재활용",
+    "급기",
+    "주문제작",
+    "BC-",
+    "부속실",
+    "보일러실",
+    "세탁실",
+    "승강장",
 )
 
 
 def is_excluded_area_label(text: str, *, include_callouts: bool = True) -> bool:
-    """면적과 실 라벨에서 빼는 이름. 방풍실, 보관실, 퇴식대, 샤워실, 고압, 저압, 계단실, 복도, 승강기, EPS, OPEN, 홀-, 홈-, 입구, 출구, 양치공간, 청소도구함, 청소도구실, 실외기실, 오픈, 조경, 배경, 평면도, 비품고을, 항습기, 화물, 휠체어, 린넨실, 오물처리실, (장애인, 구급자, 응급환자, 의료가스실, 기계실, (여), (남), 문서고, 기울기, 자동방화, 인), 인승, OTIS, Wlqtnwjd, DA#, DA(, 올려옴, 내려감, DOOR, 패드, 기저귀, 침례탕약, 설치, 드라이기, 유사용, 상하부, 분전함, 세척실, 탕비실, 물품, 스트레쳐, E.V, ELEV. ELEV. HALL과 ELEV. 홀도 포함한다. (여), (남), 문서고, 기울기, 자동방화, 인), 인승, OTIS, Wlqtnwjd, DA#, DA(, 올려옴, 내려감, DOOR, 패드, 기저귀, 침례탕약, 설치, 드라이기, 유사용, 상하부도 포함한다."""
+    """면적과 실 라벨에서 빼는 이름. 방풍실, 보관실, 퇴식대, 샤워실, 고압, 저압, 계단실, 복도, 승강기, EPS, OPEN, 홀-, 홈-, 입구, 출구, 양치공간, 청소도구함, 청소도구실, 실외기실, 오픈, 조경, 배경, 평면도, 비품고을, 항습기, 화물, 휠체어, 린넨실, 오물처리실, (장애인, 구급자, 응급환자, 의료가스실, 기계실, (여), (남), 문서고, 기울기, 자동방화, 인), 인승, OTIS, Wlqtnwjd, DA#, DA(, 올려옴, 내려감, DOOR, 패드, 기저귀, 침례탕약, 설치, 드라이기, 유사용, 상하부, 분전함, 세척실, 탕비실, 물품, 스트레쳐, E.V, ELEV. ELEV. HALL과 ELEV. 홀도 포함한다. (여), (남), 문서고, 기울기, 자동방화, 인), 인승, OTIS, Wlqtnwjd, DA#, DA(, 올려옴, 내려감, DOOR, 패드, 기저귀, 침례탕약, 설치, 드라이기, 유사용, 상하부, 유도등, 단자함, 소화전, 다용도실, 밸브, (근생), 정화조, 피난기, 보관소, 속도, 탑승대기공간, 주거, 배수, 비상용, 탑승대기, ST(, 탱크, 실외기, 마감, 콘크리트, 행거, 클립바, 수조, 발전기실, 집수정, ASD, W.C, 세면대, ARM실, 옷장, 용수대, 자동문, 거울, 세탁기, 기기배치, 폐쇄, 장애인겸용, 데크, 비품고, 전기실, 충전소, 급속, 폐기품, 폐기물, 콤프레셔, 설비실, 경계선, 대지안, 벽부형, 산책로, 올라옴, 수거함, 배기, FSD, DORDI, 승강식, OH4700, 유모차보관, C1A, C2A, C3A, TC1, PW1000, AG1100, 노출되는, 자전거, 피난구, DA-, 재활용, 급기, 주문제작, BC-, 부속실, 보일러실, 세탁실, 승강장도 포함한다."""
     name = norm_name(text)
     folded = name.upper()
     if include_callouts and any(token in folded for token in LABEL_ONLY_AREA_TOKENS):
@@ -203,6 +281,96 @@ def is_equipment_label(text: str) -> bool:
             "세척기",
         )
     )
+
+
+def vision_bathroom_boxes(dxf_path: Path) -> list[tuple[float, float, float, float]]:
+    """같은 층 llm_review/review.json 에서 비전이 화장실로 둔 상자.
+
+    좌표는 도면 mm. 글자가 화장실이 아니어도 이 안의 라벨은 면적에서 뺀다.
+    """
+    path = Path(dxf_path).parent / "llm_review" / "review.json"
+    if not path.is_file():
+        return []
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+    boxes: list[tuple[float, float, float, float]] = []
+    for item in data.get("promote_bboxes") or []:
+        if not isinstance(item, dict):
+            continue
+        if "화장실" not in norm_name(str(item.get("label") or "")):
+            continue
+        try:
+            x0, y0 = float(item["xmin"]), float(item["ymin"])
+            x1, y1 = float(item["xmax"]), float(item["ymax"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        boxes.append((min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1)))
+    return boxes
+
+
+WALL_PERIMETER_MIN = 0.90
+WALL_COVER_MM = 250.0
+SEED_REACH_MM = 25000.0
+SEED_BUFFER_STEPS_MM = (80.0, 160.0, 320.0, 640.0, 1000.0, 1400.0, 1800.0, 2400.0)
+
+
+def wall_perimeter_ratio(segs, pts) -> float:
+    """면 둘레 중 벽·창·기둥·문 선에서 250 mm 안인 길이의 비율.
+
+    방안 2에서만 쓴다. 90% 미만이면 그 면을 두지 않고 방안 3으로 넘긴다.
+    근생-8 옆 테라스처럼 한 변이 열린 경우다.
+    """
+    if len(pts) < 2:
+        return 0.0
+    ring = [(float(x), float(y)) for x, y in pts]
+    if ring[0] != ring[-1]:
+        ring.append(ring[0])
+    edges: list[LineString] = []
+    total = 0.0
+    for start, end in zip(ring, ring[1:]):
+        length = math.hypot(end[0] - start[0], end[1] - start[1])
+        if length < 1.0:
+            continue
+        edges.append(LineString([start, end]))
+        total += length
+    if total <= 0.0 or not segs:
+        return 0.0
+    minx = min(point[0] for point in ring) - 400.0
+    maxx = max(point[0] for point in ring) + 400.0
+    miny = min(point[1] for point in ring) - 400.0
+    maxy = max(point[1] for point in ring) + 400.0
+    near: list[LineString] = []
+    for item in segs:
+        if hasattr(item, "coords"):
+            line = item
+        else:
+            x0, y0, x1, y1 = item[:4]
+            if math.hypot(x1 - x0, y1 - y0) < 40.0:
+                continue
+            line = LineString([(x0, y0), (x1, y1)])
+        bounds = line.bounds
+        if bounds[2] < minx or bounds[0] > maxx or bounds[3] < miny or bounds[1] > maxy:
+            continue
+        near.append(line)
+    if not near:
+        return 0.0
+    cover = unary_union(near).buffer(WALL_COVER_MM)
+    covered = 0.0
+    for edge in edges:
+        hit = edge.intersection(cover)
+        if not hit.is_empty:
+            covered += min(hit.length, edge.length)
+    return covered / total
+
+
+def in_vision_bathroom(x: float, y: float, boxes) -> bool:
+    """라벨 점이 비전 화장실 상자 안에 있으면 면적 대상이 아니다."""
+    for x0, y0, x1, y1 in boxes:
+        if x0 <= x <= x1 and y0 <= y <= y1:
+            return True
+    return False
 
 
 def is_room_label(text: str) -> bool:
@@ -1925,6 +2093,340 @@ def _best_open_face(lines, added, origin, reach):
     return None, None
 
 
+def _seed_edt(wall):
+    """벽 칸까지 화소 거리. wall 이 True 인 칸은 0이다."""
+    import numpy as np
+
+    height, width = wall.shape
+    huge = 1.0e20
+    feature = np.where(wall, 0.0, huge)
+
+    def along(values):
+        count = values.shape[0]
+        index = np.zeros(count, dtype=np.int32)
+        bound = np.full(count + 1, np.inf)
+        bound[0] = -np.inf
+        k = 0
+        for q in range(1, count):
+            vk = int(index[k])
+            span = 2.0 * q - 2.0 * vk
+            if span == 0.0:
+                k += 1
+                index[k] = q
+                bound[k] = -np.inf
+                bound[k + 1] = np.inf
+                continue
+            cross = ((values[q] + q * q) - (values[vk] + vk * vk)) / span
+            while cross <= bound[k]:
+                k -= 1
+                vk = int(index[k])
+                span = 2.0 * q - 2.0 * vk
+                if span == 0.0:
+                    cross = -np.inf
+                    break
+                cross = ((values[q] + q * q) - (values[vk] + vk * vk)) / span
+            k += 1
+            index[k] = q
+            bound[k] = cross
+            bound[k + 1] = np.inf
+        k = 0
+        out = np.empty(count)
+        for q in range(count):
+            while bound[k + 1] < q:
+                k += 1
+            delta = q - int(index[k])
+            out[q] = delta * delta + values[int(index[k])]
+        return out
+
+    temporary = np.empty_like(feature)
+    for col in range(width):
+        temporary[:, col] = along(feature[:, col])
+    out = np.empty_like(feature)
+    for row in range(height):
+        out[row, :] = along(temporary[row, :])
+    return np.sqrt(out)
+
+
+def _seed_ring(mask, ox: float, oy: float, reach: float, cell: float, origin: tuple[float, float]):
+    """칸 마스크의 바깥 고리를 도면 mm 다각형으로 만든다."""
+    import numpy as np
+
+    height, width = mask.shape
+    nxt: dict[tuple[float, float], list[tuple[float, float]]] = defaultdict(list)
+    rows, cols = np.nonzero(mask)
+    for row, col in zip(rows.tolist(), cols.tolist()):
+        x0 = ox - reach + col * cell
+        y0 = oy - reach + row * cell
+        x1 = x0 + cell
+        y1 = y0 + cell
+        if row == 0 or not mask[row - 1, col]:
+            nxt[(x0, y0)].append((x1, y0))
+        if row + 1 == height or not mask[row + 1, col]:
+            nxt[(x1, y1)].append((x0, y1))
+        if col == 0 or not mask[row, col - 1]:
+            nxt[(x0, y1)].append((x0, y0))
+        if col + 1 == width or not mask[row, col + 1]:
+            nxt[(x1, y0)].append((x1, y1))
+    unused = {(start, end) for start, ends in nxt.items() for end in ends}
+    rings = []
+    while unused:
+        start, end = unused.pop()
+        ring = [start, end]
+        cursor = end
+        while cursor != start:
+            found = None
+            for nxt_pt in nxt.get(cursor, ()):
+                edge = (cursor, nxt_pt)
+                if edge in unused:
+                    found = nxt_pt
+                    unused.discard(edge)
+                    break
+            if found is None:
+                break
+            ring.append(found)
+            cursor = found
+        if len(ring) >= 4 and ring[0] == ring[-1]:
+            rings.append(ring[:-1])
+    seed = Point(origin)
+    chosen = None
+    for ring in rings:
+        face = Polygon(ring)
+        if not face.is_valid:
+            face = face.buffer(0)
+        if face.is_empty or face.geom_type != "Polygon" or not face.covers(seed):
+            continue
+        if chosen is None or face.area > chosen.area:
+            chosen = face
+    return chosen
+
+
+def _seed_face(lines: list[LineString], origin: tuple[float, float]):
+    """방안 3. 라벨 반경 25 m를 100 mm 격자로 두고 벽까지 거리를 잰다.
+
+    벽 두께는 80 mm부터 2.4 m까지 키운다. 씨앗 공간이 창 테두리에 닿지 않는
+    가장 얇은 두께에서 실로 둔다. 벽이 씨앗을 덮거나 2.4 m에서도 새면 실이 아니다.
+    """
+    try:
+        import numpy as np
+    except ImportError:
+        return None
+    ox, oy = origin
+    reach = SEED_REACH_MM
+    cell = 100.0
+    count = int(reach * 2.0 / cell)
+    window = box(ox - reach, oy - reach, ox + reach, oy + reach)
+    usable = [ln for ln in lines if ln.length > 40.0 and window.intersects(ln)]
+    if len(usable) < 3:
+        return None
+    wall = np.zeros((count, count), dtype=bool)
+
+    def paint(x0: float, y0: float, x1: float, y1: float) -> None:
+        col = int((x0 - (ox - reach)) / cell)
+        row = int((y0 - (oy - reach)) / cell)
+        col_b = int((x1 - (ox - reach)) / cell)
+        row_b = int((y1 - (oy - reach)) / cell)
+        step_c = abs(col_b - col)
+        step_r = abs(row_b - row)
+        sign_c = 1 if col < col_b else -1
+        sign_r = 1 if row < row_b else -1
+        err = step_c - step_r
+        while True:
+            if 0 <= row < count and 0 <= col < count:
+                wall[row, col] = True
+            if col == col_b and row == row_b:
+                break
+            doubled = 2 * err
+            if doubled > -step_r:
+                err -= step_r
+                col += sign_c
+            if doubled < step_c:
+                err += step_c
+                row += sign_r
+
+    for line in usable:
+        coords = list(line.coords)
+        for start, end in zip(coords, coords[1:]):
+            paint(float(start[0]), float(start[1]), float(end[0]), float(end[1]))
+    if not wall.any():
+        return None
+    dist = _seed_edt(wall)
+    seed_row = int(reach / cell)
+    seed_col = int(reach / cell)
+    if not (0 <= seed_row < count and 0 <= seed_col < count):
+        return None
+    if dist[seed_row, seed_col] <= 0.0:
+        found = None
+        for d_row in range(-4, 5):
+            for d_col in range(-4, 5):
+                row = seed_row + d_row
+                col = seed_col + d_col
+                if 0 <= row < count and 0 <= col < count and dist[row, col] > 0.0:
+                    if found is None or dist[row, col] > dist[found]:
+                        found = (row, col)
+        if found is None:
+            return None
+        seed_row, seed_col = found
+    for radius in SEED_BUFFER_STEPS_MM:
+        radius_px = radius / cell
+        if dist[seed_row, seed_col] <= radius_px:
+            return None
+        free = dist > radius_px
+        seen = np.zeros((count, count), dtype=bool)
+        stack = [(seed_row, seed_col)]
+        seen[seed_row, seed_col] = True
+        leaks = False
+        while stack:
+            row, col = stack.pop()
+            if row == 0 or col == 0 or row == count - 1 or col == count - 1:
+                leaks = True
+                break
+            for n_row, n_col in ((row - 1, col), (row + 1, col), (row, col - 1), (row, col + 1)):
+                if free[n_row, n_col] and not seen[n_row, n_col]:
+                    seen[n_row, n_col] = True
+                    stack.append((n_row, n_col))
+        if leaks:
+            continue
+        room_dist = _seed_edt(~seen)
+        restored = room_dist <= radius_px
+        if restored[0].any() or restored[-1].any() or restored[:, 0].any() or restored[:, -1].any():
+            continue
+        face = _seed_ring(restored, ox, oy, reach, cell, origin)
+        if face is None or face.area < 200_000.0:
+            continue
+        return face
+    return None
+
+
+def _visibility_face(lines: list[LineString], origin: tuple[float, float], reach: float = 22000.0):
+    """방안 2. 벽이 닫히지 않은 라벨에서 본 면.
+
+    라벨에서 2°마다 처음 닿는 벽을 모은다. 끝점이 300 mm 안에서 이어진 선은 한 벽이다.
+    이웃보다 1.8 m 넘게 먼 점은 틈 너머라 뺀다. 24°보다 짧고 주위 벽보다 1.2 m 이상
+    가까운 선은 실 안 장애물이라 그 뒤의 벽을 쓴다. 빠진 방향은 양옆 점을 이어 막는다.
+    둘레의 90% 이상이 벽일 때만 이 면을 쓴다. 그 판단은 호출하는 쪽에서 한다.
+    """
+    step = 2
+    count = 360 // step
+    usable = [ln for ln in lines if ln.length > 0.5]
+    if len(usable) < 2:
+        return None
+    tree = STRtree(usable)
+    parent = list(range(len(usable)))
+
+    def find(index: int) -> int:
+        while parent[index] != index:
+            parent[index] = parent[parent[index]]
+            index = parent[index]
+        return index
+
+    def union(left: int, right: int) -> None:
+        root_left, root_right = find(left), find(right)
+        if root_left != root_right:
+            parent[root_right] = root_left
+
+    for index, line in enumerate(usable):
+        for xy in (line.coords[0], line.coords[-1]):
+            point = Point(float(xy[0]), float(xy[1]))
+            for hit in tree.query(point.buffer(300.0)):
+                other = int(hit)
+                if other != index and float(usable[other].distance(point)) <= 300.0:
+                    union(index, other)
+    component = [find(index) for index in range(len(usable))]
+    ox, oy = origin
+    rays: list[list[tuple[float, int, float, float]]] = []
+    for index in range(count):
+        angle = math.radians(index * step)
+        ray = LineString([(ox, oy), (ox + math.cos(angle) * reach, oy + math.sin(angle) * reach)])
+        raw: list[tuple[float, int, float, float]] = []
+        for hit in tree.query(ray):
+            other = int(hit)
+            inter = ray.intersection(usable[other])
+            if inter.is_empty:
+                continue
+            points: list[Point] = []
+            kind = inter.geom_type
+            if kind == "Point":
+                points = [inter]
+            elif kind == "MultiPoint":
+                points = list(inter.geoms)
+            elif kind == "LineString":
+                points = [Point(item) for item in (inter.coords[0], inter.coords[-1])]
+            elif kind == "GeometryCollection":
+                for geom in inter.geoms:
+                    if geom.geom_type == "Point":
+                        points.append(geom)
+            for point in points:
+                distance = math.hypot(point.x - ox, point.y - oy)
+                if 80.0 < distance <= reach:
+                    raw.append((distance, component[other], float(point.x), float(point.y)))
+        raw.sort()
+        kept: list[tuple[float, int, float, float]] = []
+        for item in raw:
+            if kept and item[0] - kept[-1][0] <= 280.0 and item[1] == kept[-1][1]:
+                continue
+            kept.append(item)
+            if len(kept) >= 4:
+                break
+        rays.append(kept)
+    chosen: list[tuple[float, int, float, float] | None] = [hits[0] if hits else None for hits in rays]
+    for _repeat in range(3):
+        for index, item in enumerate(chosen):
+            if item is None:
+                continue
+            window = [
+                chosen[(index + offset) % count][0]
+                for offset in range(-6, 7)
+                if offset and chosen[(index + offset) % count] is not None
+            ]
+            if len(window) < 4:
+                continue
+            window.sort()
+            if item[0] > window[len(window) // 2] + 1800.0:
+                chosen[index] = None
+    span: dict[int, int] = defaultdict(int)
+    for item in chosen:
+        if item is not None:
+            span[item[1]] += 1
+    for index, hits in enumerate(rays):
+        item = chosen[index]
+        if not hits or item is None or span[item[1]] >= 12:
+            continue
+        window = [
+            chosen[(index + offset) % count][0]
+            for offset in range(-10, 11)
+            if offset
+            and chosen[(index + offset) % count] is not None
+            and span[chosen[(index + offset) % count][1]] >= 12
+        ]
+        if len(window) < 3:
+            continue
+        window.sort()
+        median = window[len(window) // 2]
+        if item[0] >= median - 1200.0:
+            continue
+        replacement = None
+        for hit in hits:
+            if hit[0] <= item[0] + 400.0:
+                continue
+            if replacement is None or abs(hit[0] - median) < abs(replacement[0] - median):
+                replacement = hit
+        chosen[index] = replacement
+    points = [(item[2], item[3]) for item in chosen if item is not None]
+    if len(points) < 3:
+        return None
+    face = Polygon(points)
+    if not face.is_valid:
+        face = face.buffer(0)
+    if face.is_empty:
+        return None
+    if face.geom_type == "MultiPolygon":
+        holding = [geom for geom in face.geoms if geom.contains(Point(ox, oy))]
+        face = holding[0] if holding else max(face.geoms, key=lambda geom: geom.area)
+    if face.geom_type != "Polygon" or not face.contains(Point(ox, oy)):
+        return None
+    return face
+
+
 def _closed_lines(msp, segs, origin, boxes, open_doors):
     """라벨이 들어 있는 닫힌 면과, 그 면을 만든 벽선.
 
@@ -1985,15 +2487,31 @@ def _closed_lines(msp, segs, origin, boxes, open_doors):
             found = None
     if found is not None:
         return closed, found, x_axes, y_axes, swings
-    return None, None, [], [], []
+    return lines, None, x_axes, y_axes, swings
 
 
 def _room_lines(msp, segs, origin, boxes, open_doors):
-    """라벨이 들어 있는 닫힌 면. open_doors 의 여닫이는 개구로 남긴다."""
-    _lines, found, x_axes, y_axes, swings = _closed_lines(msp, segs, origin, boxes, open_doors)
-    if found is None:
+    """라벨의 면. 앞에서 놓친 라벨만 다음 방안으로 넘긴다.
+
+    방안 1은 벽이 닫힌 면이다. 방안 2는 이어진 벽으로 만든 면 중 둘레의 90% 이상이
+    벽인 경우다. 방안 3은 25 m 창을 100 mm 격자로 두고, 벽 두께 2.4 m 안에서
+    씨앗 공간이 창 밖으로 새지 않는 순간이다.
+    """
+    lines, found, x_axes, y_axes, swings = _closed_lines(msp, segs, origin, boxes, open_doors)
+    if found is not None:
+        return found, x_axes, y_axes, swings
+    if not lines:
         return None, [], [], []
-    return found, x_axes, y_axes, swings
+    seen = _visibility_face(lines, origin)
+    if (
+        seen is not None
+        and wall_perimeter_ratio(segs, list(seen.exterior.coords)) >= WALL_PERIMETER_MIN
+    ):
+        return seen, x_axes, y_axes, swings
+    seeded = _seed_face(lines, origin)
+    if seeded is not None:
+        return seeded, x_axes, y_axes, swings
+    return None, [], [], []
 
 
 def split_face_at_wall_end(msp, segs, boxes, origin, others: list[tuple[float, float]]):
@@ -2219,6 +2737,8 @@ def evaluate(
     doc = ezdxf.readfile(str(dxf_path))
     msp = doc.modelspace()
     lx, ly, label = find_room_label(msp, room, at)
+    if in_vision_bathroom(lx, ly, vision_bathroom_boxes(dxf_path)):
+        raise SystemExit("비전 화장실 영역이라 면적에서 제외합니다.")
     boxes = column_boxes(msp)
     closed_segs = wall_segments(msp, boxes)
     face, x_axes, y_axes, swings = _room_lines(msp, closed_segs, (lx, ly), boxes, [])

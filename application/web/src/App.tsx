@@ -581,7 +581,36 @@ export default function App() {
 
   function handleStop() {
     if (!activeTaskId) return;
-    stopMessage(activeTaskId);
+    const taskId = activeTaskId;
+    const hadStream = stopMessage(taskId);
+    if (hadStream) return;
+    void persistDetachedStop(taskId, recoveryKey);
+  }
+
+  async function persistDetachedStop(taskId: string, settledKey: string) {
+    const notice = "You stopped this reply.";
+    setRecoverySettledKey(settledKey);
+    setRecoveringTaskId((prev) => (prev === taskId ? null : prev));
+    if ((queuedByTaskIdRef.current[taskId] ?? []).length > 0) {
+      setQueuePausedByTaskId((prev) => ({ ...prev, [taskId]: true }));
+    }
+    if (activeTaskIdRef.current === taskId) {
+      setMessages((prev) => [
+        ...prev,
+        buildPendingAssistantMessage(taskId, notice, [], []),
+      ]);
+    }
+    try {
+      await appDataService.addMessage(taskId, {
+        role: "assistant",
+        content: notice,
+      });
+      if (activeTaskIdRef.current === taskId) {
+        await loadMessages(taskId);
+      }
+    } catch (err) {
+      uiError("chat:persist stop message failed", err);
+    }
   }
 
   async function handleResumeQueue() {

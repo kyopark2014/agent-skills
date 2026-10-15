@@ -4,6 +4,7 @@ import re
 import sys
 import traceback
 import asyncio
+import time
 try:
     from application import chat
     from application import run_cancel
@@ -1061,21 +1062,42 @@ def bash(command: str) -> str:
     pgid = proc.pid
     run_cancel.track_pgroup(cancel_key, pgid)
     timed_out = False
+    cancelled = False
+    stdout, stderr = "", ""
+    deadline = time.monotonic() + _BASH_TIMEOUT_SECONDS
     try:
-        stdout, stderr = proc.communicate(timeout=_BASH_TIMEOUT_SECONDS)
-    except subprocess.TimeoutExpired:
-        timed_out = True
-        logger.warning("bash timed out after %ss", _BASH_TIMEOUT_SECONDS)
-        _kill_bash_group(pgid)
-        stdout, stderr = proc.communicate()
+        while True:
+            if (cancel_key and run_cancel.is_cancelled(cancel_key)) or run_cancel.turn_cancelled():
+                cancelled = True
+                break
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                timed_out = True
+                break
+            try:
+                stdout, stderr = proc.communicate(timeout=min(remaining, 0.25))
+                break
+            except subprocess.TimeoutExpired:
+                continue
     finally:
+        if proc.poll() is None:
+            _kill_bash_group(pgid)
         run_cancel.untrack_pgroup(cancel_key, pgid)
+    if cancelled or timed_out:
+        if proc.poll() is None:
+            _kill_bash_group(pgid)
+        try:
+            stdout, stderr = proc.communicate(timeout=2)
+        except subprocess.TimeoutExpired:
+            _kill_bash_group(pgid)
+            stdout, stderr = proc.communicate()
     # pip install may have just created ~/.local/.../site-packages
     _ensure_user_site_on_sys_path()
-    if timed_out:
-        return f"Error: command timed out after {_BASH_TIMEOUT_SECONDS}s"
-    if cancel_key and run_cancel.is_cancelled(cancel_key):
+    if cancelled:
         return "Cancelled by user"
+    if timed_out:
+        logger.warning("bash timed out after %ss", _BASH_TIMEOUT_SECONDS)
+        return f"Error: command timed out after {_BASH_TIMEOUT_SECONDS}s"
     parts = []
     if stdout:
         parts.append(f"STDOUT:\n{stdout}")

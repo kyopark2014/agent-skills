@@ -104,18 +104,17 @@ export function useChatStream() {
     [],
   );
 
-  const stopMessage = useCallback((taskId: string) => {
+  const stopMessage = useCallback((taskId: string): boolean => {
     const controller = abortControllersRef.current[taskId];
-    if (!controller) {
-      uiWarn("chat:stop ignored — no active stream", { taskId });
-      return;
-    }
-    uiLog("chat:stop", { taskId });
-    // Fire cancel immediately (keepalive) so the worker stops even if abort races.
+    uiLog("chat:stop", { taskId, hasStream: Boolean(controller) });
+    // A refresh keeps the agent running without this page's stream. Cancel
+    // still has to reach the server so Stop does not no-op.
     void appDataService.cancelTaskRun(taskId).catch((err) => {
       uiWarn("chat:cancel failed", err);
     });
+    if (!controller) return false;
     controller.abort();
+    return true;
   }, []);
 
   const sendMessage = useCallback(

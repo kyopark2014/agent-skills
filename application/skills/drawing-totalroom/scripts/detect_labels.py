@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import colorsys
 import json
+import math
 import re
 import sys
 import time
@@ -20,6 +21,8 @@ from pathlib import Path
 
 import ezdxf
 from ezdxf.colors import float2transparency
+from shapely.geometry import LineString, Point, Polygon, box
+from shapely.ops import unary_union
 
 _SKILLS_DIR = Path(__file__).resolve().parents[2]
 if str(_SKILLS_DIR) not in sys.path:
@@ -246,10 +249,174 @@ def _divide_shared_faces(msp, boxes, segs, detected: list[dict], door: str) -> l
     return detected
 
 
+def _host_polygon(inst: dict):
+    poly = Polygon(inst["pts"], inst.get("holes") or [])
+    if not poly.is_valid:
+        poly = poly.buffer(0)
+    if poly.is_empty:
+        return None
+    if poly.geom_type == "MultiPolygon":
+        point = Point(inst["x"], inst["y"])
+        holding = [geom for geom in poly.geoms if geom.covers(point)]
+        poly = holding[0] if holding else max(poly.geoms, key=lambda geom: geom.area)
+    if poly.geom_type != "Polygon":
+        return None
+    return poly
+
+
+def _anchor_visibility(segs, x: float, y: float):
+    """화장실 글자 주위 벽으로 칸을 잡는다.
+
+    빈 곳을 600 mm 줄였다가 다시 넓혀 문 틈으로 옆 실까지 새지 않게 한다.
+    칸막이 너머의 작은 칸도 같이 뺀다.
+    """
+    reach = 7000.0
+    lines = []
+    for x0, y0, x1, y1 in segs:
+        if min(
+            math.hypot(x0 - x, y0 - y),
+            math.hypot(x1 - x, y1 - y),
+            math.hypot((x0 + x1) * 0.5 - x, (y0 + y1) * 0.5 - y),
+        ) > reach:
+            continue
+        if math.hypot(x1 - x0, y1 - y0) < 200.0:
+            continue
+        lines.append(LineString([(x0, y0), (x1, y1)]))
+    if len(lines) < 3:
+        return None
+    wall = unary_union([ln.buffer(30.0, cap_style=2, join_style=2) for ln in lines])
+    window = box(x - reach, y - reach, x + reach, y + reach)
+    void = window.difference(wall)
+    if void.is_empty:
+        return None
+    parts = [void] if void.geom_type == "Polygon" else list(void.geoms)
+    origin = Point(x, y)
+    holding = [geom for geom in parts if geom.covers(origin)]
+    if not holding:
+        return None
+    part = holding[0]
+    eroded = part.buffer(-600.0, join_style=2)
+    if eroded.is_empty:
+        return None
+    pieces = [eroded] if eroded.geom_type == "Polygon" else list(eroded.geoms)
+    near = [geom for geom in pieces if geom.distance(origin) <= 680.0]
+    if not near:
+        return None
+    piece = min(near, key=lambda geom: (geom.distance(origin), -geom.area))
+    restored = piece.buffer(620.0, join_style=2).intersection(part)
+    if restored.is_empty:
+        return None
+    if restored.geom_type == "MultiPolygon":
+        holding = [geom for geom in restored.geoms if geom.covers(origin)]
+        if not holding:
+            return None
+        restored = max(holding, key=lambda geom: geom.area)
+    extra = [
+        geom
+        for geom in parts
+        if geom is not part
+        and 400_000.0 <= geom.area <= 8_000_000.0
+        and restored.distance(geom) <= 280.0
+    ]
+    if extra:
+        restored = unary_union([restored, *extra]).buffer(140.0).buffer(-140.0)
+        if restored.is_empty:
+            return None
+        if restored.geom_type == "MultiPolygon":
+            holding = [geom for geom in restored.geoms if geom.covers(origin)]
+            if not holding:
+                return None
+            restored = max(holding, key=lambda geom: geom.area)
+    if restored.geom_type != "Polygon" or not restored.covers(origin):
+        return None
+    if restored.area < 1_200_000.0 or restored.area > 40_000_000.0:
+        return None
+    minx, miny, maxx, maxy = restored.bounds
+    if minx <= x - reach + 80.0 or maxx >= x + reach - 80.0 or miny <= y - reach + 80.0 or maxy >= y + reach - 80.0:
+        return None
+    return restored
+
+
+def _apply_room_difference(inst: dict, diff) -> bool:
+    point = Point(inst["x"], inst["y"])
+    if diff.is_empty:
+        return False
+    if diff.geom_type == "MultiPolygon":
+        holding = [geom for geom in diff.geoms if geom.covers(point)]
+        if not holding:
+            return False
+        diff = max(holding, key=lambda geom: geom.area)
+    if diff.geom_type != "Polygon" or not diff.covers(point):
+        return False
+    pts = room._simplify_ring(list(diff.exterior.coords), [], [])
+    holes = [
+        hole
+        for hole in (room._simplify_ring(list(ring.coords), [], []) for ring in diff.interiors)
+        if len(hole) >= 3
+    ]
+    if len(pts) < 3 or not room.point_in_poly(inst["x"], inst["y"], pts):
+        return False
+    area = room.shoelace_m2(pts) - sum(room.shoelace_m2(hole) for hole in holes)
+    if area <= 0.2:
+        return False
+    inst["pts"] = pts
+    inst["holes"] = holes
+    inst["area_m2"] = area
+    minx, miny, maxx, maxy = diff.bounds
+    inst["width_m"] = (maxx - minx) / 1000.0
+    inst["height_m"] = (maxy - miny) / 1000.0
+    return True
+
+
+def _subtract_anchor_faces(msp, segs, detected: list[dict]) -> list[dict]:
+    """벽 끝으로 못 가른 화장실은 그 글자에서 보이는 칸을 잡아 들어 있는 실에서 뺀다.
+
+    화장실·WC·계단실 글자는 실로 남기지 않는다.
+    """
+    anchors = [
+        (x, y, text)
+        for x, y, text in room.iter_labels(msp)
+        if room.is_split_anchor(text)
+    ]
+    if not anchors:
+        return detected
+    for inst in detected:
+        host = _host_polygon(inst)
+        if host is None:
+            continue
+        notes = []
+        for x, y, text in anchors:
+            if not room.point_in_poly(x, y, inst["pts"]):
+                continue
+            face = _anchor_visibility(segs, x, y)
+            if face is None or face.covers(Point(inst["x"], inst["y"])):
+                continue
+            if not face.covers(Point(x, y)):
+                continue
+            overlap = host.intersection(face)
+            if overlap.is_empty or overlap.area < 1_200_000.0:
+                continue
+            if overlap.area < 0.55 * face.area or overlap.area > host.area * 0.75:
+                continue
+            diff = host.difference(overlap)
+            if not _apply_room_difference(inst, diff):
+                continue
+            host = _host_polygon(inst)
+            if host is None:
+                break
+            notes.append(f"{text} {overlap.area / 1_000_000.0:.2f} m2")
+        if notes:
+            print(
+                f"cut {inst['text']} {inst['area_m2']:.2f} m2, removed " + ", ".join(notes),
+                flush=True,
+            )
+    return detected
+
+
 def _divide_on_dividers(msp, boxes, segs, detected: list[dict], door: str) -> list[dict]:
     """한 면에 라벨이 여러 개이면 그 사이의 벽이 아닌 선으로 면을 나눈다.
 
-    창고·차고·화장실·방풍실·보관실·퇴식대·샤워실·고압·저압·계단실·복도·승강기·EPS·OPEN·오픈·홀-·홈-·입구·출구·양치공간·청소도구함·청소도구실·실외기실·조경·배경·평면도·비품고을·항습기·화물·휠체어·린넨실·오물처리실·구급자·응급환자·의료가스실·기계실·(여)·(남)·문서고·기울기·자동방화·인)·인승·OTIS·Wlqtnwjd·DA#·DA(·올려옴·내려감·DOOR·패드·기저귀·침례탕약·설치·드라이기·유사용·상하부·분전함·세척실·탕비실·물품·스트레쳐·E.V·ELEV·ELEV. HALL·ELEV. 홀·WC·DA 쪽은 실로 남기지 않는다.
+    창고·차고·화장실·방풍실·보관실·퇴식대·샤워실·고압·저압·계단실·복도·승강기·EPS·OPEN·오픈·홀-·홈-·입구·출구·양치공간·청소도구함·청소도구실·실외기실·조경·배경·평면도·비품고을·항습기·화물·휠체어·린넨실·오물처리실·구급자·응급환자·의료가스실·기계실·(여)·(남)·문서고·기울기·자동방화·인)·인승·OTIS·Wlqtnwjd·DA#·DA(·올려옴·내려감·DOOR·패드·기저귀·침례탕약·설치·드라이기·유사용·상하부·분전함·세척실·탕비실·물품·스트레쳐·E.V·ELEV·ELEV. HALL·ELEV. 홀·WC·DA·유도등·단자함·소화전·다용도실·밸브·(근생)·정화조·피난기·보관소·속도·탑승대기공간·주거·배수·비상용·탑승대기·ST( 쪽은 실로 남기지 않는다.
     """
     labels = [
         (x, y, text)
@@ -466,11 +633,23 @@ def detect(dxf_path: Path, meta_path: Path, door: str = "close") -> dict:
     msp = doc.modelspace()
     seeds = collect_labels(msp)
     print(f"labels: {len(seeds)} door: {door}", flush=True)
+    bathrooms = room.vision_bathroom_boxes(dxf_path)
     boxes = room.column_boxes(msp)
     segs = room.wall_segments(msp, boxes)
     detected: list[dict] = []
     skipped: list[dict] = []
     for index, (x, y, text) in enumerate(seeds, start=1):
+        if room.in_vision_bathroom(x, y, bathrooms):
+            skipped.append(
+                {
+                    "text": text,
+                    "x": round(x, 1),
+                    "y": round(y, 1),
+                    "reason": "비전 화장실 영역입니다",
+                }
+            )
+            print(f"[{index}/{len(seeds)}] skip {text}: 비전 화장실 영역입니다", flush=True)
+            continue
         try:
             found, reason = detect_one(msp, boxes, segs, x, y, door=door)
         except Exception as exc:  # noqa: BLE001
@@ -484,6 +663,7 @@ def detect(dxf_path: Path, meta_path: Path, door: str = "close") -> dict:
         print(f"[{index}/{len(seeds)}] {text}  {found['area_m2']:.2f} m2", flush=True)
     detected = _divide_shared_faces(msp, boxes, segs, detected, door)
     detected = _divide_on_dividers(msp, boxes, segs, detected, door)
+    detected = _subtract_anchor_faces(msp, segs, detected)
 
     by_face: dict[tuple, list[str]] = {}
     for inst in detected:
@@ -555,7 +735,7 @@ def detect(dxf_path: Path, meta_path: Path, door: str = "close") -> dict:
         "labels": public_labels,
         "skipped": skipped,
         "rules": {
-            "labels": "Korean room names, or Latin names with 2+ letters and a digit; stacked lines within 1.8 text heights are joined top to bottom; fixture callouts such as 미니바, 옷장, 신발장, 수납장, 하부장, 상부장, 옷봉설치, 장비, 데스크, 서랍, 온수기, 살균기, 소독기, 도어, 테이블, 정수기, 휴대폰장, 게시판, 렉장, 랙장, 냉장고, 제빙기, 머신, 커피, 전자레인지, 텀블러, 세척기, EV, 화분, 화장대, 월풀욕조, 욕조, (장애인) and non-area names 방풍실, 보관실, 퇴식대, 샤워실, 고압, 저압, 계단실, 복도, 승강기, EPS, OPEN, 오픈, 홀-, 홈-, 입구, 출구, 양치공간, 청소도구함, 청소도구실, 실외기실, 조경, 배경, 평면도, 비품고을, 항습기, 화물, 휠체어, 린넨실, 오물처리실, (장애인, 구급자, 응급환자, 의료가스실, 기계실, (여), (남), 문서고, 기울기, 자동방화, 인), 인승, OTIS, Wlqtnwjd, DA#, DA(, 올려옴, 내려감, DOOR, 패드, 기저귀, 침례탕약, 설치, 드라이기, 유사용, 상하부, 분전함, 세척실, 탕비실, 물품, 스트레쳐, E.V, ELEV, ELEV. HALL, ELEV. 홀 are excluded",
+            "labels": "Korean room names, or Latin names with 2+ letters and a digit; stacked lines within 1.8 text heights are joined top to bottom; fixture callouts such as 미니바, 옷장, 신발장, 수납장, 하부장, 상부장, 옷봉설치, 장비, 데스크, 서랍, 온수기, 살균기, 소독기, 도어, 테이블, 정수기, 휴대폰장, 게시판, 렉장, 랙장, 냉장고, 제빙기, 머신, 커피, 전자레인지, 텀블러, 세척기, EV, 화분, 화장대, 월풀욕조, 욕조, (장애인) and non-area names 방풍실, 보관실, 퇴식대, 샤워실, 고압, 저압, 계단실, 복도, 승강기, EPS, OPEN, 오픈, 홀-, 홈-, 입구, 출구, 양치공간, 청소도구함, 청소도구실, 실외기실, 조경, 배경, 평면도, 비품고을, 항습기, 화물, 휠체어, 린넨실, 오물처리실, (장애인, 구급자, 응급환자, 의료가스실, 기계실, (여), (남), 문서고, 기울기, 자동방화, 인), 인승, OTIS, Wlqtnwjd, DA#, DA(, 올려옴, 내려감, DOOR, 패드, 기저귀, 침례탕약, 설치, 드라이기, 유사용, 상하부, 분전함, 세척실, 탕비실, 물품, 스트레쳐, E.V, ELEV, ELEV. HALL, ELEV. 홀, 유도등, 단자함, 소화전, 다용도실, 밸브, (근생), 정화조, 피난기, 보관소, 속도, 탑승대기공간, 주거, 배수, 비상용, 탑승대기, ST(, 탱크, 실외기, 마감, 콘크리트, 행거, 클립바, 수조, 발전기실, 집수정, ASD, W.C, 세면대, ARM실, 옷장, 용수대, 자동문, 거울, 세탁기, 기기배치, 폐쇄, 장애인겸용, 데크, 비품고, 전기실, 충전소, 급속, 폐기품, 폐기물, 콤프레셔, 설비실, 경계선, 대지안, 벽부형, 산책로, 올라옴, 수거함, 배기, FSD, DORDI, 승강식, OH4700, 유모차보관, C1A, C2A, C3A, TC1, PW1000, AG1100, 노출되는, 자전거, 피난구, DA-, 재활용, 급기, 주문제작, BC-, 부속실, 보일러실, 세탁실, 승강장 are excluded",
             "font": "PNG text is the TEXT stored on each label layer, drawn by the floor sheet renderer",
             "png": "rendered from floor_label_detected.dxf",
             "door": door,

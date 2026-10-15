@@ -71,6 +71,14 @@ def request_cancel(task_id: str) -> None:
     kill_pgroups(task_id)
 
 
+def turn_cancelled() -> bool:
+    """True when this process should abort the current bash/model turn."""
+    for key in ("RUNTIME_SESSION_ID", "TASK_ID"):
+        if is_cancelled(os.environ.get(key)):
+            return True
+    return False
+
+
 def is_cancelled(task_id: str | None) -> bool:
     if not task_id:
         return False

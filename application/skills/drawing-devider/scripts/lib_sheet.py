@@ -165,7 +165,28 @@ def _strip_equipment_prefix(raw: str) -> str:
 
 
 _DRAWING_NUMBER = re.compile(r"^[A-Za-z]{2,6}-\d{2,4}$")
-_PLAN_WORD = re.compile(r"평면도|단면도|입면도|배치도|PLAN|SECTION|ELEVATION", re.I)
+_PLAN_WORD = re.compile(r"평면도|단면도|입면도|배치도|\bPLAN\b|\bSECTION\b|\bELEVATION\b", re.I)
+_REPEATED_FLOOR_NOTE = 8
+
+
+def _is_construction_layer(name: str) -> bool:
+    """비출력 보조선. Defpoint·Defpoints 는 도곽이 아니다."""
+    token = re.sub(r"[^a-z]", "", (name or "").lower())
+    return token.startswith("defpoint")
+
+
+def _repeated_floor_notes(texts: list[_TextHit]) -> set[str]:
+    """배치도에 반복된 '29F' 같은 층 코드는 도면 제목이 아니다.
+
+    평면도·단면도 문구가 들어 있는 제목은 여러 도곽에 있어도 남긴다.
+    """
+    counts: dict[str, int] = {}
+    for hit in texts:
+        raw = plain_text(hit.text)
+        if _PLAN_WORD.search(raw):
+            continue
+        counts[raw] = counts.get(raw, 0) + 1
+    return {raw for raw, count in counts.items() if count >= _REPEATED_FLOOR_NOTE}
 
 
 def parse_drawing_number(value: str) -> str | None:
@@ -746,7 +767,7 @@ def _frames_from_plan_sheets(
                 )
         if token is None and rect not in bare:
             continue
-        candidates.append((rect, best, token))
+        candidates.append((rect, best, token, _peer_plan_titles(inside_plans)))
     candidates.sort(key=lambda item: _area(item[0]), reverse=True)
     selected = []
     for item in candidates:
@@ -756,14 +777,14 @@ def _frames_from_plan_sheets(
 
     framed: list[SheetFrame] = []
     pending: list[tuple[tuple[float, float, float, float], list[str]]] = []
-    numbered_boxes = [rect for rect, _best, token in selected if token]
-    for rect, best, token in selected:
+    numbered_boxes = [rect for rect, _best, token, _labels in selected if token]
+    for rect, best, token, labels in selected:
         if token:
             framed.append(SheetFrame(token, plain_text(best.text), rect, best.height))
             continue
         if any(_inside(box, best.x, best.y) for box in numbered_boxes):
             continue
-        pending.append((rect, [plain_text(best.text)]))
+        pending.append((rect, labels))
     named_plans = _assign_sheet_ids(framed, warnings)
     unresolved = _assign_unresolved_ids(pending, named + named_plans, warnings)
     if named_plans:
@@ -773,6 +794,22 @@ def _frames_from_plan_sheets(
             + " 입니다."
         )
     return named_plans + unresolved
+
+
+def _peer_plan_titles(hits: list[_TextHit]) -> list[str]:
+    """비슷한 크기의 제목은 모두 남긴다. 더 작은 하위 제목은 빼니다."""
+    best_score = _title_score(max(hits, key=_title_score))
+    labels: list[str] = []
+    seen: set[str] = set()
+    for hit in sorted(hits, key=_title_score, reverse=True):
+        if _title_score(hit) < best_score * 0.9:
+            continue
+        text = plain_text(hit.text)
+        if text in seen:
+            continue
+        seen.add(text)
+        labels.append(text)
+    return labels
 
 
 def _collect_primitives(doc):
@@ -786,6 +823,9 @@ def _collect_primitives(doc):
     def take(entity) -> str | None:
         nonlocal truncated
         kind = entity.dxftype()
+        layer = str(getattr(entity.dxf, "layer", "") or "")
+        if kind in {"LINE", "LWPOLYLINE", "POLYLINE"} and _is_construction_layer(layer):
+            return None
         if kind == "LINE":
             if len(lines) < MAX_STORED_LINES:
                 _add_line(entity, lines)
@@ -1023,6 +1063,14 @@ def discover_block_floors(doc) -> list[str]:
 def discover_sheet_floors(doc) -> LayoutDiscovery:
     rects, lines, texts, plans, numbers, truncated = _collect_primitives(doc)
     warnings: list[str] = []
+    notes = _repeated_floor_notes(texts)
+    if notes:
+        texts = [hit for hit in texts if plain_text(hit.text) not in notes]
+        warnings.append(
+            "같은 층 코드가 여러 번 나와 도면 제목에서 빼니다. "
+            + ", ".join(sorted(notes))
+            + " 입니다."
+        )
     if truncated:
         warnings.append("긴 선이 많아 일부 선분 도곽은 건너뛰고 폴리라인 테두리를 우선합니다.")
     rects.extend(_rects_from_lines(lines))

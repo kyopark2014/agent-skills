@@ -44,6 +44,17 @@ class SlantedDoubleWallTests(unittest.TestCase):
         self.assertEqual(mate.dxf.layer, "WALL")
         self.assertTrue(all(line.dxf.layer == "BASE" for line in thin))
 
+    def test_long_diagonal_beside_a_short_stub_stays_base(self):
+        doc = ezdxf.new()
+        msp = doc.modelspace()
+        angle = math.radians(21.8)
+        long = _line(msp, (0.0, 0.0), angle, 88797.0, 0.0)
+        _line(msp, (70000.0, 0.0), angle, 2768.0, 188.0)
+
+        lib_llm_correct.promote_slanted_double_walls(msp)
+
+        self.assertEqual(long.dxf.layer, "BASE")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -2462,6 +2462,8 @@ async def _run_langgraph_agent_impl(
     session_id = runtime_session_id or _runtime_session_id()
     if session_id:
         set_checkpoint_session_id(session_id)
+        os.environ["RUNTIME_SESSION_ID"] = session_id
+        os.environ["TASK_ID"] = session_id
         # Fresh turn: clear any stale stop signal from a prior request.
         run_cancel.clear(session_id)
 

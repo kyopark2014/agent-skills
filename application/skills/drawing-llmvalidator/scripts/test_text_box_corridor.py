@@ -30,6 +30,17 @@ class TextBoxCorridorTests(unittest.TestCase):
         )
         self.assertEqual(_promoted(msp), [])
 
+    def test_long_line_beside_a_short_box_is_not_a_corridor_wall(self):
+        doc = ezdxf.new()
+        msp = doc.modelspace()
+        msp.add_line((0, 0), (0, 10890), dxfattribs={"layer": "BASE"})
+        msp.add_lwpolyline(
+            [(130, 900), (780, 900), (780, 1590), (130, 1590)],
+            close=True,
+            dxfattribs={"layer": "BASE"},
+        )
+        self.assertEqual(_promoted(msp), [])
+
     def test_long_double_line_is_a_corridor_wall(self):
         doc = ezdxf.new()
         msp = doc.modelspace()

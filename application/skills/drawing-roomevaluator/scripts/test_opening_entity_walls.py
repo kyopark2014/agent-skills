@@ -50,8 +50,8 @@ class OpeningEntityWallTests(unittest.TestCase):
 def _classroom(msp, header: str):
     """9 m x 8 m. 왼쪽 벽은 아래에서 3 m에서 끊기고, 천장까지는 5 m다.
 
-    천장까지 3.6 m보다 멀어서 빈 틈은 그대로 열린다.
-    header가 base면 그 틈 1.2 m 앞에 인방 선이 있어 벽을 닫는다.
+    5 m 틈은 방안 2의 90%에도, 방안 3의 2.4 m 두께에도 닫히지 않는다.
+    header가 base면 그 틈 1.2 m 앞에 인방 선이 있어 방안 1로 벽을 닫는다.
     """
     msp.add_line((0, 0), (9000, 0), dxfattribs={"layer": "WALL"})
     msp.add_line((9000, 0), (9000, 8000), dxfattribs={"layer": "WALL"})
@@ -76,7 +76,7 @@ class GapEntityWallTests(unittest.TestCase):
         self.assertIsNotNone(face)
         self.assertAlmostEqual(face.area / 1_000_000.0, 72.0, delta=2.0)
 
-    def test_empty_gap_stays_open(self):
+    def test_empty_gap_wider_than_the_seed_stays_open(self):
         doc = ezdxf.new()
         msp = doc.modelspace()
         _classroom(msp, "none")
