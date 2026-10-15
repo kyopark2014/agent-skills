@@ -89,10 +89,42 @@ def _roomish(text: str) -> bool:
     return re.search(r"[가-힣]", name) is not None
 
 
-def is_excluded_area_label(text: str) -> bool:
-    """면적과 실 라벨에서 빼는 이름. 방풍실, 보관실, 퇴식대, 샤워실, 고압, 저압, 계단실, 복도, 승강기, EPS, OPEN, 홀-, 홈-, 입구, 출구, 양치공간, 청소도구함, 청소도구실, 실외기실, 오픈, 조경, 배경, 평면도, 비품고을, 항습기, 화물, 휠체어, 린넨실, 오물처리실, (장애인, 구급자, 응급환자, 의료가스실, 기계실, 분전함, 세척실, 탕비실, 물품, 스트레쳐, E.V, ELEV. ELEV. HALL과 ELEV. 홀도 포함한다."""
+# 면적 라벨에서만 뺀다. 이 글자로 벽을 올리지 않는다.
+LABEL_ONLY_AREA_TOKENS = (
+    "(여)",
+    "（여）",
+    "(남)",
+    "（남）",
+    "문서고",
+    "기울기",
+    "자동방화",
+    "인)",
+    "인）",
+    "인승",
+    "OTIS",
+    "WLQTNWJD",
+    "DA#",
+    "DA(",
+    "DA（",
+    "올려옴",
+    "내려감",
+    "DOOR",
+    "패드",
+    "기저귀",
+    "침례탕약",
+    "설치",
+    "드라이기",
+    "유사용",
+    "상하부",
+)
+
+
+def is_excluded_area_label(text: str, *, include_callouts: bool = True) -> bool:
+    """면적과 실 라벨에서 빼는 이름. 방풍실, 보관실, 퇴식대, 샤워실, 고압, 저압, 계단실, 복도, 승강기, EPS, OPEN, 홀-, 홈-, 입구, 출구, 양치공간, 청소도구함, 청소도구실, 실외기실, 오픈, 조경, 배경, 평면도, 비품고을, 항습기, 화물, 휠체어, 린넨실, 오물처리실, (장애인, 구급자, 응급환자, 의료가스실, 기계실, (여), (남), 문서고, 기울기, 자동방화, 인), 인승, OTIS, Wlqtnwjd, DA#, DA(, 올려옴, 내려감, DOOR, 패드, 기저귀, 침례탕약, 설치, 드라이기, 유사용, 상하부, 분전함, 세척실, 탕비실, 물품, 스트레쳐, E.V, ELEV. ELEV. HALL과 ELEV. 홀도 포함한다. (여), (남), 문서고, 기울기, 자동방화, 인), 인승, OTIS, Wlqtnwjd, DA#, DA(, 올려옴, 내려감, DOOR, 패드, 기저귀, 침례탕약, 설치, 드라이기, 유사용, 상하부도 포함한다."""
     name = norm_name(text)
     folded = name.upper()
+    if include_callouts and any(token in folded for token in LABEL_ONLY_AREA_TOKENS):
+        return True
     if (
         "OPEN" in folded
         or "입구" in folded
@@ -218,11 +250,14 @@ def is_region_label(text: str) -> bool:
     """한 면을 가를 때 다른 영역으로 보는 글자. 집기는 호출자가 뺀다."""
     if is_room_label(text) or is_split_anchor(text):
         return True
+    if is_equipment_label(text):
+        return is_excluded_area_label(text, include_callouts=False)
     name = norm_name(text)
     folded = name.upper()
     if "창고" in folded or "차고" in folded:
         return True
-    if is_excluded_area_label(text):
+    # 패드1, 패드2처럼 번호만 붙은 표기는 면을 가를 때 참조하지 않는다.
+    if is_excluded_area_label(text, include_callouts=False):
         return True
     return folded in {"DA", "D.A", "D.A."}
 

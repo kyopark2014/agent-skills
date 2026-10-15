@@ -84,7 +84,49 @@ class ExcludedAreaLabelTests(unittest.TestCase):
     def test_ordinary_room_names_stay(self):
         self.assertTrue(evaluate_room.is_room_label("교실"))
         self.assertTrue(evaluate_room.is_room_label("개방형도서관"))
+        self.assertTrue(evaluate_room.is_room_label("락커룸"))
         self.assertFalse(evaluate_room.is_excluded_area_label("교실"))
+
+    def test_callout_words_are_not_area_labels(self):
+        for text in (
+            "(여)",
+            "락커룸(여)",
+            "(남)",
+            "문서고",
+            "문서고#1",
+            "기울기",
+            "자동방화",
+            "자동방화셔터",
+            "15인)",
+            "인승",
+            "13인승",
+            "OTIS",
+            "OTIS-1",
+            "Wlqtnwjd",
+            "DA#",
+            "DA#1",
+            "DA(",
+            "DA(1)",
+            "올려옴",
+            "내려감",
+            "DOOR",
+            "DOOR-1",
+            "패드",
+            "기저귀",
+            "기저귀교환대",
+            "침례탕약",
+            "설치",
+            "드라이기",
+            "유사용",
+            "상하부",
+        ):
+            self.assertTrue(evaluate_room.is_excluded_area_label(text), text)
+            self.assertFalse(evaluate_room.is_room_label(text), text)
+            self.assertFalse(evaluate_room.is_region_label(text), text)
+        for text in ("패드1", "패드2", "패드 2", "패드-1", "패드#2", "문서고1", "DOOR1", "OTIS2", "기저귀2", "설치1", "DA#2"):
+            self.assertTrue(evaluate_room.is_excluded_area_label(text), text)
+            self.assertFalse(evaluate_room.is_room_label(text), text)
+            self.assertFalse(evaluate_room.is_region_label(text), text)
 
 
 if __name__ == "__main__":
