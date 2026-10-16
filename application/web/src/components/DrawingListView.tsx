@@ -1,7 +1,18 @@
 import { useEffect, useState } from "react";
 import { createPortal } from "react-dom";
-import { api, type DrawingFloorRef, type DrawingSummary } from "../api";
+import { api, type DrawingFloorRef, type DrawingRating, type DrawingSummary } from "../api";
 import { MenuIcon } from "./SidebarIcons";
+
+const RATING_OPTIONS: Array<{ value: DrawingRating; label: string }> = [
+  { value: "good", label: "좋음" },
+  { value: "neutral", label: "중립" },
+  { value: "bad", label: "나쁨" },
+];
+
+function normalizeRating(value: string | undefined | null): DrawingRating {
+  if (value === "good" || value === "bad" || value === "neutral") return value;
+  return "neutral";
+}
 
 interface Props {
   onMenuClick?: () => void;
@@ -39,6 +50,7 @@ export function DrawingListView({
   const [error, setError] = useState<string | null>(null);
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const [restartingId, setRestartingId] = useState<string | null>(null);
+  const [ratingBusyId, setRatingBusyId] = useState<string | null>(null);
   const [pendingDelete, setPendingDelete] = useState<DrawingSummary | null>(null);
   const [query, setQuery] = useState("");
 
@@ -96,6 +108,28 @@ export function DrawingListView({
     } catch (err) {
       setError(err instanceof Error ? err.message : "도면을 재시작하지 못했습니다.");
       setRestartingId(null);
+    }
+  }
+
+  async function changeRating(drawing: DrawingSummary, rating: DrawingRating) {
+    const previous = normalizeRating(drawing.rating);
+    if (previous === rating) return;
+    setRatingBusyId(drawing.drawing_id);
+    setError(null);
+    setDrawings((prev) =>
+      prev.map((item) => (item.drawing_id === drawing.drawing_id ? { ...item, rating } : item)),
+    );
+    try {
+      await api.setDrawingRating(drawing.drawing_id, rating);
+    } catch (err) {
+      setDrawings((prev) =>
+        prev.map((item) =>
+          item.drawing_id === drawing.drawing_id ? { ...item, rating: previous } : item,
+        ),
+      );
+      setError(err instanceof Error ? err.message : "평가를 저장하지 못했습니다.");
+    } finally {
+      setRatingBusyId(null);
     }
   }
 
@@ -165,7 +199,9 @@ export function DrawingListView({
               {visible.map(({ drawing, floors }) => {
                 const title = drawing.source_filename || drawing.drawing_id;
                 const busy =
-                  deletingId === drawing.drawing_id || restartingId === drawing.drawing_id;
+                  deletingId === drawing.drawing_id ||
+                  restartingId === drawing.drawing_id ||
+                  ratingBusyId === drawing.drawing_id;
                 const canRestart = Boolean((drawing.source_filename || "").trim());
                 return (
                   <li key={drawing.drawing_id} className="drawing-list-item">
@@ -217,6 +253,24 @@ export function DrawingListView({
                       >
                         {restartingId === drawing.drawing_id ? "재시작 중…" : "재시작"}
                       </button>
+                      <label className="drawing-rating">
+                        <span className="drawing-rating-label">평가</span>
+                        <select
+                          className="drawing-list-select"
+                          aria-label={`${title} 평가`}
+                          value={normalizeRating(drawing.rating)}
+                          disabled={busy}
+                          onChange={(event) =>
+                            void changeRating(drawing, normalizeRating(event.target.value))
+                          }
+                        >
+                          {RATING_OPTIONS.map((option) => (
+                            <option key={option.value} value={option.value}>
+                              {option.label}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
                     </div>
                     </div>
                     {floors.length > 0 ? (

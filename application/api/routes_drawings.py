@@ -109,6 +109,19 @@ class DrawingTaskLink(BaseModel):
     drawing_id: str | None = None
 
 
+class DrawingRatingBody(BaseModel):
+    rating: str
+
+
+_RATING_VALUES = frozenset({"good", "neutral", "bad"})
+_DEFAULT_RATING = "neutral"
+
+
+def _normalize_rating(value: object) -> str:
+    text = str(value or "").strip().lower()
+    return text if text in _RATING_VALUES else _DEFAULT_RATING
+
+
 def _task_map_path(artifacts: Path) -> Path:
     return artifacts / "drawing_task_map.json"
 
@@ -240,6 +253,7 @@ def _summary(entry: dict) -> dict | None:
         "created_at": str(entry.get("created_at") or "").strip(),
         "updated_at": str(entry.get("updated_at") or "").strip(),
         "status": str(entry.get("status") or "pending").strip() or "pending",
+        "rating": _normalize_rating(entry.get("rating")),
         "floors": _floor_refs(entry),
     }
 
@@ -677,6 +691,26 @@ def delete_drawing(artifacts: Path, drawing_id: str) -> dict:
     }
 
 
+def set_drawing_rating(artifacts: Path, drawing_id: str, rating: str) -> dict:
+    """Persist good / neutral / bad on the drawing catalog row."""
+    drawing_id = _safe_id(drawing_id) or ""
+    if not drawing_id:
+        raise HTTPException(status_code=400, detail="Invalid drawing id")
+    normalized = _normalize_rating(rating)
+    if str(rating or "").strip().lower() not in _RATING_VALUES:
+        raise HTTPException(status_code=400, detail="평가는 좋음, 중립, 나쁨 중 하나여야 합니다.")
+    catalog = load_drawing_catalog(artifacts)
+    entry = _find_entry(catalog, drawing_id)
+    if entry is None:
+        raise HTTPException(status_code=404, detail="Drawing not found")
+    entry["rating"] = normalized
+    entry["updated_at"] = datetime.now().astimezone().isoformat(timespec="seconds")
+    _write_catalog(artifacts, catalog)
+    summary = _summary(entry)
+    assert summary is not None
+    return {"ok": True, "drawing_id": drawing_id, "rating": summary["rating"]}
+
+
 @router.post("/task-link")
 def link_drawing_task(body: DrawingTaskLink, request: Request) -> dict:
     """Map the task created by 시작 to the uploaded drawing. A later start wins."""
@@ -733,6 +767,12 @@ def get_drawing_floor_image(
         content_disposition_type="inline",
         headers={"Cache-Control": "private, max-age=60"},
     )
+
+
+@router.patch("/{drawing_id}/rating")
+def patch_drawing_rating(drawing_id: str, body: DrawingRatingBody, request: Request) -> dict:
+    user_id = require_user_id(request)
+    return set_drawing_rating(_artifacts_dir(user_id), drawing_id, body.rating)
 
 
 @router.delete("/{drawing_id}")

@@ -18,6 +18,7 @@ from application.api.routes_drawings import (
     list_floor_catalog,
     list_floor_labels,
     remember_drawing_task,
+    set_drawing_rating,
 )
 
 
@@ -330,6 +331,36 @@ class DrawingIdTests(unittest.TestCase):
                     self.assertLessEqual(tag["x"], 1400)
                     self.assertLessEqual(tag["y"], 1280)
                     self.assertGreater(tag["area_m2"], 0)
+
+    def test_drawing_rating_defaults_to_neutral_and_updates(self):
+        with tempfile.TemporaryDirectory() as raw:
+            artifacts = Path(raw)
+            drawing_id = "hotel"
+            (artifacts / drawing_id / "floors" / "1F").mkdir(parents=True)
+            (artifacts / "drawing_list.json").write_text(
+                json.dumps(
+                    {
+                        "drawings": [
+                            {
+                                "drawing_id": drawing_id,
+                                "folder": drawing_id,
+                                "source_filename": "hotel.dxf",
+                                "status": "ready",
+                                "floors": [],
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            listed = list_drawings(artifacts)
+            self.assertEqual(listed["drawings"][0]["rating"], "neutral")
+            updated = set_drawing_rating(artifacts, drawing_id, "good")
+            self.assertEqual(updated["rating"], "good")
+            listed = list_drawings(artifacts)
+            self.assertEqual(listed["drawings"][0]["rating"], "good")
+            with self.assertRaises(HTTPException):
+                set_drawing_rating(artifacts, drawing_id, "excellent")
 
 
 if __name__ == "__main__":

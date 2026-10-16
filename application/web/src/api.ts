@@ -120,6 +120,8 @@ export interface DrawingFloorRef {
   title?: string | null;
 }
 
+export type DrawingRating = "good" | "neutral" | "bad";
+
 export interface DrawingSummary {
   drawing_id: string;
   folder: string;
@@ -127,6 +129,7 @@ export interface DrawingSummary {
   created_at: string;
   updated_at?: string;
   status: string;
+  rating?: DrawingRating | string;
   task_id?: string | null;
   floors?: DrawingFloorRef[];
 }
@@ -503,6 +506,11 @@ export const api = {
   getDrawingFloorLabels: (drawingId: string, floor: string) =>
     request<DrawingFloorLabels>(
       `/api/drawings/${encodeURIComponent(drawingId)}/floors/${encodeURIComponent(floor)}/labels`,
+    ),
+  setDrawingRating: (drawingId: string, rating: DrawingRating) =>
+    request<{ ok: boolean; drawing_id: string; rating: DrawingRating }>(
+      `/api/drawings/${encodeURIComponent(drawingId)}/rating`,
+      { method: "PATCH", body: JSON.stringify({ rating }) },
     ),
   deleteDrawing: (drawingId: string) =>
     request<{ ok: boolean; drawing_id: string }>(
