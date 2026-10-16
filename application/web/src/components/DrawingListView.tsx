@@ -9,6 +9,7 @@ interface Props {
   onOpenUploads?: () => void;
   onOpen: (drawingId: string, floorId?: string) => void;
   onOpenLog: (taskId: string) => void;
+  onRestart: (drawing: DrawingSummary) => Promise<void>;
 }
 
 function formatCreatedAt(value: string | undefined): string {
@@ -25,11 +26,19 @@ function formatCreatedAt(value: string | undefined): string {
   });
 }
 
-export function DrawingListView({ onMenuClick, onBack, onOpenUploads, onOpen, onOpenLog }: Props) {
+export function DrawingListView({
+  onMenuClick,
+  onBack,
+  onOpenUploads,
+  onOpen,
+  onOpenLog,
+  onRestart,
+}: Props) {
   const [drawings, setDrawings] = useState<DrawingSummary[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [restartingId, setRestartingId] = useState<string | null>(null);
   const [pendingDelete, setPendingDelete] = useState<DrawingSummary | null>(null);
   const [query, setQuery] = useState("");
 
@@ -76,6 +85,17 @@ export function DrawingListView({ onMenuClick, onBack, onOpenUploads, onOpen, on
       setError(err instanceof Error ? err.message : "도면을 삭제하지 못했습니다.");
     } finally {
       setDeletingId(null);
+    }
+  }
+
+  async function restart(drawing: DrawingSummary) {
+    setRestartingId(drawing.drawing_id);
+    setError(null);
+    try {
+      await onRestart(drawing);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "도면을 재시작하지 못했습니다.");
+      setRestartingId(null);
     }
   }
 
@@ -144,7 +164,9 @@ export function DrawingListView({ onMenuClick, onBack, onOpenUploads, onOpen, on
             <ul className="drawing-list">
               {visible.map(({ drawing, floors }) => {
                 const title = drawing.source_filename || drawing.drawing_id;
-                const busy = deletingId === drawing.drawing_id;
+                const busy =
+                  deletingId === drawing.drawing_id || restartingId === drawing.drawing_id;
+                const canRestart = Boolean((drawing.source_filename || "").trim());
                 return (
                   <li key={drawing.drawing_id} className="drawing-list-item">
                     <div className="drawing-list-row">
@@ -175,7 +197,7 @@ export function DrawingListView({ onMenuClick, onBack, onOpenUploads, onOpen, on
                         disabled={busy}
                         onClick={() => setPendingDelete(drawing)}
                       >
-                        {busy ? "삭제 중…" : "삭제"}
+                        {deletingId === drawing.drawing_id ? "삭제 중…" : "삭제"}
                       </button>
                       <button
                         type="button"
@@ -186,6 +208,14 @@ export function DrawingListView({ onMenuClick, onBack, onOpenUploads, onOpen, on
                         }}
                       >
                         로그
+                      </button>
+                      <button
+                        type="button"
+                        className="drawing-list-btn"
+                        disabled={busy || !canRestart}
+                        onClick={() => void restart(drawing)}
+                      >
+                        {restartingId === drawing.drawing_id ? "재시작 중…" : "재시작"}
                       </button>
                     </div>
                     </div>

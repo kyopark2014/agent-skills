@@ -5,6 +5,7 @@ XA-S-{N}F 평면 블록이 없는 도면용 폴백.
 modelspace와 얕은 INSERT에서 큰 축정렬 사각형과
 '1층 평면도', 'B1F', '지하1층' 같은 제목을 짝짓는다.
 층 표기가 없고 시설 평면도 제목과 도면번호만 있으면 도면번호로 나눈다.
+제목·도면번호가 없어도 크기 조건을 만족하는 도곽이면 sheet_01부터 남긴다.
 그것도 없으면 종이공간 제목과 켜진 평면 뷰포트를 쓴다.
 """
 
@@ -170,7 +171,10 @@ _REPEATED_FLOOR_NOTE = 8
 
 
 def _is_construction_layer(name: str) -> bool:
-    """비출력 보조선. Defpoint·Defpoints 는 도곽이 아니다."""
+    """비출력 보조선 레이어. Defpoint·Defpoints LINE은 도곽으로 쓰지 않는다.
+
+    닫힌 폴리라인 도곽은 일반 레이어에 테두리가 없을 때만 폴백으로 쓴다.
+    """
     token = re.sub(r"[^a-z]", "", (name or "").lower())
     return token.startswith("defpoint")
 
@@ -656,14 +660,20 @@ def _assign_unresolved_ids(
     out: list[SheetFrame] = []
     for index, (rect, labels) in enumerate(selected, start=1):
         token = f"sheet_{index:02d}"
-        title = "미확정: " + ", ".join(labels)
+        title = ("미확정: " + ", ".join(labels)) if labels else "미확정"
         out.append(SheetFrame(token, title, rect, 0.0))
     if out:
         names = ", ".join(frame.floor for frame in out)
-        warnings.append(
-            f"층 이름을 확정하지 못한 도곽 {len(out)}곳입니다. "
-            f"왼쪽·아래부터 {names} 입니다."
-        )
+        if any(labels for _rect, labels in selected):
+            warnings.append(
+                f"층 이름을 확정하지 못한 도곽 {len(out)}곳입니다. "
+                f"왼쪽·아래부터 {names} 입니다."
+            )
+        else:
+            warnings.append(
+                f"층 제목·도면번호가 없어 도곽만으로 나눈 {len(out)}곳입니다. "
+                f"왼쪽·아래부터 {names} 입니다."
+            )
     return out
 
 
@@ -824,7 +834,10 @@ def _collect_primitives(doc):
         nonlocal truncated
         kind = entity.dxftype()
         layer = str(getattr(entity.dxf, "layer", "") or "")
-        if kind in {"LINE", "LWPOLYLINE", "POLYLINE"} and _is_construction_layer(layer):
+        if kind == "LINE" and _is_construction_layer(layer):
+            return None
+        if kind in {"LWPOLYLINE", "POLYLINE"} and _is_construction_layer(layer):
+            # LINE 보조선과 달리 닫힌 폴리라인은 폴백 후보로만 따로 모은다.
             return None
         if kind == "LINE":
             if len(lines) < MAX_STORED_LINES:
@@ -875,6 +888,57 @@ def _collect_primitives(doc):
 
     walk(doc.modelspace(), 0)
     return rects, lines, texts, plans, numbers, truncated
+
+
+def _collect_construction_poly_rects(doc) -> list[tuple[float, float, float, float]]:
+    """일반 도곽이 없을 때 쓸 Defpoints 등 보조선 레이어의 닫힌 폴리라인 사각형."""
+    rects: list[tuple[float, float, float, float]] = []
+
+    def take(entity) -> str | None:
+        kind = entity.dxftype()
+        layer = str(getattr(entity.dxf, "layer", "") or "")
+        if kind in {"LWPOLYLINE", "POLYLINE"} and _is_construction_layer(layer):
+            parsed = _poly_points(entity)
+            if not parsed:
+                return None
+            rect = _rect_from_points(parsed[0], parsed[1])
+            if rect:
+                rects.append(rect)
+            return None
+        if kind == "INSERT":
+            return "descend"
+        return None
+
+    def walk(entities, depth: int) -> None:
+        for entity in entities:
+            action = take(entity)
+            if action == "descend" and depth < 2:
+                try:
+                    children = entity.virtual_entities()
+                except Exception:
+                    continue
+                walk(children, depth + 1)
+
+    walk(doc.modelspace(), 0)
+    return rects
+
+
+def _frames_from_sheet_rects(
+    rects: list[tuple[float, float, float, float]],
+    texts: list[_TextHit],
+    plans: list[_TextHit],
+    numbers: list[_TextHit],
+    warnings: list[str],
+) -> list[SheetFrame]:
+    """도곽 사각형 목록에서 층/시트 프레임을 만든다."""
+    deduped = _dedupe_rects(rects)
+    frames = _frames_from(deduped, texts, warnings)
+    frames.extend(
+        _frames_from_plan_sheets(rects, plans, numbers, frames, warnings, bare_rects=deduped)
+    )
+    if not frames and deduped:
+        frames = _assign_unresolved_ids([(rect, []) for rect in deduped], [], warnings)
+    return frames
 
 
 def _viewport_model_bbox(viewport) -> tuple[float, float, float, float] | None:
@@ -1074,11 +1138,16 @@ def discover_sheet_floors(doc) -> LayoutDiscovery:
     if truncated:
         warnings.append("긴 선이 많아 일부 선분 도곽은 건너뛰고 폴리라인 테두리를 우선합니다.")
     rects.extend(_rects_from_lines(lines))
-    deduped = _dedupe_rects(rects)
-    frames = _frames_from(deduped, texts, warnings)
-    frames.extend(
-        _frames_from_plan_sheets(rects, plans, numbers, frames, warnings, bare_rects=deduped)
-    )
+    frames = _frames_from_sheet_rects(rects, texts, plans, numbers, warnings)
+    if not frames:
+        # 도면틀 LINE이 끊기고 실제 테두리만 Defpoints 닫힌 폴리라인에 있는 경우
+        construction = _collect_construction_poly_rects(doc)
+        if construction:
+            frames = _frames_from_sheet_rects(construction, texts, plans, numbers, warnings)
+            if frames:
+                warnings.append(
+                    "일반 도곽이 없어 Defpoints 등 보조선 레이어의 닫힌 도곽을 사용했습니다."
+                )
     if not frames:
         warnings.append("도곽과 층 제목으로 구분할 층을 찾지 못했습니다.")
     return LayoutDiscovery(

@@ -145,6 +145,48 @@ class FacilityPlanSheetTests(unittest.TestCase):
         self.assertLess(found.sheets[0].bbox[2] - found.sheets[0].bbox[0], 70_000)
         self.assertTrue(any("29F" in note for note in found.warnings))
 
+    def test_borders_without_titles_become_sheet_ids(self):
+        import ezdxf
+
+        doc = ezdxf.new()
+        msp = doc.modelspace()
+
+        def border(x, y, w, h):
+            msp.add_lwpolyline([(x, y), (x + w, y), (x + w, y + h), (x, y + h)], close=True)
+
+        border(0, 0, 120_000, 83_000)
+        border(140_000, 0, 120_000, 83_000)
+
+        found = lib_sheet.discover_layout(doc, mode="sheet")
+
+        self.assertEqual([frame.floor for frame in found.sheets], ["sheet_01", "sheet_02"])
+        self.assertEqual(found.sheets[0].title, "미확정")
+        self.assertEqual(found.sheets[1].title, "미확정")
+        self.assertTrue(any("도곽만으로" in note for note in found.warnings))
+
+    def test_defpoints_closed_polyline_used_when_no_other_frame(self):
+        """도면틀 LINE이 끊긴 경우 Defpoints 닫힌 도곽만으로 sheet를 만든다."""
+        import ezdxf
+
+        doc = ezdxf.new()
+        msp = doc.modelspace()
+        # 짧은 틱만 있는 도면틀 — 사각형이 되지 않음
+        msp.add_line((69_202, 12_744), (69_202, 12_944), dxfattribs={"layer": "000-도면틀"})
+        msp.add_line((109_191, 12_744), (109_191, 12_944), dxfattribs={"layer": "000-도면틀"})
+        msp.add_line((69_202, 12_744), (109_191, 12_744), dxfattribs={"layer": "000-도면틀"})
+        msp.add_lwpolyline(
+            [(68_702, 10_444), (109_691, 10_444), (109_691, 39_131), (68_702, 39_131)],
+            close=True,
+            dxfattribs={"layer": "Defpoints"},
+        )
+        msp.add_mtext("FLOOR PLAN", dxfattribs={"insert": (86_000, 11_394), "char_height": 280})
+
+        found = lib_sheet.discover_layout(doc, mode="sheet")
+
+        self.assertEqual([frame.floor for frame in found.sheets], ["sheet_01"])
+        self.assertAlmostEqual(found.sheets[0].bbox[0], 68_702, delta=1)
+        self.assertTrue(any("Defpoints" in note for note in found.warnings))
+
 
 class PaperspaceFloorTests(unittest.TestCase):
     def _doc(self, *, status: int = 1, viewport_id: int | None = None):

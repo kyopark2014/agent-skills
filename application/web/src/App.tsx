@@ -9,6 +9,7 @@ import {
   buildNewTaskDefaults,
   mostRecentlyUpdatedTask,
   sortTasks,
+  titleFromFileName,
 } from "./services/taskService";
 import {
   buildDisplayPrompt,
@@ -18,7 +19,7 @@ import {
   shouldAppendAssistantMessage,
   stabilizeMessageKeys,
 } from "./services/messageService";
-import { api, type UploadDrawing } from "./api";
+import { api, type DrawingSummary, type UploadDrawing } from "./api";
 import { seedTaskLoadedFile } from "./hooks/useFileUpload";
 import type { AppConfig, Message, Task } from "./types";
 import { Sidebar } from "./components/Sidebar";
@@ -443,6 +444,7 @@ export default function App() {
       Boolean(config.llm_gateway_configured) && llmGatewayReady;
     const task = await appDataService.createTask({
       ...defaults,
+      title: titleFromFileName(file.file_name),
       llm_gateway_enabled: canEnableGateway
         ? (activeTask?.llm_gateway_enabled ?? true)
         : false,
@@ -476,6 +478,27 @@ export default function App() {
     );
     setView("chat");
     setSidebarOpen(false);
+  }
+
+  async function handleRestartDrawing(drawing: DrawingSummary) {
+    const sourceName = (drawing.source_filename || "").trim();
+    if (!sourceName) {
+      throw new Error("원본 파일 이름이 없어 재시작할 수 없습니다.");
+    }
+    const needle = sourceName.toLowerCase();
+    const { files } = await api.listUploadDrawings();
+    const file =
+      files.find((item) => item.drawing_id === drawing.drawing_id) ||
+      files.find((item) => (item.file_name || "").toLowerCase() === needle);
+    if (!file) {
+      throw new Error(
+        "업로드 폴더에 원본 도면이 없어 재시작할 수 없습니다. 도면 가져오기에서 파일을 확인하세요.",
+      );
+    }
+    await handleStartUploadDrawing({
+      ...file,
+      drawing_id: drawing.drawing_id,
+    });
   }
 
   async function handleNewTask() {
@@ -942,6 +965,7 @@ export default function App() {
             onOpenLog={(taskId) => {
               void handleSelectTask(taskId);
             }}
+            onRestart={handleRestartDrawing}
           />
         ) : (
           <ChatThread

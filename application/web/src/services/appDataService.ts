@@ -2,6 +2,7 @@ import { api } from "../api";
 import type { AppConfig, Message, Task, TaskRun } from "../types";
 
 export type CreateTaskDefaults = {
+  title?: string;
   model_name?: string;
   skills?: string[];
   mcp_servers?: string[];

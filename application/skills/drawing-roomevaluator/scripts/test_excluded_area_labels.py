@@ -234,6 +234,9 @@ class ExcludedAreaLabelTests(unittest.TestCase):
             "승강장",
             "승강장1",
             "승강장-2",
+            "테라스",
+            "테라스1",
+            "테라스-2",
         ):
             self.assertTrue(evaluate_room.is_excluded_area_label(text), text)
             self.assertFalse(evaluate_room.is_room_label(text), text)

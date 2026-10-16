@@ -41,6 +41,10 @@ from lib_llm_correct import floor_sheet_mm_per_inch, png_text_cap_mm, render_wal
 
 _LAYER_BAD = set('<>/\\":;?*=`')
 OUT_STEM = "floor_label_detected"
+# 라벨이 작은 칸·모서리 주머니에 떨어지면 면적이 이보다 작다. 씨앗을 옮겨 다시 잰다.
+MIN_LABEL_AREA_M2 = 1.0
+# 가까운 거리부터 왼쪽·오른쪽·위·아래(mm).
+NUDGE_STEPS_MM = (100.0, 200.0, 300.0, 400.0, 600.0, 800.0, 1000.0, 1500.0, 2000.0)
 # 객실 안 집기 표기. 실이 아니므로 면적을 잡지 않는다.
 _FIXTURE_NAMES = (
     "미니바",
@@ -155,6 +159,51 @@ def detect_one(
         ],
         "net": net,
     }, None
+
+
+def detect_one_with_nudge(
+    msp,
+    boxes,
+    segs,
+    x: float,
+    y: float,
+    door: str = "close",
+) -> tuple[dict | None, str | None, float, float]:
+    """detect_one. 면적이 1 m² 이하면 씨앗을 상하좌우로 옮겨 다시 잰다.
+
+    같은 거리에서 여러 방향이 되면 면적이 큰 쪽을 고른다.
+    반환은 (면, 실패 이유, 씨앗 x, 씨앗 y).
+    """
+    found, reason = detect_one(msp, boxes, segs, x, y, door=door)
+    if found is None or found["area_m2"] > MIN_LABEL_AREA_M2:
+        return found, reason, x, y
+    tiny = found
+    for step in NUDGE_STEPS_MM:
+        best: dict | None = None
+        best_xy: tuple[float, float] | None = None
+        best_note = ""
+        for dx, dy, note in (
+            (-step, 0.0, f"왼쪽 {step:.0f} mm"),
+            (step, 0.0, f"오른쪽 {step:.0f} mm"),
+            (0.0, step, f"위 {step:.0f} mm"),
+            (0.0, -step, f"아래 {step:.0f} mm"),
+        ):
+            nx, ny = x + dx, y + dy
+            moved, _moved_reason = detect_one(msp, boxes, segs, nx, ny, door=door)
+            if moved is None or moved["area_m2"] <= MIN_LABEL_AREA_M2:
+                continue
+            if best is None or moved["area_m2"] > best["area_m2"]:
+                best = moved
+                best_xy = (nx, ny)
+                best_note = note
+        if best is not None and best_xy is not None:
+            print(
+                f"[nudge] ({x:.0f},{y:.0f}) → ({best_xy[0]:.0f},{best_xy[1]:.0f}) "
+                f"{best_note}: {tiny['area_m2']:.2f} → {best['area_m2']:.2f} m2",
+                flush=True,
+            )
+            return best, None, best_xy[0], best_xy[1]
+    return tiny, None, x, y
 
 
 def _record_face(msp, boxes, face, x_axes, y_axes, swings, x: float, y: float, door: str) -> dict | None:
@@ -717,16 +766,18 @@ def detect(dxf_path: Path, meta_path: Path, door: str = "close") -> dict:
             print(f"[{index}/{len(seeds)}] skip {text}: 비전 화장실 영역입니다", flush=True)
             continue
         try:
-            found, reason = detect_one(msp, boxes, segs, x, y, door=door)
+            found, reason, seed_x, seed_y = detect_one_with_nudge(
+                msp, boxes, segs, x, y, door=door
+            )
         except Exception as exc:  # noqa: BLE001
-            found, reason = None, str(exc) or exc.__class__.__name__
+            found, reason, seed_x, seed_y = None, str(exc) or exc.__class__.__name__, x, y
         if found is None:
             if reason == "벽이 실을 닫지 않습니다" and "테라스" not in text:
                 open_misses.append((x, y, text))
             skipped.append({"text": text, "x": round(x, 1), "y": round(y, 1), "reason": reason})
             print(f"[{index}/{len(seeds)}] skip {text}: {reason}", flush=True)
             continue
-        found.update({"text": text, "x": x, "y": y, "name": room.norm_name(text)})
+        found.update({"text": text, "x": seed_x, "y": seed_y, "name": room.norm_name(text)})
         detected.append(found)
         print(f"[{index}/{len(seeds)}] {text}  {found['area_m2']:.2f} m2", flush=True)
     detected, skipped = _detect_open_clusters(msp, boxes, segs, open_misses, detected, skipped, door)
@@ -804,7 +855,7 @@ def detect(dxf_path: Path, meta_path: Path, door: str = "close") -> dict:
         "labels": public_labels,
         "skipped": skipped,
         "rules": {
-            "labels": "Korean room names, or Latin names with 2+ letters and a digit; stacked lines within 1.8 text heights are joined top to bottom; fixture callouts such as 미니바, 옷장, 신발장, 수납장, 하부장, 상부장, 옷봉설치, 장비, 데스크, 서랍, 온수기, 살균기, 소독기, 도어, 테이블, 정수기, 휴대폰장, 게시판, 렉장, 랙장, 냉장고, 제빙기, 머신, 커피, 전자레인지, 텀블러, 세척기, EV, 화분, 화장대, 월풀욕조, 욕조, (장애인) and non-area names 방풍실, 보관실, 퇴식대, 샤워실, 고압, 저압, 계단실, 복도, 승강기, EPS, OPEN, 오픈, 홀-, 홈-, 입구, 출구, 양치공간, 청소도구함, 청소도구실, 실외기실, 조경, 배경, 평면도, 비품고을, 항습기, 화물, 휠체어, 린넨실, 오물처리실, (장애인, 구급자, 응급환자, 의료가스실, 기계실, (여), (남), 문서고, 기울기, 자동방화, 인), 인승, OTIS, Wlqtnwjd, DA#, DA(, 올려옴, 내려감, DOOR, 패드, 기저귀, 침례탕약, 설치, 드라이기, 유사용, 상하부, 분전함, 세척실, 탕비실, 물품, 스트레쳐, E.V, ELEV, ELEV. HALL, ELEV. 홀, 유도등, 단자함, 소화전, 다용도실, 밸브, (근생), 정화조, 피난기, 보관소, 속도, 탑승대기공간, 주거, 배수, 비상용, 탑승대기, ST(, 탱크, 실외기, 마감, 콘크리트, 행거, 클립바, 수조, 발전기실, 집수정, ASD, W.C, 세면대, ARM실, 옷장, 용수대, 자동문, 거울, 세탁기, 기기배치, 폐쇄, 장애인겸용, 데크, 비품고, 전기실, 충전소, 급속, 폐기품, 폐기물, 콤프레셔, 설비실, 경계선, 대지안, 벽부형, 산책로, 올라옴, 수거함, 배기, FSD, DORDI, 승강식, OH4700, 유모차보관, C1A, C2A, C3A, TC1, PW1000, AG1100, 노출되는, 자전거, 피난구, DA-, 재활용, 급기, 주문제작, BC-, 부속실, 보일러실, 세탁실, 승강장 are excluded",
+            "labels": "Korean room names, or Latin names with 2+ letters and a digit; stacked lines within 1.8 text heights are joined top to bottom; fixture callouts such as 미니바, 옷장, 신발장, 수납장, 하부장, 상부장, 옷봉설치, 장비, 데스크, 서랍, 온수기, 살균기, 소독기, 도어, 테이블, 정수기, 휴대폰장, 게시판, 렉장, 랙장, 냉장고, 제빙기, 머신, 커피, 전자레인지, 텀블러, 세척기, EV, 화분, 화장대, 월풀욕조, 욕조, (장애인) and non-area names 방풍실, 보관실, 퇴식대, 샤워실, 고압, 저압, 계단실, 복도, 승강기, EPS, OPEN, 오픈, 홀-, 홈-, 입구, 출구, 양치공간, 청소도구함, 청소도구실, 실외기실, 조경, 배경, 평면도, 비품고을, 항습기, 화물, 휠체어, 린넨실, 오물처리실, (장애인, 구급자, 응급환자, 의료가스실, 기계실, (여), (남), 문서고, 기울기, 자동방화, 인), 인승, OTIS, Wlqtnwjd, DA#, DA(, 올려옴, 내려감, DOOR, 패드, 기저귀, 침례탕약, 설치, 드라이기, 유사용, 상하부, 분전함, 세척실, 탕비실, 물품, 스트레쳐, E.V, ELEV, ELEV. HALL, ELEV. 홀, 유도등, 단자함, 소화전, 다용도실, 밸브, (근생), 정화조, 피난기, 보관소, 속도, 탑승대기공간, 주거, 배수, 비상용, 탑승대기, ST(, 탱크, 실외기, 마감, 콘크리트, 행거, 클립바, 수조, 발전기실, 집수정, ASD, W.C, 세면대, ARM실, 옷장, 용수대, 자동문, 거울, 세탁기, 기기배치, 폐쇄, 장애인겸용, 데크, 비품고, 전기실, 충전소, 급속, 폐기품, 폐기물, 콤프레셔, 설비실, 경계선, 대지안, 벽부형, 산책로, 올라옴, 수거함, 배기, FSD, DORDI, 승강식, OH4700, 유모차보관, C1A, C2A, C3A, TC1, PW1000, AG1100, 노출되는, 자전거, 피난구, DA-, 재활용, 급기, 주문제작, BC-, 부속실, 보일러실, 세탁실, 승강장, 테라스 are excluded",
             "font": "PNG text is the TEXT stored on each label layer, drawn by the floor sheet renderer",
             "png": "rendered from floor_label_detected.dxf",
             "door": door,

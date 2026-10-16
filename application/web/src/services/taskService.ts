@@ -23,6 +23,12 @@ export function titleFromPrompt(prompt: string): string {
   return prompt.trim().slice(0, MAX_TASK_TITLE_LENGTH) || "New task";
 }
 
+/** Sidebar/task title from an uploaded drawing basename. */
+export function titleFromFileName(fileName: string): string {
+  const base = fileName.trim().replace(/^.*[/\\]/, "");
+  return base.slice(0, MAX_TASK_TITLE_LENGTH) || "New task";
+}
+
 export function buildNewTaskDefaults(
   config: AppConfig,
   activeTask: Task | null,
