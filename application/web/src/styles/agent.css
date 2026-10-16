@@ -2937,14 +2937,33 @@ button.config-popover-choice.is-selected {
 }
 
 .drawing-list-select {
-  padding: 6px 8px;
+  padding: 6px 22px 6px 8px;
   border: 1px solid var(--border);
   border-radius: 6px;
-  background: var(--bg-secondary, transparent);
+  background-color: var(--bg-secondary, transparent);
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath fill='%238b93a3' d='M1 1l4 4 4-4'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 7px center;
+  background-size: 10px 6px;
   color: var(--text-primary);
+  -webkit-text-fill-color: var(--text-primary);
   font-size: 12px;
   cursor: pointer;
   max-width: 88px;
+  appearance: none;
+  -webkit-appearance: none;
+}
+
+.drawing-list-select.is-rating-good {
+  color: #3d9a5f;
+  -webkit-text-fill-color: #3d9a5f;
+  border-color: var(--border);
+}
+
+.drawing-list-select.is-rating-bad {
+  color: #e091a8;
+  -webkit-text-fill-color: #e091a8;
+  border-color: var(--border);
 }
 
 .drawing-list-select:disabled {
@@ -3186,8 +3205,12 @@ button.config-popover-choice.is-selected {
 .drawing-zoom {
   display: flex;
   align-items: center;
-  gap: 4px;
+  gap: 8px;
   flex-shrink: 0;
+}
+
+.drawing-zoom .drawing-rating {
+  margin-right: 4px;
 }
 
 .drawing-zoom-btn,

@@ -241,20 +241,56 @@ def _floor_refs(entry: dict) -> list[dict]:
     return refs
 
 
-def _summary(entry: dict) -> dict | None:
+def _source_size_bytes(entry: dict) -> int | None:
+    raw = entry.get("source_size_bytes", entry.get("size"))
+    try:
+        size = int(raw)
+    except (TypeError, ValueError):
+        return None
+    return size if size >= 0 else None
+
+
+def _all_floors_labeled(artifacts: Path, folder: str, floors: list[dict]) -> bool:
+    """True when every catalog floor has ``floor_label_detected.png`` on disk."""
+    if not floors:
+        return False
+    try:
+        floors_dir = _folder_dir(artifacts, folder) / "floors"
+    except HTTPException:
+        return False
+    label_name = _IMAGE_KINDS["label"]
+    for ref in floors:
+        floor_id = str(ref.get("id") or "").strip()
+        if not floor_id:
+            return False
+        label_path = floors_dir / floor_id / label_name
+        if label_path.is_file():
+            continue
+        if Path(resolve_existing_path(str(label_path))).is_file():
+            continue
+        return False
+    return True
+
+
+def _summary(entry: dict, artifacts: Path | None = None) -> dict | None:
     drawing_id = _safe_id(entry.get("drawing_id"))
     if not drawing_id:
         return None
     folder = _safe_id(entry.get("folder")) or drawing_id
+    floors = _floor_refs(entry)
+    status = str(entry.get("status") or "pending").strip() or "pending"
+    if artifacts is not None and _all_floors_labeled(artifacts, folder, floors):
+        status = "done"
     return {
         "drawing_id": drawing_id,
         "folder": folder,
         "source_filename": str(entry.get("source_filename") or "").strip(),
         "created_at": str(entry.get("created_at") or "").strip(),
         "updated_at": str(entry.get("updated_at") or "").strip(),
-        "status": str(entry.get("status") or "pending").strip() or "pending",
+        "status": status,
+        "size": _source_size_bytes(entry),
         "rating": _normalize_rating(entry.get("rating")),
-        "floors": _floor_refs(entry),
+        "floors": floors,
     }
 
 
@@ -267,7 +303,7 @@ def list_drawings(artifacts: Path) -> dict:
     files = _load_task_map(artifacts)["files"]
     drawings = []
     for entry in catalog["drawings"]:
-        item = _summary(entry)
+        item = _summary(entry, artifacts)
         if item:
             item["task_id"] = _latest_task_id(
                 files,
@@ -306,7 +342,7 @@ def list_floor_catalog(artifacts: Path, drawing_id: str) -> dict:
     entry = _find_entry(catalog, drawing_id)
     if entry is None:
         raise HTTPException(status_code=404, detail="Drawing not found")
-    summary = _summary(entry)
+    summary = _summary(entry, artifacts)
     if summary is None:
         raise HTTPException(status_code=400, detail="Invalid drawing id")
     floors_dir = _folder_dir(artifacts, summary["folder"]) / "floors"
@@ -336,6 +372,7 @@ def list_floor_catalog(artifacts: Path, drawing_id: str) -> dict:
         "folder": summary["folder"],
         "source_filename": summary["source_filename"],
         "status": summary["status"],
+        "rating": summary["rating"],
         "floors": floors,
     }
 
@@ -668,7 +705,7 @@ def delete_drawing(artifacts: Path, drawing_id: str) -> dict:
     entry = _find_entry(catalog, drawing_id)
     if entry is None:
         raise HTTPException(status_code=404, detail="Drawing not found")
-    summary = _summary(entry)
+    summary = _summary(entry, artifacts)
     if summary is None:
         raise HTTPException(status_code=400, detail="Invalid drawing id")
     folder_dir = _folder_dir(artifacts, summary["folder"])
@@ -706,7 +743,7 @@ def set_drawing_rating(artifacts: Path, drawing_id: str, rating: str) -> dict:
     entry["rating"] = normalized
     entry["updated_at"] = datetime.now().astimezone().isoformat(timespec="seconds")
     _write_catalog(artifacts, catalog)
-    summary = _summary(entry)
+    summary = _summary(entry, artifacts)
     assert summary is not None
     return {"ok": True, "drawing_id": drawing_id, "rating": summary["rating"]}
 

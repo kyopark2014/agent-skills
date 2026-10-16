@@ -129,6 +129,7 @@ export interface DrawingSummary {
   created_at: string;
   updated_at?: string;
   status: string;
+  size?: number | null;
   rating?: DrawingRating | string;
   task_id?: string | null;
   floors?: DrawingFloorRef[];
@@ -158,6 +159,7 @@ export interface DrawingCatalog {
   folder: string;
   source_filename: string;
   status: string;
+  rating?: DrawingRating | string;
   floors: DrawingFloor[];
 }
 

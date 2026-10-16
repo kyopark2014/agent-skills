@@ -27,9 +27,15 @@ function formatCreatedAt(value: string | undefined): string {
 
 function formatFileSize(bytes: number): string {
   if (!Number.isFinite(bytes) || bytes < 0) return "—";
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  if (bytes < 1024) return `${bytes}B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)}K`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)}M`;
+}
+
+function formatStatus(value: string | undefined): string {
+  const raw = (value || "").trim();
+  if (!raw) return "—";
+  return raw.charAt(0).toUpperCase() + raw.slice(1);
 }
 
 export function UploadDrawingListView({
@@ -171,11 +177,11 @@ export function UploadDrawingListView({
                           {file.file_name}
                         </span>
                         <span className="drawing-list-sub">
-                          생성 {formatCreatedAt(file.created_at)}
+                          {`생성: ${formatCreatedAt(file.created_at)}`}
                           {" · "}
-                          {formatFileSize(file.size)}
+                          {`상태: ${formatStatus(file.status)}`}
                           {" · "}
-                          상태 {file.status}
+                          {`크기: ${formatFileSize(file.size)}`}
                         </span>
                       </div>
                       <div className="drawing-list-actions">

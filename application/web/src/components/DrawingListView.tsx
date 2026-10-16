@@ -37,6 +37,19 @@ function formatCreatedAt(value: string | undefined): string {
   });
 }
 
+function formatFileSize(bytes: number | null | undefined): string {
+  if (bytes == null || !Number.isFinite(bytes) || bytes < 0) return "—";
+  if (bytes < 1024) return `${bytes}B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)}K`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)}M`;
+}
+
+function formatStatus(value: string | undefined): string {
+  const raw = (value || "").trim();
+  if (!raw) return "—";
+  return raw.charAt(0).toUpperCase() + raw.slice(1);
+}
+
 export function DrawingListView({
   onMenuClick,
   onBack,
@@ -211,11 +224,13 @@ export function DrawingListView({
                           {title}
                         </span>
                         <span className="drawing-list-sub">
-                          생성 {formatCreatedAt(drawing.created_at)}
+                          {`생성: ${formatCreatedAt(drawing.created_at)}`}
                           {" · "}
-                          폴더 {drawing.folder || "—"}
+                          {`폴더: ${drawing.folder || "—"}`}
                           {" · "}
-                          상태 {drawing.status || "—"}
+                          {`상태: ${formatStatus(drawing.status)}`}
+                          {" · "}
+                          {`크기: ${formatFileSize(drawing.size)}`}
                         </span>
                       </div>
                       <div className="drawing-list-actions">
@@ -253,24 +268,22 @@ export function DrawingListView({
                       >
                         {restartingId === drawing.drawing_id ? "재시작 중…" : "재시작"}
                       </button>
-                      <label className="drawing-rating">
-                        <span className="drawing-rating-label">평가</span>
-                        <select
-                          className="drawing-list-select"
-                          aria-label={`${title} 평가`}
-                          value={normalizeRating(drawing.rating)}
-                          disabled={busy}
-                          onChange={(event) =>
-                            void changeRating(drawing, normalizeRating(event.target.value))
-                          }
-                        >
-                          {RATING_OPTIONS.map((option) => (
-                            <option key={option.value} value={option.value}>
-                              {option.label}
-                            </option>
-                          ))}
-                        </select>
-                      </label>
+                      <select
+                        className={`drawing-list-select is-rating-${normalizeRating(drawing.rating)}`}
+                        aria-label={`${title} 평가`}
+                        title="평가"
+                        value={normalizeRating(drawing.rating)}
+                        disabled={busy}
+                        onChange={(event) =>
+                          void changeRating(drawing, normalizeRating(event.target.value))
+                        }
+                      >
+                        {RATING_OPTIONS.map((option) => (
+                          <option key={option.value} value={option.value}>
+                            {option.label}
+                          </option>
+                        ))}
+                      </select>
                     </div>
                     </div>
                     {floors.length > 0 ? (

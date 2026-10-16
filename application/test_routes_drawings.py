@@ -355,12 +355,81 @@ class DrawingIdTests(unittest.TestCase):
             )
             listed = list_drawings(artifacts)
             self.assertEqual(listed["drawings"][0]["rating"], "neutral")
+            self.assertIsNone(listed["drawings"][0]["size"])
+            floors = list_floor_catalog(artifacts, drawing_id)
+            self.assertEqual(floors["rating"], "neutral")
             updated = set_drawing_rating(artifacts, drawing_id, "good")
             self.assertEqual(updated["rating"], "good")
             listed = list_drawings(artifacts)
             self.assertEqual(listed["drawings"][0]["rating"], "good")
+            floors = list_floor_catalog(artifacts, drawing_id)
+            self.assertEqual(floors["rating"], "good")
             with self.assertRaises(HTTPException):
                 set_drawing_rating(artifacts, drawing_id, "excellent")
+
+    def test_drawing_list_includes_source_size_bytes(self):
+        with tempfile.TemporaryDirectory() as raw:
+            artifacts = Path(raw)
+            drawing_id = "hotel"
+            (artifacts / drawing_id / "floors" / "1F").mkdir(parents=True)
+            (artifacts / "drawing_list.json").write_text(
+                json.dumps(
+                    {
+                        "drawings": [
+                            {
+                                "drawing_id": drawing_id,
+                                "folder": drawing_id,
+                                "source_filename": "hotel.dxf",
+                                "source_size_bytes": 3670016,
+                                "status": "ready",
+                                "floors": [],
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            listed = list_drawings(artifacts)
+            self.assertEqual(listed["drawings"][0]["size"], 3670016)
+
+    def test_status_done_when_all_floors_have_label_png(self):
+        with tempfile.TemporaryDirectory() as raw:
+            artifacts = Path(raw)
+            drawing_id = "clubhouse_multi"
+            for floor in ("1F", "2F"):
+                floor_dir = artifacts / drawing_id / "floors" / floor
+                floor_dir.mkdir(parents=True)
+            (artifacts / "drawing_list.json").write_text(
+                json.dumps(
+                    {
+                        "drawings": [
+                            {
+                                "drawing_id": drawing_id,
+                                "folder": drawing_id,
+                                "source_filename": "clubhouse.dxf",
+                                "status": "ready",
+                                "floors": [
+                                    {"floor": "1F", "title": "1F", "status": "ready"},
+                                    {"floor": "2F", "title": "2F", "status": "ready"},
+                                ],
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            listed = list_drawings(artifacts)
+            self.assertEqual(listed["drawings"][0]["status"], "ready")
+
+            (artifacts / drawing_id / "floors" / "1F" / "floor_label_detected.png").write_bytes(b"png")
+            listed = list_drawings(artifacts)
+            self.assertEqual(listed["drawings"][0]["status"], "ready")
+
+            (artifacts / drawing_id / "floors" / "2F" / "floor_label_detected.png").write_bytes(b"png")
+            listed = list_drawings(artifacts)
+            self.assertEqual(listed["drawings"][0]["status"], "done")
+            floors = list_floor_catalog(artifacts, drawing_id)
+            self.assertEqual(floors["status"], "done")
 
 
 if __name__ == "__main__":

@@ -5,12 +5,24 @@ import {
   type DrawingFloorLabels,
   type DrawingLabelItem,
   type DrawingLabelTag,
+  type DrawingRating,
 } from "../api";
 import { MenuIcon } from "./SidebarIcons";
 
 const MIN_ZOOM = 0.25;
 const MAX_ZOOM = 16;
 const ZOOM_STEP = 1.25;
+
+const RATING_OPTIONS: Array<{ value: DrawingRating; label: string }> = [
+  { value: "good", label: "좋음" },
+  { value: "neutral", label: "중립" },
+  { value: "bad", label: "나쁨" },
+];
+
+function normalizeRating(value: string | undefined | null): DrawingRating {
+  if (value === "good" || value === "bad" || value === "neutral") return value;
+  return "neutral";
+}
 
 const PREVIEWS = [
   { kind: "original", label: "원본", file: "floor_original.png" },
@@ -184,7 +196,7 @@ function ZoomInIcon() {
 export function DrawingView({ drawingId, initialFloor, onMenuClick, onBack }: Props) {
   const [floor, setFloor] = useState("");
   const [floorQuery, setFloorQuery] = useState("");
-  const [kind, setKind] = useState<PreviewKind>("original");
+  const [kind, setKind] = useState<PreviewKind>("label");
   const [catalog, setCatalog] = useState<DrawingCatalog | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [imageState, setImageState] = useState<"loading" | "ready" | "missing">("loading");
@@ -198,6 +210,8 @@ export function DrawingView({ drawingId, initialFloor, onMenuClick, onBack }: Pr
   const [selectedLabels, setSelectedLabels] = useState<Set<string>>(() => new Set());
   const [legendPos, setLegendPos] = useState<{ left: number; top: number } | null>(null);
   const [legendDragging, setLegendDragging] = useState(false);
+  const [rating, setRating] = useState<DrawingRating>("neutral");
+  const [ratingBusy, setRatingBusy] = useState(false);
 
   const stageRef = useRef<HTMLDivElement>(null);
   const legendRef = useRef<HTMLDivElement>(null);
@@ -238,11 +252,14 @@ export function DrawingView({ drawingId, initialFloor, onMenuClick, onBack }: Pr
     setError(null);
     setLabelData(null);
     setLabelError(null);
+    setRating("neutral");
+    setRatingBusy(false);
     api
       .getDrawingFloors(drawingId)
       .then((data) => {
         if (cancelled) return;
         setCatalog(data);
+        setRating(normalizeRating(data.rating));
         const preferred =
           initialFloor && data.floors.some((item) => item.id === initialFloor) ? initialFloor : "";
         const next =
@@ -430,6 +447,24 @@ export function DrawingView({ drawingId, initialFloor, onMenuClick, onBack }: Pr
     return () => observer.disconnect();
   }, [imageState, floor, kind]);
 
+  async function changeRating(next: DrawingRating) {
+    const previous = normalizeRating(rating);
+    if (previous === next) return;
+    setRatingBusy(true);
+    setError(null);
+    setRating(next);
+    setCatalog((prev) => (prev ? { ...prev, rating: next } : prev));
+    try {
+      await api.setDrawingRating(drawingId, next);
+    } catch (err) {
+      setRating(previous);
+      setCatalog((prev) => (prev ? { ...prev, rating: previous } : prev));
+      setError(err instanceof Error ? err.message : "평가를 저장하지 못했습니다.");
+    } finally {
+      setRatingBusy(false);
+    }
+  }
+
   function onPointerDown(event: ReactPointerEvent<HTMLDivElement>) {
     if (event.button !== 0 || imageState !== "ready") return;
     event.currentTarget.setPointerCapture(event.pointerId);
@@ -551,6 +586,20 @@ export function DrawingView({ drawingId, initialFloor, onMenuClick, onBack }: Pr
               ))}
             </div>
             <div className="drawing-zoom">
+              <select
+                className={`drawing-list-select is-rating-${rating}`}
+                aria-label={`${headerTitle} 평가`}
+                title="평가"
+                value={rating}
+                disabled={ratingBusy || !catalog}
+                onChange={(event) => void changeRating(normalizeRating(event.target.value))}
+              >
+                {RATING_OPTIONS.map((option) => (
+                  <option key={option.value} value={option.value}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
               {legendActive && (labelData || labelError) ? (
                 <button
                   type="button"
