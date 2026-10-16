@@ -263,9 +263,9 @@ export function DrawingListView({
                 onMouseDown={(event) => event.stopPropagation()}
               >
                 <h2 id="drawing-delete-title">도면 삭제</h2>
-                <p>{`"${deleteLabel}" 도면과 관련 파일을 삭제할까요?`}</p>
+                <p>{`"${deleteLabel}" 도면을 삭제할까요?`}</p>
                 <p>
-                  {`폴더 ${pendingDelete.folder || pendingDelete.drawing_id}의 산출물과 목록 항목이 삭제됩니다. 작업 공간 안의 원본 파일도 함께 지웁니다. 이 작업은 되돌릴 수 없습니다.`}
+                  {`폴더 ${pendingDelete.folder || pendingDelete.drawing_id}의 산출물과 목록(JSON)만 삭제됩니다. 업로드 원본은 그대로 두며, 원본 삭제는 「도면 가져오기」에서 하세요.`}
                 </p>
                 <div className="modal-actions">
                   <button

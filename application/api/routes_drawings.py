@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -28,6 +29,12 @@ _IMAGE_KINDS = {
     "validated": "floor_wall_validated.png",
     "label": "floor_label_detected.png",
 }
+_LABEL_JSON = "floor_label_detected.json"
+_ORIGINAL_META = "floor_original_meta.json"
+# Must match render_wall_dxf_png canvas padding (top, right, bottom).
+_PNG_PAD_TOP = 160
+_PNG_PAD_RIGHT = 200
+_PNG_PAD_BOTTOM = 120
 
 
 # Local drawings were produced under this session user. A login id such as
@@ -319,9 +326,7 @@ def list_floor_catalog(artifacts: Path, drawing_id: str) -> dict:
     }
 
 
-def floor_image_path(artifacts: Path, drawing_id: str, floor: str, kind: str) -> Path:
-    if kind not in _IMAGE_KINDS:
-        raise HTTPException(status_code=400, detail="Unknown image kind")
+def _floor_dir(artifacts: Path, drawing_id: str, floor: str) -> tuple[dict, Path]:
     floor_id = _safe_id(floor)
     if not floor_id:
         raise HTTPException(status_code=400, detail="Invalid floor")
@@ -329,36 +334,319 @@ def floor_image_path(artifacts: Path, drawing_id: str, floor: str, kind: str) ->
     if floor_id not in {item["id"] for item in catalog["floors"]}:
         raise HTTPException(status_code=404, detail="Floor not found")
     floors_dir = (_folder_dir(artifacts, catalog["folder"]) / "floors").resolve()
-    path = (floors_dir / floor_id / _IMAGE_KINDS[kind]).resolve()
-    if not _contained(path, floors_dir):
+    floor_dir = (floors_dir / floor_id).resolve()
+    if not _contained(floor_dir, floors_dir):
+        raise HTTPException(status_code=400, detail="Invalid floor path")
+    return catalog, floor_dir
+
+
+def floor_image_path(artifacts: Path, drawing_id: str, floor: str, kind: str) -> Path:
+    if kind not in _IMAGE_KINDS:
+        raise HTTPException(status_code=400, detail="Unknown image kind")
+    _catalog, floor_dir = _floor_dir(artifacts, drawing_id, floor)
+    path = (floor_dir / _IMAGE_KINDS[kind]).resolve()
+    if not _contained(path, floor_dir):
         raise HTTPException(status_code=400, detail="Invalid image path")
     if not path.is_file():
         raise HTTPException(status_code=404, detail="Image not found")
     return path
 
 
-def _delete_source_file(user_root: Path, entry: dict) -> bool:
-    """Delete the uploaded DXF when it lives inside this user's workspace."""
-    deleted = False
-    source = str(entry.get("source_path") or "").strip()
-    if source:
+def _rgb_color(value: object) -> list[int] | None:
+    if not isinstance(value, (list, tuple)) or len(value) < 3:
+        return None
+    try:
+        red, green, blue = (int(value[0]), int(value[1]), int(value[2]))
+    except (TypeError, ValueError):
+        return None
+    return [
+        max(0, min(255, red)),
+        max(0, min(255, green)),
+        max(0, min(255, blue)),
+    ]
+
+
+def _face_id(polygon_mm: object) -> str | None:
+    """Stable id for a shared room face (same rule as detect_labels ``_face_key``)."""
+    if not isinstance(polygon_mm, list) or not polygon_mm:
+        return None
+    parts: list[str] = []
+    for point in polygon_mm:
+        if not isinstance(point, (list, tuple)) or len(point) < 2:
+            return None
         try:
-            src = Path(source).resolve()
-        except OSError:
-            src = None
-        if src and src.is_file() and _contained(src, user_root):
-            src.unlink()
-            deleted = True
-    filename = Path(str(entry.get("source_filename") or "")).name
-    if filename and filename not in {".", ".."} and "/" not in filename and "\\" not in filename:
-        upload = (user_root / "upload" / filename).resolve()
-        if upload.is_file() and _contained(upload, user_root):
-            upload.unlink(missing_ok=True)
-            deleted = True
-    return deleted
+            parts.append(f"{round(float(point[0]))},{round(float(point[1]))}")
+        except (TypeError, ValueError):
+            return None
+    digest = hashlib.sha1(";".join(parts).encode("utf-8")).hexdigest()
+    return digest[:16]
+
+
+def _label_faces(item: dict) -> list[dict]:
+    faces: list[dict] = []
+    for inst in item.get("instances") or []:
+        if not isinstance(inst, dict):
+            continue
+        face_id = _face_id(inst.get("polygon_mm"))
+        try:
+            area = float(inst.get("area_m2"))
+        except (TypeError, ValueError):
+            area = None
+        if face_id is None or area is None:
+            continue
+        faces.append({"id": face_id, "area_m2": round(area, 4)})
+    if faces:
+        return faces
+    try:
+        area = float(item.get("area_m2"))
+    except (TypeError, ValueError):
+        return []
+    # Fallback when instances are missing: treat the label row as one face.
+    name = str(item.get("label") or item.get("layer") or "").strip()
+    digest = hashlib.sha1(f"label:{name}:{area}".encode("utf-8")).hexdigest()[:16]
+    return [{"id": digest, "area_m2": round(area, 4)}]
+
+
+def _floor_plot_bounds(bbox_mm: dict) -> tuple[float, float, float, float]:
+    """Same plot margin as ``floor_plot_bounds`` in lib_llm_correct."""
+    cx0 = float(bbox_mm["xmin"])
+    cy0 = float(bbox_mm["ymin"])
+    cx1 = float(bbox_mm["xmax"])
+    cy1 = float(bbox_mm["ymax"])
+    span_y0 = max(cy1 - cy0, 1.0)
+    tick = max(span_y0 * 0.025, 1000.0)
+    xmin = cx0 - max(tick * 0.8, 1500.0)
+    ymin = cy0 - max(tick * 2.5, 4000.0)
+    xmax = cx1 + max(tick * 2.0, 3000.0)
+    ymax = cy1 + max(tick * 6.5, 9000.0)
+    return xmin, ymin, xmax, ymax
+
+
+def _png_size(meta: dict) -> tuple[int, int] | None:
+    stored = meta.get("png_size")
+    if isinstance(stored, dict):
+        try:
+            width = int(stored.get("width") or 0)
+            height = int(stored.get("height") or 0)
+        except (TypeError, ValueError):
+            return None
+        if width > 0 and height > 0:
+            return width, height
+    if isinstance(stored, (list, tuple)) and len(stored) >= 2:
+        try:
+            width = int(stored[0])
+            height = int(stored[1])
+        except (TypeError, ValueError):
+            return None
+        if width > 0 and height > 0:
+            return width, height
+    return None
+
+
+def _load_original_overlay(floor_dir: Path) -> dict | None:
+    """Pixel transform for drawing label polygons on ``floor_original.png``."""
+    path = (floor_dir / _ORIGINAL_META).resolve()
+    if not _contained(path, floor_dir) or not path.is_file():
+        return None
+    try:
+        meta = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(meta, dict):
+        return None
+    bbox = meta.get("bbox_mm")
+    if not isinstance(bbox, dict):
+        return None
+    size = _png_size(meta)
+    if size is None:
+        return None
+    width, height = size
+    try:
+        xmin, ymin, xmax, ymax = _floor_plot_bounds(bbox)
+    except (KeyError, TypeError, ValueError):
+        return None
+    content_w = width - _PNG_PAD_RIGHT
+    content_h = height - _PNG_PAD_TOP - _PNG_PAD_BOTTOM
+    if content_w <= 0 or content_h <= 0:
+        return None
+    span_x = max(xmax - xmin, 1.0)
+    span_y = max(ymax - ymin, 1.0)
+    return {
+        "width": width,
+        "height": height,
+        "xmin": xmin,
+        "ymin": ymin,
+        "xmax": xmax,
+        "ymax": ymax,
+        "span_x": span_x,
+        "span_y": span_y,
+        "content_w": content_w,
+        "content_h": content_h,
+    }
+
+
+def _mm_to_px(x: float, y: float, overlay: dict) -> list[float]:
+    px = (x - overlay["xmin"]) / overlay["span_x"] * overlay["content_w"]
+    py = _PNG_PAD_TOP + (overlay["ymax"] - y) / overlay["span_y"] * overlay["content_h"]
+    return [round(px, 2), round(py, 2)]
+
+
+def _polygon_px_points(raw: object, overlay: dict) -> list[list[float]] | None:
+    if not isinstance(raw, list) or len(raw) < 3:
+        return None
+    points: list[list[float]] = []
+    for point in raw:
+        if not isinstance(point, (list, tuple)) or len(point) < 2:
+            return None
+        try:
+            points.append(_mm_to_px(float(point[0]), float(point[1]), overlay))
+        except (TypeError, ValueError):
+            return None
+    return points if len(points) >= 3 else None
+
+
+def _polygons_px(item: dict, overlay: dict | None) -> list[list[list[float]]]:
+    if overlay is None:
+        return []
+    polygons: list[list[list[float]]] = []
+    for inst in item.get("instances") or []:
+        if not isinstance(inst, dict):
+            continue
+        points = _polygon_px_points(inst.get("polygon_mm"), overlay)
+        if points:
+            polygons.append(points)
+    return polygons
+
+
+def _tag_anchor_px(inst: dict, overlay: dict) -> list[float] | None:
+    """Prefer instance seed (x, y); fall back to polygon centroid."""
+    try:
+        return _mm_to_px(float(inst["x"]), float(inst["y"]), overlay)
+    except (KeyError, TypeError, ValueError):
+        pass
+    points = _polygon_px_points(inst.get("polygon_mm"), overlay)
+    if not points:
+        return None
+    xs = [pt[0] for pt in points]
+    ys = [pt[1] for pt in points]
+    return [round(sum(xs) / len(xs), 2), round(sum(ys) / len(ys), 2)]
+
+
+def _instance_tags_px(item: dict, overlay: dict | None, fallback_name: str) -> list[dict]:
+    """Name + area badges for the summary overlay (same content as label PNG tags)."""
+    if overlay is None:
+        return []
+    tags: list[dict] = []
+    for inst in item.get("instances") or []:
+        if not isinstance(inst, dict):
+            continue
+        anchor = _tag_anchor_px(inst, overlay)
+        if anchor is None:
+            continue
+        try:
+            area = float(inst.get("area_m2"))
+        except (TypeError, ValueError):
+            continue
+        text = str(inst.get("text") or fallback_name).strip() or fallback_name
+        tags.append(
+            {
+                "x": anchor[0],
+                "y": anchor[1],
+                "text": text,
+                "area_m2": round(area, 4),
+            }
+        )
+    return tags
+
+
+def list_floor_labels(artifacts: Path, drawing_id: str, floor: str) -> dict:
+    """Slim label legend from ``floor_label_detected.json`` (color · name · area)."""
+    catalog, floor_dir = _floor_dir(artifacts, drawing_id, floor)
+    path = (floor_dir / _LABEL_JSON).resolve()
+    if not _contained(path, floor_dir):
+        raise HTTPException(status_code=400, detail="Invalid label path")
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="Label data not found")
+    try:
+        loaded = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise HTTPException(
+            status_code=500,
+            detail="floor_label_detected.json을 읽지 못했습니다.",
+        ) from exc
+    if not isinstance(loaded, dict):
+        raise HTTPException(status_code=500, detail="floor_label_detected.json 형식이 올바르지 않습니다.")
+
+    overlay_tf = _load_original_overlay(floor_dir)
+    labels = []
+    for item in loaded.get("labels") or []:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("label") or item.get("layer") or "").strip()
+        if not name:
+            continue
+        color = _rgb_color(item.get("color"))
+        if color is None:
+            continue
+        faces = _label_faces(item)
+        try:
+            area = float(item.get("area_m2"))
+        except (TypeError, ValueError):
+            area = sum(face["area_m2"] for face in faces) if faces else None
+        if area is None:
+            continue
+        labels.append(
+            {
+                "label": name,
+                "color": color,
+                "area_m2": round(area, 4),
+                "faces": faces,
+                "polygons_px": _polygons_px(item, overlay_tf),
+                "tags": _instance_tags_px(item, overlay_tf, name),
+            }
+        )
+    labels.sort(key=lambda row: (-float(row["area_m2"]), str(row["label"])))
+
+    unique_faces: dict[str, float] = {}
+    for row in labels:
+        for face in row["faces"]:
+            unique_faces.setdefault(face["id"], float(face["area_m2"]))
+    unique_area = round(sum(unique_faces.values()), 4)
+    try:
+        reported = float(loaded.get("unique_face_area_m2"))
+    except (TypeError, ValueError):
+        reported = unique_area
+
+    payload: dict = {
+        "drawing_id": catalog["drawing_id"],
+        "floor": _safe_id(floor),
+        "label_count": len(labels),
+        "unique_face_area_m2": reported if reported > 0 else unique_area,
+        "labels": labels,
+    }
+    if overlay_tf is not None:
+        payload["overlay"] = {
+            "width": overlay_tf["width"],
+            "height": overlay_tf["height"],
+        }
+    return payload
+
+
+def _forget_drawing_tasks(artifacts: Path, drawing_id: str) -> None:
+    """Drop task-map rows tied to this drawing. Upload originals stay untouched."""
+    payload = _load_task_map(artifacts)
+    files = payload["files"]
+    kept = {
+        key: item
+        for key, item in files.items()
+        if not (isinstance(item, dict) and _safe_id(item.get("drawing_id")) == drawing_id)
+    }
+    if len(kept) != len(files):
+        _write_task_map(artifacts, {"files": kept})
 
 
 def delete_drawing(artifacts: Path, drawing_id: str) -> dict:
+    """Remove artifact folder + catalog/task-map rows. Keep upload originals."""
     drawing_id = _safe_id(drawing_id) or ""
     if not drawing_id:
         raise HTTPException(status_code=400, detail="Invalid drawing id")
@@ -374,19 +662,18 @@ def delete_drawing(artifacts: Path, drawing_id: str) -> dict:
         shutil.rmtree(folder_dir)
     elif folder_dir.exists():
         raise HTTPException(status_code=400, detail="Drawing folder is not a directory")
-    user_root = artifacts.resolve().parent
-    source_deleted = _delete_source_file(user_root, entry)
     catalog["drawings"] = [
         item
         for item in catalog["drawings"]
         if _safe_id(item.get("drawing_id")) != drawing_id
     ]
     _write_catalog(artifacts, catalog)
+    _forget_drawing_tasks(artifacts, drawing_id)
     return {
         "ok": True,
         "drawing_id": drawing_id,
         "folder": summary["folder"],
-        "source_deleted": source_deleted,
+        "source_deleted": False,
     }
 
 
@@ -421,6 +708,12 @@ def get_drawings(request: Request) -> dict:
 def get_drawing_floors(drawing_id: str, request: Request) -> dict:
     user_id = require_user_id(request)
     return list_floor_catalog(_artifacts_dir(user_id), drawing_id)
+
+
+@router.get("/{drawing_id}/floors/{floor}/labels")
+def get_drawing_floor_labels(drawing_id: str, floor: str, request: Request) -> dict:
+    user_id = require_user_id(request)
+    return list_floor_labels(_artifacts_dir(user_id), drawing_id, floor)
 
 
 @router.get("/{drawing_id}/floors/{floor}/{kind}")

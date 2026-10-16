@@ -158,6 +158,36 @@ export interface DrawingCatalog {
   floors: DrawingFloor[];
 }
 
+export interface DrawingLabelFace {
+  id: string;
+  area_m2: number;
+}
+
+export interface DrawingLabelTag {
+  x: number;
+  y: number;
+  text: string;
+  area_m2: number;
+}
+
+export interface DrawingLabelItem {
+  label: string;
+  color: [number, number, number] | number[];
+  area_m2: number;
+  faces: DrawingLabelFace[];
+  polygons_px?: number[][][];
+  tags?: DrawingLabelTag[];
+}
+
+export interface DrawingFloorLabels {
+  drawing_id: string;
+  floor: string;
+  label_count: number;
+  unique_face_area_m2: number;
+  overlay?: { width: number; height: number } | null;
+  labels: DrawingLabelItem[];
+}
+
 export interface DocumentsStatus {
   documents_dir: string;
   projects_dir?: string;
@@ -470,6 +500,10 @@ export const api = {
     }),
   getDrawingFloors: (drawingId: string) =>
     request<DrawingCatalog>(`/api/drawings/${encodeURIComponent(drawingId)}/floors`),
+  getDrawingFloorLabels: (drawingId: string, floor: string) =>
+    request<DrawingFloorLabels>(
+      `/api/drawings/${encodeURIComponent(drawingId)}/floors/${encodeURIComponent(floor)}/labels`,
+    ),
   deleteDrawing: (drawingId: string) =>
     request<{ ok: boolean; drawing_id: string }>(
       `/api/drawings/${encodeURIComponent(drawingId)}`,
