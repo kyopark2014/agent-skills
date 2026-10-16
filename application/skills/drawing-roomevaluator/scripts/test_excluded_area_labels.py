@@ -254,6 +254,18 @@ class ExcludedAreaLabelTests(unittest.TestCase):
             "선큰가든",
             "선큰 가든",
             "선큰가든-1",
+            "발코니",
+            "발코니1",
+            "발코니-2",
+            "정원",
+            "정원1",
+            "배선실",
+            "배선실1",
+            "배선실-2",
+            "병동",
+            "51병동",
+            "병동1",
+            "병동-2",
         ):
             self.assertTrue(evaluate_room.is_excluded_area_label(text), text)
             self.assertFalse(evaluate_room.is_room_label(text), text)

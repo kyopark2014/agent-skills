@@ -139,6 +139,51 @@ class ReviewDemoteKeepTests(unittest.TestCase):
         )
         self.assertIn(id(leaf), demote)
 
+    def test_opening_end_partition_survives_bed_demote(self):
+        """위·아래가 문·창 이중선인 긴 실간 격벽은 침대 demote에 안 지워진다."""
+        doc = ezdxf.new()
+        msp = doc.modelspace()
+        # 실간 이중 격벽 (6 m) — 중점은 침대 bbox 안
+        face0 = _v(msp, 1000, 0, 6000)
+        face1 = _v(msp, 1180, 0, 6000)
+        # 아래: pier + 옆 창 이중선
+        _h(msp, 900, 1280, 0)
+        _h(msp, 200, 900, 40)
+        _h(msp, 200, 900, 160)
+        # 위: T접합 복도벽 + 옆 문 이중선
+        _h(msp, 200, 1000, 6000)
+        _h(msp, 1180, 2000, 6000)
+        _h(msp, 200, 900, 6100)
+        _h(msp, 200, 900, 6250)
+        # bbox 안 가구 선
+        furniture = _h(msp, 1300, 1800, 3000)
+
+        boxes = [{"xmin": 900, "ymin": 500, "xmax": 2000, "ymax": 4500, "label": "침대"}]
+        demote = lib_llm_correct.demote_in_bboxes(msp, boxes)
+        keep = lib_llm_correct.review_demote_keep_ids(msp, boxes, column_ids=set())
+        demote -= keep
+
+        self.assertIn(id(face0), keep)
+        self.assertIn(id(face1), keep)
+        self.assertNotIn(id(face0), demote)
+        self.assertNotIn(id(face1), demote)
+        self.assertIn(id(furniture), demote)
+
+    def test_short_wall_without_openings_still_demoted(self):
+        """문·창 끝이 없는 짧은 선은 침대 demote에 그대로 내려간다."""
+        doc = ezdxf.new()
+        msp = doc.modelspace()
+        short0 = _v(msp, 1000, 0, 900)
+        short1 = _v(msp, 1180, 0, 900)
+
+        boxes = [{"xmin": 900, "ymin": -50, "xmax": 1300, "ymax": 1000, "label": "침대"}]
+        keep = lib_llm_correct.review_demote_keep_ids(msp, boxes, column_ids=set())
+        demote = lib_llm_correct.demote_in_bboxes(msp, boxes) - keep
+
+        self.assertNotIn(id(short0), keep)
+        self.assertIn(id(short0), demote)
+        self.assertIn(id(short1), demote)
+
 
 if __name__ == "__main__":
     unittest.main()

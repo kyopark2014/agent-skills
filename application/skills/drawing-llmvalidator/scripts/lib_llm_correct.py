@@ -3752,17 +3752,134 @@ def _column_abutting_wall_ids(
     return kept
 
 
+def _opening_end_partition_ids(
+    msp,
+    *,
+    min_len_mm: float = 4000.0,
+    thick_min_mm: float = 80.0,
+    thick_max_mm: float = 250.0,
+) -> set[int]:
+    """양 끝이 문·창 개구에 닿는 긴 이중 격벽.
+
+    Vision 침대 demote 상자가 실간 격벽 중점을 덮어도, 위·아래에 문/창
+    이중선이 있으면 그 격벽은 가구가 아니다. demote 시점에는 DOOR/WINDOW
+    레이어가 아직 없어 WALL/BASE 기하로만 판별한다.
+    """
+
+    def _overlap(a0: float, a1: float, b0: float, b1: float) -> float:
+        return max(0.0, min(a1, b1) - max(a0, b0))
+
+    segs: list[dict[str, Any]] = []
+    for entity in _entities(msp):
+        layer = getattr(entity.dxf, "layer", None)
+        if layer not in (WALL_LAYER, BASE_LAYER):
+            continue
+        axis = _axis_line(entity)
+        if axis is None:
+            continue
+        ori, coord, a0, a1, length = axis
+        segs.append({
+            "entity": entity,
+            "layer": layer,
+            "ori": ori,
+            "coord": coord,
+            "a0": a0,
+            "a1": a1,
+            "length": length,
+        })
+
+    long_walls = [
+        s
+        for s in segs
+        if s["layer"] == WALL_LAYER and s["length"] >= min_len_mm
+    ]
+    if not long_walls:
+        return set()
+
+    kept: set[int] = set()
+    used: set[int] = set()
+    for face in long_walls:
+        fid = id(face["entity"])
+        if fid in used:
+            continue
+        mate = None
+        for other in long_walls:
+            if other is face or other["ori"] != face["ori"]:
+                continue
+            gap = abs(other["coord"] - face["coord"])
+            if not (thick_min_mm <= gap <= thick_max_mm):
+                continue
+            if _overlap(face["a0"], face["a1"], other["a0"], other["a1"]) < (
+                0.8 * min(face["length"], other["length"])
+            ):
+                continue
+            mate = other
+            break
+        if mate is None:
+            continue
+
+        lo = min(face["coord"], mate["coord"])
+        hi = max(face["coord"], mate["coord"])
+        along0 = max(face["a0"], mate["a0"])
+        along1 = min(face["a1"], mate["a1"])
+        cross_ori = "H" if face["ori"] == "V" else "V"
+
+        def _end_has_opening(along_end: float) -> bool:
+            # 끝점에 맞닿은 가로/세로 벽·베이스 (T접합·pier·짧은 연결선)
+            abut = False
+            for s in segs:
+                if s["ori"] != cross_ori or abs(s["coord"] - along_end) > 40.0:
+                    continue
+                if _overlap(s["a0"], s["a1"], lo - 220.0, hi + 220.0) <= 0.0:
+                    continue
+                abut = True
+                break
+            if not abut:
+                return False
+            # 끝 근처 이중 가로/세로선 = 문짝·창짝 (격벽 두께 바깥)
+            band = [
+                s
+                for s in segs
+                if s["ori"] == cross_ori
+                and abs(s["coord"] - along_end) <= 400.0
+                and s["length"] >= 600.0
+            ]
+            for i, left in enumerate(band):
+                for right in band[i + 1 :]:
+                    gap = abs(right["coord"] - left["coord"])
+                    if not (40.0 <= gap <= 220.0):
+                        continue
+                    ov = _overlap(left["a0"], left["a1"], right["a0"], right["a1"])
+                    if ov < 600.0:
+                        continue
+                    mid = (
+                        max(left["a0"], right["a0"]) + min(left["a1"], right["a1"])
+                    ) * 0.5
+                    if mid < lo - 80.0 or mid > hi + 80.0:
+                        return True
+            return False
+
+        if not (_end_has_opening(along0) and _end_has_opening(along1)):
+            continue
+        kept.add(fid)
+        kept.add(id(mate["entity"]))
+        used.add(fid)
+        used.add(id(mate["entity"]))
+    return kept
+
+
 def review_demote_keep_ids(
     msp,
     bboxes: Iterable[Any],
     *,
     column_ids: set[int] | None = None,
 ) -> set[int]:
-    """Vision demote에서 빼 둘 엔티티: 문 양옆, 창문, 기둥·기둥 맞닿은 면."""
+    """Vision demote에서 빼 둘 엔티티: 문 양옆, 창문, 기둥·기둥 맞닿은 면, 문·창 끝 격벽."""
     keep = door_side_wall_ids(msp, bboxes)
     keep |= _window_face_wall_ids(msp)
     cols = set(column_ids) if column_ids is not None else find_hbeam_column_entities(msp)
     keep |= _column_abutting_wall_ids(msp, cols)
+    keep |= _opening_end_partition_ids(msp)
     return keep
 
 

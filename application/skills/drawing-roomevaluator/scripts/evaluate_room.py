@@ -201,11 +201,15 @@ LABEL_ONLY_AREA_TOKENS = (
     "옷방",
     "파우더",
     "선큰가든",
+    "발코니",
+    "정원",
+    "배선실",
+    "병동",
 )
 
 
 def is_excluded_area_label(text: str, *, include_callouts: bool = True) -> bool:
-    """면적과 실 라벨에서 빼는 이름. 방풍실, 보관실, 퇴식대, 샤워실, 고압, 저압, 계단실, 복도, 승강기, EPS, OPEN, 홀-, 홈-, 입구, 출구, 양치공간, 청소도구함, 청소도구실, 실외기실, 오픈, 조경, 배경, 평면도, 비품고을, 항습기, 화물, 휠체어, 린넨실, 오물처리실, (장애인, 구급자, 응급환자, 의료가스실, 기계실, (여), (남), 문서고, 기울기, 자동방화, 인), 인승, OTIS, Wlqtnwjd, DA#, DA(, 올려옴, 내려감, DOOR, 패드, 기저귀, 침례탕약, 설치, 드라이기, 유사용, 상하부, 분전함, 세척실, 탕비실, 물품, 스트레쳐, E.V, ELEV. ELEV. HALL과 ELEV. 홀도 포함한다. (여), (남), 문서고, 기울기, 자동방화, 인), 인승, OTIS, Wlqtnwjd, DA#, DA(, 올려옴, 내려감, DOOR, 패드, 기저귀, 침례탕약, 설치, 드라이기, 유사용, 상하부, 유도등, 단자함, 소화전, 다용도실, 밸브, (근생), 정화조, 피난기, 보관소, 속도, 탑승대기공간, 주거, 배수, 비상용, 탑승대기, ST(, 탱크, 실외기, 마감, 콘크리트, 행거, 클립바, 수조, 발전기실, 집수정, ASD, W.C, 세면대, ARM실, 옷장, 용수대, 자동문, 거울, 세탁기, 기기배치, 폐쇄, 장애인겸용, 데크, 비품고, 전기실, 충전소, 급속, 폐기품, 폐기물, 콤프레셔, 설비실, 경계선, 대지안, 벽부형, 산책로, 올라옴, 수거함, 배기, FSD, DORDI, 승강식, OH4700, 유모차보관, C1A, C2A, C3A, TC1, PW1000, AG1100, 노출되는, 자전거, 피난구, DA-, 재활용, 급기, 주문제작, BC-, 부속실, 보일러실, 세탁실, 승강장, 테라스, 청결물실, 수납, 보일러, 옷방, 파우더, 선큰가든도 포함한다."""
+    """면적과 실 라벨에서 빼는 이름. 방풍실, 보관실, 퇴식대, 샤워실, 고압, 저압, 계단실, 복도, 승강기, EPS, OPEN, 홀-, 홈-, 입구, 출구, 양치공간, 청소도구함, 청소도구실, 실외기실, 오픈, 조경, 배경, 평면도, 비품고을, 항습기, 화물, 휠체어, 린넨실, 오물처리실, (장애인, 구급자, 응급환자, 의료가스실, 기계실, (여), (남), 문서고, 기울기, 자동방화, 인), 인승, OTIS, Wlqtnwjd, DA#, DA(, 올려옴, 내려감, DOOR, 패드, 기저귀, 침례탕약, 설치, 드라이기, 유사용, 상하부, 분전함, 세척실, 탕비실, 물품, 스트레쳐, E.V, ELEV. ELEV. HALL과 ELEV. 홀도 포함한다. (여), (남), 문서고, 기울기, 자동방화, 인), 인승, OTIS, Wlqtnwjd, DA#, DA(, 올려옴, 내려감, DOOR, 패드, 기저귀, 침례탕약, 설치, 드라이기, 유사용, 상하부, 유도등, 단자함, 소화전, 다용도실, 밸브, (근생), 정화조, 피난기, 보관소, 속도, 탑승대기공간, 주거, 배수, 비상용, 탑승대기, ST(, 탱크, 실외기, 마감, 콘크리트, 행거, 클립바, 수조, 발전기실, 집수정, ASD, W.C, 세면대, ARM실, 옷장, 용수대, 자동문, 거울, 세탁기, 기기배치, 폐쇄, 장애인겸용, 데크, 비품고, 전기실, 충전소, 급속, 폐기품, 폐기물, 콤프레셔, 설비실, 경계선, 대지안, 벽부형, 산책로, 올라옴, 수거함, 배기, FSD, DORDI, 승강식, OH4700, 유모차보관, C1A, C2A, C3A, TC1, PW1000, AG1100, 노출되는, 자전거, 피난구, DA-, 재활용, 급기, 주문제작, BC-, 부속실, 보일러실, 세탁실, 승강장, 테라스, 청결물실, 수납, 보일러, 옷방, 파우더, 선큰가든, 발코니, 정원, 배선실, 병동도 포함한다."""
     name = norm_name(text)
     folded = name.upper()
     if include_callouts and any(token in folded for token in LABEL_ONLY_AREA_TOKENS):
@@ -771,6 +775,32 @@ def _gap_hits_column(horizontal: bool, axis: float, a: float, b: float, boxes) -
     return False
 
 
+def _gap_crosses_partition(
+    horizontal: bool,
+    axis: float,
+    gap0: float,
+    gap1: float,
+    cross_int: dict[float, list[tuple[float, float]]],
+) -> bool:
+    """문 틈을 가로지르는 직교 벽이 있으면 실간 격벽이다.
+
+    이웃 실 욕실 하벽처럼 2.4 m 안 틈을 이을 때, 그 사이에 세로(또는 가로)
+    실간 벽이 있으면 입구·복도까지 막아 버리므로 잇지 않는다.
+    """
+    lo, hi = (gap0, gap1) if gap0 <= gap1 else (gap1, gap0)
+    if hi - lo < 40.0:
+        return False
+    for cross_axis, intervals in cross_int.items():
+        if not (lo + 40.0 < cross_axis < hi - 40.0):
+            continue
+        for c0, c1 in _merge_intervals(list(intervals), JOIN_MM):
+            if c1 - c0 < 400.0:
+                continue
+            if c0 - 80.0 <= axis <= c1 + 80.0:
+                return True
+    return False
+
+
 def bridged_runs(segs, origin: tuple[float, float], pad: float, *, door: str = "close", boxes=None, open_doors=None):
     """원점 주변 세그만 모아 축별로 문 틈을 잇는다."""
     ox, oy = origin
@@ -803,12 +833,18 @@ def bridged_runs(segs, origin: tuple[float, float], pad: float, *, door: str = "
         v_int[x].append((min(s[1], s[3]), max(s[1], s[3])))
     def _finish(intervals, horizontal: bool, axis: float) -> list[list[float]]:
         merged = _merge_intervals(intervals, JOIN_MM)
+        cross = v_int if horizontal else h_int
+
+        def _allow_close(a: float, b: float, horizontal=horizontal, axis=axis) -> bool:
+            return not _gap_crosses_partition(horizontal, axis, a, b, cross)
+
         if open_doors:
             return _bridge(
                 merged,
                 DOOR_GAP_MM,
-                allow=lambda a, b, horizontal=horizontal, axis=axis: not _gap_is_open_door(
-                    horizontal, axis, a, b, open_doors
+                allow=lambda a, b, horizontal=horizontal, axis=axis: (
+                    not _gap_is_open_door(horizontal, axis, a, b, open_doors)
+                    and not _gap_crosses_partition(horizontal, axis, a, b, cross)
                 ),
             )
         if door == "open":
@@ -819,7 +855,7 @@ def bridged_runs(segs, origin: tuple[float, float], pad: float, *, door: str = "
                     horizontal, axis, a, b, boxes or []
                 ),
             )
-        return _bridge(merged, DOOR_GAP_MM)
+        return _bridge(merged, DOOR_GAP_MM, allow=_allow_close)
 
     h_final = {y: _finish(iv, True, y) for y, iv in h_int.items()}
     v_final = {x: _finish(iv, False, x) for x, iv in v_int.items()}
