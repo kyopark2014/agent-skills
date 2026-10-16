@@ -878,6 +878,181 @@ def demote_bed_ward_interiors(
     )
 
 
+def demote_hospital_beds(
+    msp,
+    *,
+    exclude_ids: set[int] | None = None,
+) -> set[int]:
+    """선분으로 그린 병원 침대 윤곽 demote(+BASE 승격 차단).
+
+    Vision이 놓친 침대용이다. 짧은 변(머리·발·프레임, 약 0.7–1.25 m)과
+    긴 변(약 1.4–2.4 m)이 WALL/BASE 어디에 있어도 직사각으로 잡는다.
+    베개는 왼쪽·오른쪽(또는 위·아래) 어느 쪽 머리에 있어도 된다. 짧은 변이
+    이중(20–100 mm)이거나 머리 쪽 안쪽에 베개 선이 있으면 침대로 본다.
+    침대 상자 안 짧은 선은 WALL뿐 아니라 BASE도 반환해 이후 승격되지 않게
+    한다. 긴 연속 벽은 건드리지 않는다.
+    """
+    exclude_ids = exclude_ids or set()
+
+    class _Seg:
+        __slots__ = ("entity", "ori", "coord", "a0", "a1", "length", "layer")
+
+        def __init__(self, entity, ori, coord, a0, a1, length, layer):
+            self.entity = entity
+            self.ori = ori
+            self.coord = coord
+            self.a0 = a0
+            self.a1 = a1
+            self.length = length
+            self.layer = layer
+
+    segs: list[_Seg] = []
+    for entity in _entities(msp):
+        if id(entity) in exclude_ids:
+            continue
+        layer = getattr(entity.dxf, "layer", None)
+        if layer not in (WALL_LAYER, BASE_LAYER):
+            continue
+        axis = _axis_line(entity)
+        if axis is None:
+            continue
+        ori, coord, a0, a1, length = axis
+        segs.append(_Seg(entity, ori, coord, a0, a1, length, layer))
+
+    def _overlap(a0: float, a1: float, b0: float, b1: float) -> float:
+        return max(0.0, min(a1, b1) - max(a0, b0))
+
+    beds: list[tuple[bool, float, float, float, float]] = []
+    # (vertical_short_sides, short0, short1, along0, along1)
+    for short_ori, long_ori in (("V", "H"), ("H", "V")):
+        # 머리·발·프레임. WALL이 먼저 지워진 뒤에도 BASE 잔여로 다시 잡는다.
+        ends = [
+            s
+            for s in segs
+            if s.ori == short_ori
+            and s.layer in (WALL_LAYER, BASE_LAYER)
+            and 700.0 <= s.length <= 1250.0
+        ]
+        pillows = [
+            s
+            for s in segs
+            if s.ori == short_ori
+            and s.layer in (WALL_LAYER, BASE_LAYER)
+            and 450.0 <= s.length < 800.0
+        ]
+        longs = [
+            s
+            for s in segs
+            if s.ori == long_ori
+            and s.layer in (WALL_LAYER, BASE_LAYER)
+            and 1400.0 <= s.length <= 2400.0
+        ]
+        if len(ends) < 2 or not longs:
+            continue
+        ends.sort(key=lambda s: s.coord)
+        used: set[int] = set()
+        for i, left in enumerate(ends):
+            if id(left.entity) in used:
+                continue
+            # 같은 침대에 후보가 여러 개면(발–베개 오인) 가장 긴 유효 쌍을 고른다.
+            best: tuple[float, object, float, float] | None = None
+            for right in ends[i + 1 :]:
+                if id(right.entity) in used:
+                    continue
+                span = right.coord - left.coord
+                if not (1400.0 <= span <= 2400.0):
+                    if span > 2400.0:
+                        break
+                    continue
+                ov = _overlap(left.a0, left.a1, right.a0, right.a1)
+                if ov < 0.55 * min(left.length, right.length):
+                    continue
+                along0 = max(left.a0, right.a0)
+                along1 = min(left.a1, right.a1)
+                if along1 - along0 < 400.0:
+                    continue
+                has_long = False
+                for long in longs:
+                    if (
+                        abs(long.coord - along0) > 160.0
+                        and abs(long.coord - along1) > 160.0
+                    ):
+                        continue
+                    if _overlap(long.a0, long.a1, left.coord, right.coord) < 1000.0:
+                        continue
+                    has_long = True
+                    break
+                if not has_long:
+                    continue
+                has_double = False
+                for other in ends:
+                    if other is left or other is right:
+                        continue
+                    for face in (left, right):
+                        gap = abs(other.coord - face.coord)
+                        if 20.0 <= gap <= 100.0 and _overlap(
+                            other.a0, other.a1, face.a0, face.a1
+                        ) >= 0.55 * min(other.length, face.length):
+                            has_double = True
+                            break
+                    if has_double:
+                        break
+                # 베개: 머리 쪽(왼쪽 또는 오른쪽) 안쪽. BASE 잔여도 인정.
+                has_pillow = False
+                for pillow in pillows:
+                    if not (left.coord + 15.0 < pillow.coord < right.coord - 15.0):
+                        continue
+                    near_left = pillow.coord - left.coord <= 550.0
+                    near_right = right.coord - pillow.coord <= 550.0
+                    if not (near_left or near_right):
+                        continue
+                    if _overlap(pillow.a0, pillow.a1, along0, along1) < 300.0:
+                        continue
+                    has_pillow = True
+                    break
+                if not (has_double or has_pillow):
+                    continue
+                if best is None or span > best[0]:
+                    best = (span, right, along0, along1)
+            if best is None:
+                continue
+            _span, right, along0, along1 = best
+            beds.append((short_ori == "V", left.coord, right.coord, along0, along1))
+            used.add(id(left.entity))
+            used.add(id(right.entity))
+
+    if not beds:
+        return set()
+
+    demote: set[int] = set()
+    for entity in _entities(msp):
+        if id(entity) in exclude_ids:
+            continue
+        layer = getattr(entity.dxf, "layer", None)
+        # WALL 삭제 + BASE 승격 차단(furn_ids 필터)에 같이 쓴다.
+        if layer not in (WALL_LAYER, BASE_LAYER):
+            continue
+        axis = _axis_line(entity)
+        if axis is None:
+            continue
+        ori, coord, a0, a1, length = axis
+        if length > 1400.0:
+            continue
+        mx = coord if ori == "V" else (a0 + a1) * 0.5
+        my = (a0 + a1) * 0.5 if ori == "V" else coord
+        for is_v_short, c0, c1, along0, along1 in beds:
+            pad = 120.0
+            if is_v_short:
+                if not (c0 - pad <= mx <= c1 + pad and along0 - pad <= my <= along1 + pad):
+                    continue
+            else:
+                if not (along0 - pad <= mx <= along1 + pad and c0 - pad <= my <= c1 + pad):
+                    continue
+            demote.add(id(entity))
+            break
+    return demote
+
+
 _SERVING_RE = re.compile(r"배식대")
 _OTHER_ROOM_RE = re.compile(r"(실|창고|홀|조리|주방|식당|코어|계단)")
 
@@ -3382,6 +3557,213 @@ def door_side_wall_ids(msp, bboxes: Iterable[Any]) -> set[int]:
         if long_parts and all(part in flank_segments for part in long_parts):
             kept.add(id(entity))
     return kept
+
+
+def _window_face_wall_ids(msp) -> set[int]:
+    """창문 면·창틀로 보이는 WALL/WINDOW.
+
+    Vision demote 상자가 창을 덮어도 창 면은 내리지 않는다.
+    이미 WINDOW 이거나 창 색인 WALL, 그리고 안쪽에 창짝/샛기둥이
+    있는 이중면(두께 40–220 mm, 겹침 ≥ 800 mm)을 남긴다.
+    """
+    kept: set[int] = set()
+    segs: list[dict[str, Any]] = []
+    for entity in _entities(msp):
+        layer = getattr(entity.dxf, "layer", None)
+        if layer == WINDOW_LAYER:
+            kept.add(id(entity))
+            continue
+        if layer not in (WALL_LAYER, BASE_LAYER):
+            continue
+        if layer == WALL_LAYER:
+            try:
+                color = int(getattr(entity.dxf, "color", 256) or 256)
+            except Exception:  # noqa: BLE001
+                color = 256
+            if color == WINDOW_COLOR:
+                kept.add(id(entity))
+        axis = _axis_line(entity)
+        if axis is None:
+            continue
+        ori, coord, a0, a1, length = axis
+        segs.append({
+            "entity": entity,
+            "layer": layer,
+            "ori": ori,
+            "coord": coord,
+            "a0": a0,
+            "a1": a1,
+            "length": length,
+        })
+
+    def _overlap(a0: float, a1: float, b0: float, b1: float) -> float:
+        return max(0.0, min(a1, b1) - max(a0, b0))
+
+    for index, face in enumerate(segs):
+        if face["layer"] != WALL_LAYER or face["length"] < 800.0:
+            continue
+        for other in segs[index + 1 :]:
+            if other["ori"] != face["ori"] or other["layer"] != WALL_LAYER:
+                continue
+            if other["length"] < 800.0:
+                continue
+            gap = abs(other["coord"] - face["coord"])
+            if not (40.0 <= gap <= 220.0):
+                continue
+            span = _overlap(face["a0"], face["a1"], other["a0"], other["a1"])
+            if span < 800.0:
+                continue
+            lo = min(face["coord"], other["coord"])
+            hi = max(face["coord"], other["coord"])
+            a0 = max(face["a0"], other["a0"])
+            a1 = min(face["a1"], other["a1"])
+            has_sash = False
+            for sash in segs:
+                if sash["ori"] != face["ori"]:
+                    continue
+                if not (lo + 5.0 < sash["coord"] < hi - 5.0):
+                    continue
+                if _overlap(sash["a0"], sash["a1"], a0, a1) < 400.0:
+                    continue
+                has_sash = True
+                break
+            if not has_sash:
+                continue
+            kept.add(id(face["entity"]))
+            kept.add(id(other["entity"]))
+    return kept
+
+
+def _line_square_column_boxes(
+    msp,
+) -> list[tuple[float, float, float, float, set[int]]]:
+    """선 네 개로 그린 정사각 기둥 — (cx, cy, w, h, edge_ids)."""
+    horizontal: list[tuple[float, float, float, Any]] = []
+    vertical: list[tuple[float, float, float, Any]] = []
+    for entity in _entities(msp):
+        if _dxftype(entity) != "LINE":
+            continue
+        if getattr(entity.dxf, "layer", None) not in (
+            WALL_LAYER, BASE_LAYER, COLUMN_LAYER,
+        ):
+            continue
+        parsed = _axis_line(entity)
+        if parsed is None:
+            continue
+        ori, coord, along0, along1, length = parsed
+        if not (450.0 <= length <= 1500.0):
+            continue
+        if ori == "H":
+            horizontal.append((coord, along0, along1, entity))
+        else:
+            vertical.append((coord, along0, along1, entity))
+    horizontal.sort(key=lambda item: item[0])
+    found: list[tuple[float, float, float, float, set[int]]] = []
+    for index, (y0, x0, x1, _bottom) in enumerate(horizontal):
+        width = x1 - x0
+        for y1, x2, x3, _top in horizontal[index + 1 :]:
+            height = y1 - y0
+            if height < 450.0:
+                continue
+            if height > 1500.0:
+                break
+            if abs(x0 - x2) > 25.0 or abs(x1 - x3) > 25.0:
+                continue
+            if abs(width - height) > max(width, height) * 0.22:
+                continue
+            left = [
+                ent for x, span0, span1, ent in vertical
+                if abs(span0 - y0) <= 30.0 and abs(span1 - y1) <= 30.0 and abs(x - x0) <= 30.0
+            ]
+            right = [
+                ent for x, span0, span1, ent in vertical
+                if abs(span0 - y0) <= 30.0 and abs(span1 - y1) <= 30.0 and abs(x - x1) <= 30.0
+            ]
+            if not left or not right:
+                continue
+            cx, cy = (x0 + x1) * 0.5, (y0 + y1) * 0.5
+            if any(abs(cx - ox) < 40.0 and abs(cy - oy) < 40.0 for ox, oy, _w, _h, _ in found):
+                continue
+            edge_ids: set[int] = {id(ent) for ent in left + right}
+            for coord, along0, along1, entity in horizontal:
+                on_edge = abs(coord - y0) <= 20.0 or abs(coord - y1) <= 20.0
+                if on_edge and along0 >= x0 - 30.0 and along1 <= x1 + 30.0:
+                    edge_ids.add(id(entity))
+            found.append((cx, cy, width, height, edge_ids))
+    return found
+
+
+def _column_abutting_wall_ids(
+    msp,
+    column_ids: set[int] | None = None,
+) -> set[int]:
+    """기둥 본체와, 기둥 모서리에 맞닿은 WALL.
+
+    침대 demote 상자가 기둥 옆 짧은 외벽을 덮어도 그 면은 남긴다.
+    H-Beam 닫힌 사각과 선 네 개 정사각을 모두 본다.
+    """
+    kept: set[int] = set(column_ids or ())
+    boxes: list[tuple[float, float, float, float]] = list(_hbeam_column_boxes(msp))
+    for entity in _entities(msp):
+        if getattr(entity.dxf, "layer", None) == COLUMN_LAYER:
+            kept.add(id(entity))
+    for cx, cy, w, h, edge_ids in _line_square_column_boxes(msp):
+        boxes.append((cx, cy, w, h))
+        kept |= edge_ids
+    if not boxes:
+        return kept
+
+    pad = 40.0
+
+    def _endpoints(entity) -> list[tuple[float, float]]:
+        kind = _dxftype(entity)
+        if kind == "LINE":
+            try:
+                return [
+                    (_lx0(entity), _ly0(entity)),
+                    (_lx1(entity), _ly1(entity)),
+                ]
+            except Exception:  # noqa: BLE001
+                return []
+        if kind == "LWPOLYLINE":
+            try:
+                return [(float(x), float(y)) for x, y in _poly_xy(entity)]
+            except Exception:  # noqa: BLE001
+                return []
+        return []
+
+    def _touches(px: float, py: float) -> bool:
+        for cx, cy, w, h in boxes:
+            x0 = cx - w * 0.5 - pad
+            y0 = cy - h * 0.5 - pad
+            x1 = cx + w * 0.5 + pad
+            y1 = cy + h * 0.5 + pad
+            if x0 <= px <= x1 and y0 <= py <= y1:
+                return True
+        return False
+
+    for entity in _entities(msp):
+        if id(entity) in kept:
+            continue
+        if getattr(entity.dxf, "layer", None) != WALL_LAYER:
+            continue
+        if any(_touches(px, py) for px, py in _endpoints(entity)):
+            kept.add(id(entity))
+    return kept
+
+
+def review_demote_keep_ids(
+    msp,
+    bboxes: Iterable[Any],
+    *,
+    column_ids: set[int] | None = None,
+) -> set[int]:
+    """Vision demote에서 빼 둘 엔티티: 문 양옆, 창문, 기둥·기둥 맞닿은 면."""
+    keep = door_side_wall_ids(msp, bboxes)
+    keep |= _window_face_wall_ids(msp)
+    cols = set(column_ids) if column_ids is not None else find_hbeam_column_entities(msp)
+    keep |= _column_abutting_wall_ids(msp, cols)
+    return keep
 
 
 def demote_in_bboxes(
@@ -6630,8 +7012,12 @@ def find_double_door_openings(
 ) -> list[tuple[bool, float, float, float]]:
     """양개 문. 스윙 ARC 중심 두 개가 벽 방향으로 약 2배 반지름만큼 떨어져 있다.
 
+    두 호가 서로를 향해 열려야 한다. 간호사실처럼 같은 방향으로 열린
+    외여닫이 두 개(위·아래)는 양개로 묶지 않는다.
+
     반환: (세로문인가, 벽 ortho, 개구 along0, along1). 문짝 구간이며 벽이 아니다.
     """
+    # (cx, cy, r, sa, ea)
     centers: list[list[float]] = []
     for e in _entities(msp):
         if _dxftype(e) != "ARC":
@@ -6639,7 +7025,8 @@ def find_double_door_openings(
         try:
             r = _ar(e)
             cx, cy = _acx(e), _acy(e)
-            sweep = (_aea(e) - _asa(e)) % 360.0
+            sa, ea = _asa(e), _aea(e)
+            sweep = (ea - sa) % 360.0
         except Exception:  # noqa: BLE001
             continue
         if not (650.0 <= r <= 1600.0) or not (20.0 <= sweep <= 200.0):
@@ -6648,7 +7035,21 @@ def find_double_door_openings(
             if math.hypot(cx - c[0], cy - c[1]) < 30.0:
                 break
         else:
-            centers.append([cx, cy, r])
+            centers.append([cx, cy, r, sa, ea])
+
+    def _wall_tip_along(cx: float, cy: float, r: float, sa: float, ea: float, is_v: bool) -> float | None:
+        best = None
+        best_d = 0.0
+        for ang in (sa, ea):
+            rad = math.radians(ang)
+            tx = cx + r * math.cos(rad)
+            ty = cy + r * math.sin(rad)
+            d = abs(ty - cy) if is_v else abs(tx - cx)
+            if d > best_d:
+                best_d = d
+                best = ty if is_v else tx
+        return best
+
     # 간격이 지름에 가장 가까운 쌍부터 묶는다.
     # 더 먼 이웃(옆 외여닫이)을 고르면 큰문 한가운데가 벽으로 남는다.
     cands: list[tuple[float, int, int]] = []
@@ -6664,6 +7065,22 @@ def find_double_door_openings(
             target = a[2] + b[2]
             if not (0.8 * target <= dist <= 1.2 * target):
                 continue
+            is_v = dx <= 40.0
+            tip_a = _wall_tip_along(a[0], a[1], a[2], a[3], a[4], is_v)
+            tip_b = _wall_tip_along(b[0], b[1], b[2], b[3], b[4], is_v)
+            if tip_a is None or tip_b is None:
+                continue
+            # 서로 마주보는 스윙만 양개. 같은 방향 적층 외여닫이는 제외.
+            if is_v:
+                lo_cy, lo_tip, lo_r = (a[1], tip_a, a[2]) if a[1] <= b[1] else (b[1], tip_b, b[2])
+                hi_cy, hi_tip, hi_r = (b[1], tip_b, b[2]) if a[1] <= b[1] else (a[1], tip_a, a[2])
+                if not (lo_tip > lo_cy + 0.4 * lo_r and hi_tip < hi_cy - 0.4 * hi_r):
+                    continue
+            else:
+                lo_cx, lo_tip, lo_r = (a[0], tip_a, a[2]) if a[0] <= b[0] else (b[0], tip_b, b[2])
+                hi_cx, hi_tip, hi_r = (b[0], tip_b, b[2]) if a[0] <= b[0] else (a[0], tip_a, a[2])
+                if not (lo_tip > lo_cx + 0.4 * lo_r and hi_tip < hi_cx - 0.4 * hi_r):
+                    continue
             cands.append((abs(dist - target), i, j))
     cands.sort()
     used = [False] * len(centers)
@@ -6770,10 +7187,14 @@ def find_single_door_openings(
         min_len: float,
         max_len: float | None = None,
         end_only: bool = False,
+        use_jamb: bool = False,
     ) -> tuple[float, float, float, float, float] | None:
         """(거리, 벽 ortho, along0, along1, 길이)."""
         best: tuple[float, float, float, float, float] | None = None
-        pool = long_h if horizontal else long_v
+        if use_jamb:
+            pool = jamb_h if horizontal else jamb_v
+        else:
+            pool = long_h if horizontal else long_v
         for oo, a0, a1, length in pool:
             if length < min_len or (max_len is not None and length >= max_len):
                 continue
@@ -6950,9 +7371,82 @@ def find_single_door_openings(
                 along, perp = _saved_along, _saved_perp
         if chosen is None and long is not None:
             horizontal, hit = long
+            _dist, host, host_a0, host_a1, _host_len = hit
+            # 힌지에서 280 mm 안 긴 가로선이 열린 문짝·옆면이면 호스트로 쓰지 않는다.
+            # 벽 방향 끝이 그 긴 면 위에 있을 때만 연다.
+            _saved_along, _saved_perp = along, perp
             if not horizontal:
                 along, perp = perp, along
-            chosen = (horizontal, hit[1])
+            if horizontal:
+                tip_on = (
+                    abs(along[1] - host) <= 80.0
+                    and host_a0 - 50.0 <= along[0] <= host_a1 + 50.0
+                )
+            else:
+                tip_on = (
+                    abs(along[0] - host) <= 80.0
+                    and host_a0 - 50.0 <= along[1] <= host_a1 + 50.0
+                )
+            if tip_on and _dist <= 200.0:
+                chosen = (horizontal, host)
+            else:
+                along, perp = _saved_along, _saved_perp
+        # 간호사실처럼 문 높이(~0.9 m)만큼만 남은 짧은 면이 호스트인 경우.
+        # long/short(≥1.4 m)에 없으면 jamb(≥0.65 m)에서 개구를 찾는다.
+        # 열린 문짝(스윙 가로/세로 끝)은 호스트로 쓰지 않고, 벽 방향 면을 우선한다.
+        if chosen is None:
+            jamb_h_hit = _nearest_wall(
+                cx, cy, True, min_len=650.0, max_len=1400.0, use_jamb=True
+            )
+            jamb_v_hit = _nearest_wall(
+                cx, cy, False, min_len=650.0, max_len=1400.0, use_jamb=True
+            )
+            # perp=세로 끝 → 세로벽 문, along=가로 끝 → 가로벽 문 후보.
+            # 거리가 같아도 열린 문짝(힌지 높이의 가로선 등)보다 벽면을 고른다.
+            jamb_order: list[tuple[bool, tuple[float, float, float, float, float]]] = []
+            if abs(perp[1] - cy) >= 0.7 * r and jamb_v_hit is not None:
+                jamb_order.append((False, jamb_v_hit))
+            if abs(along[0] - cx) >= 0.7 * r and jamb_h_hit is not None:
+                jamb_order.append((True, jamb_h_hit))
+            if not jamb_order:
+                jamb = _pick(jamb_h_hit, jamb_v_hit)
+                if jamb is not None:
+                    jamb_order.append(jamb)
+            for horizontal, hit in jamb_order:
+                _saved_along, _saved_perp = along, perp
+                try_along, try_perp = along, perp
+                if not horizontal:
+                    try_along, try_perp = perp, along
+                if horizontal:
+                    open0, open1 = min(cx, try_along[0]), max(cx, try_along[0])
+                else:
+                    open0, open1 = min(cy, try_along[1]), max(cy, try_along[1])
+                _dist, host, host_a0, host_a1, _host_len = hit
+                # 열린 문짝: 세로벽 문에서 힌지 높이의 가로선은 호스트가 아니다.
+                if horizontal and abs(host - cy) <= 40.0 and abs(along[1] - cy) <= 0.45 * r:
+                    along, perp = _saved_along, _saved_perp
+                    continue
+                overlap = min(open1, host_a1) - max(open0, host_a0)
+                contained = (
+                    overlap >= max(500.0, 0.65 * (open1 - open0))
+                    and (open1 - open0) >= 650.0
+                    and hit[0] <= 80.0
+                )
+                has_mate = False
+                pool = jamb_h if horizontal else jamb_v
+                for oo, a0, a1, length in pool:
+                    gap = abs(oo - host)
+                    if not (80.0 <= gap <= 250.0) or length < 650.0:
+                        continue
+                    if min(a1, host_a1) - max(a0, host_a0) < 0.7 * min(length, host_a1 - host_a0):
+                        continue
+                    has_mate = True
+                    break
+                if contained and has_mate:
+                    along, perp = try_along, try_perp
+                    chosen = (horizontal, host)
+                    break
+                along, perp = _saved_along, _saved_perp
         if chosen is None:
             # 힌지 면이 짧아 호스트가 없다. 문 양쪽에서 끊긴 벽면이 있으면 그 면이 개구다.
             # 창고#1 위쪽 1100처럼 양옆만 벽이고 문짝은 아니다.
@@ -23640,6 +24134,7 @@ def apply_corrections(
         furn_ids = demote_fitness_equipment(msp, segs, exclude_ids=hbeam_ids)
         furn_ids |= demote_meeting_room_interiors(msp, segs, exclude_ids=hbeam_ids)
         furn_ids |= demote_bed_ward_interiors(msp, segs, exclude_ids=hbeam_ids)
+        furn_ids |= demote_hospital_beds(msp, exclude_ids=hbeam_ids)
         furn_ids |= demote_landscape_walls(msp, segs, exclude_ids=hbeam_ids)
         furn_ids |= demote_serving_counter_walls(msp, segs, exclude_ids=hbeam_ids)
         promote = [s for s in promote if id(s.entity) not in furn_ids]
@@ -23676,6 +24171,7 @@ def apply_corrections(
         fitness_demote = demote_fitness_equipment(msp, segs, exclude_ids=hbeam_ids)
         fitness_demote |= demote_meeting_room_interiors(msp, segs, exclude_ids=hbeam_ids)
         fitness_demote |= demote_bed_ward_interiors(msp, segs, exclude_ids=hbeam_ids)
+        fitness_demote |= demote_hospital_beds(msp, exclude_ids=hbeam_ids)
         fitness_demote |= demote_serving_counter_walls(msp, segs, exclude_ids=hbeam_ids)
         landscape_demote = demote_landscape_walls(msp, segs, exclude_ids=hbeam_ids)
         demote_ids |= furniture_box_demote
@@ -23684,10 +24180,13 @@ def apply_corrections(
     # review demote 는 protect 차감 대상이 아니다.
     # 과대 bbox 는 normalize_bbox_list 에서 이미 skip 되므로,
     # 남은 박스는 Vision 명시 판정 → 복도·계단·엘리베이터·H-Beam protect 보다 우선.
-    review_demote = demote_in_bboxes(msp, review.get("demote_bboxes") or [])
-    # 문짝 상자가 양옆 벽까지 덮어도 그 벽은 문으로 내리지 않는다.
-    door_sides = door_side_wall_ids(msp, review.get("demote_bboxes") or [])
-    review_demote -= door_sides
+    # 다만 문 양옆·창문·기둥(및 기둥 맞닿은 면)은 항상 남긴다.
+    review_boxes = review.get("demote_bboxes") or []
+    review_demote = demote_in_bboxes(msp, review_boxes)
+    door_sides = door_side_wall_ids(msp, review_boxes)
+    review_demote -= review_demote_keep_ids(
+        msp, review_boxes, column_ids=hbeam_ids
+    )
     n_door_side = 0
     for entity in _entities(msp):
         if id(entity) in door_sides and _paint_layer(entity, WALL_LAYER, WALL_COLOR):
@@ -23790,6 +24289,7 @@ def apply_corrections(
         post_furn |= demote_fitness_equipment(msp, segs_after, exclude_ids=hbeam_ids)
         post_furn |= demote_meeting_room_interiors(msp, segs_after, exclude_ids=hbeam_ids)
         post_furn |= demote_bed_ward_interiors(msp, segs_after, exclude_ids=hbeam_ids)
+        post_furn |= demote_hospital_beds(msp, exclude_ids=hbeam_ids)
         post_furn |= demote_serving_counter_walls(msp, segs_after, exclude_ids=hbeam_ids)
         post_furn |= demote_landscape_walls(msp, segs_after, exclude_ids=hbeam_ids)
         for e in _entities(msp):
@@ -24076,6 +24576,14 @@ def apply_corrections(
     n_promoted += promote_slanted_double_walls(msp)
     # 앞선 문 처리가 가로·세로가 아닌 양개문은 닫지 않는다. 마지막에 힌지 사이를 잇는다.
     n_promoted += add_paired_swing_walls(msp)
+
+    # 후반 promote_* 가 다시 올린 병원 침대 잔여 WALL도 제거한다.
+    if do_box_demote:
+        final_beds = demote_hospital_beds(msp, exclude_ids=hbeam_ids)
+        for e in _entities(msp):
+            if e.dxf.layer == WALL_LAYER and id(e) in final_beds:
+                msp.delete_entity(e)
+                n_demoted += 1
 
     # 후반 promote_* 가 다시 올린 축 격자도 BASE로 되돌린다.
     segs_final = iter_axis_segs(msp, min_len_mm=70.0)

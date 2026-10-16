@@ -1,4 +1,4 @@
-"""라벨이 1 m² 이하 작은 칸에 있으면 씨앗을 옮겨 넓은 실을 잡는지 확인한다."""
+"""라벨이 2 m² 이하 작은 칸에 있으면 씨앗을 옮겨 넓은 실을 잡는지 확인한다."""
 
 from __future__ import annotations
 
@@ -38,7 +38,7 @@ class NudgeTinySeedTest(unittest.TestCase):
         self.assertIsNone(tiny_reason)
         self.assertIsNotNone(tiny)
         assert tiny is not None
-        self.assertLessEqual(tiny["area_m2"], 1.0)
+        self.assertLessEqual(tiny["area_m2"], labels.MIN_LABEL_AREA_M2)
 
         found, reason, seed_x, seed_y = labels.detect_one_with_nudge(
             msp, boxes, segs, 400.0, 400.0
@@ -46,9 +46,43 @@ class NudgeTinySeedTest(unittest.TestCase):
         self.assertIsNone(reason)
         self.assertIsNotNone(found)
         assert found is not None
-        self.assertGreater(found["area_m2"], 1.0)
+        self.assertGreater(found["area_m2"], labels.MIN_LABEL_AREA_M2)
         self.assertGreater(seed_x, 400.0)
         self.assertAlmostEqual(seed_y, 400.0)
+
+    def test_one_point_five_m2_pocket_also_nudges(self):
+        """1–2 m² 사이 주머니도 상하좌우로 옮긴다."""
+        doc = ezdxf.new()
+        msp = doc.modelspace()
+        # 1.2 m × 1.2 m = 1.44 m² 칸 + 오른쪽 큰 실.
+        _wall_room(msp, [(0.0, 0.0), (1200.0, 0.0), (1200.0, 1200.0), (0.0, 1200.0)])
+        _wall_room(
+            msp,
+            [
+                (1200.0, 0.0),
+                (11200.0, 0.0),
+                (11200.0, 8000.0),
+                (1200.0, 8000.0),
+            ],
+        )
+        boxes = labels.room.column_boxes(msp)
+        segs = labels.room.wall_segments(msp, boxes)
+
+        tiny, tiny_reason = labels.detect_one(msp, boxes, segs, 600.0, 600.0)
+        self.assertIsNone(tiny_reason)
+        self.assertIsNotNone(tiny)
+        assert tiny is not None
+        self.assertGreater(tiny["area_m2"], 1.0)
+        self.assertLessEqual(tiny["area_m2"], labels.MIN_LABEL_AREA_M2)
+
+        found, reason, seed_x, seed_y = labels.detect_one_with_nudge(
+            msp, boxes, segs, 600.0, 600.0
+        )
+        self.assertIsNone(reason)
+        self.assertIsNotNone(found)
+        assert found is not None
+        self.assertGreater(found["area_m2"], labels.MIN_LABEL_AREA_M2)
+        self.assertGreater(seed_x, 600.0)
 
     def test_large_room_seed_is_not_moved(self):
         doc = ezdxf.new()
@@ -70,7 +104,7 @@ class NudgeTinySeedTest(unittest.TestCase):
         self.assertIsNone(reason)
         self.assertIsNotNone(found)
         assert found is not None
-        self.assertGreater(found["area_m2"], 1.0)
+        self.assertGreater(found["area_m2"], labels.MIN_LABEL_AREA_M2)
         self.assertEqual((seed_x, seed_y), (4000.0, 4000.0))
 
 

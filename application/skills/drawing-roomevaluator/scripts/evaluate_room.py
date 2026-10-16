@@ -195,11 +195,17 @@ LABEL_ONLY_AREA_TOKENS = (
     "세탁실",
     "승강장",
     "테라스",
+    "청결물실",
+    "수납",
+    "보일러",
+    "옷방",
+    "파우더",
+    "선큰가든",
 )
 
 
 def is_excluded_area_label(text: str, *, include_callouts: bool = True) -> bool:
-    """면적과 실 라벨에서 빼는 이름. 방풍실, 보관실, 퇴식대, 샤워실, 고압, 저압, 계단실, 복도, 승강기, EPS, OPEN, 홀-, 홈-, 입구, 출구, 양치공간, 청소도구함, 청소도구실, 실외기실, 오픈, 조경, 배경, 평면도, 비품고을, 항습기, 화물, 휠체어, 린넨실, 오물처리실, (장애인, 구급자, 응급환자, 의료가스실, 기계실, (여), (남), 문서고, 기울기, 자동방화, 인), 인승, OTIS, Wlqtnwjd, DA#, DA(, 올려옴, 내려감, DOOR, 패드, 기저귀, 침례탕약, 설치, 드라이기, 유사용, 상하부, 분전함, 세척실, 탕비실, 물품, 스트레쳐, E.V, ELEV. ELEV. HALL과 ELEV. 홀도 포함한다. (여), (남), 문서고, 기울기, 자동방화, 인), 인승, OTIS, Wlqtnwjd, DA#, DA(, 올려옴, 내려감, DOOR, 패드, 기저귀, 침례탕약, 설치, 드라이기, 유사용, 상하부, 유도등, 단자함, 소화전, 다용도실, 밸브, (근생), 정화조, 피난기, 보관소, 속도, 탑승대기공간, 주거, 배수, 비상용, 탑승대기, ST(, 탱크, 실외기, 마감, 콘크리트, 행거, 클립바, 수조, 발전기실, 집수정, ASD, W.C, 세면대, ARM실, 옷장, 용수대, 자동문, 거울, 세탁기, 기기배치, 폐쇄, 장애인겸용, 데크, 비품고, 전기실, 충전소, 급속, 폐기품, 폐기물, 콤프레셔, 설비실, 경계선, 대지안, 벽부형, 산책로, 올라옴, 수거함, 배기, FSD, DORDI, 승강식, OH4700, 유모차보관, C1A, C2A, C3A, TC1, PW1000, AG1100, 노출되는, 자전거, 피난구, DA-, 재활용, 급기, 주문제작, BC-, 부속실, 보일러실, 세탁실, 승강장, 테라스도 포함한다."""
+    """면적과 실 라벨에서 빼는 이름. 방풍실, 보관실, 퇴식대, 샤워실, 고압, 저압, 계단실, 복도, 승강기, EPS, OPEN, 홀-, 홈-, 입구, 출구, 양치공간, 청소도구함, 청소도구실, 실외기실, 오픈, 조경, 배경, 평면도, 비품고을, 항습기, 화물, 휠체어, 린넨실, 오물처리실, (장애인, 구급자, 응급환자, 의료가스실, 기계실, (여), (남), 문서고, 기울기, 자동방화, 인), 인승, OTIS, Wlqtnwjd, DA#, DA(, 올려옴, 내려감, DOOR, 패드, 기저귀, 침례탕약, 설치, 드라이기, 유사용, 상하부, 분전함, 세척실, 탕비실, 물품, 스트레쳐, E.V, ELEV. ELEV. HALL과 ELEV. 홀도 포함한다. (여), (남), 문서고, 기울기, 자동방화, 인), 인승, OTIS, Wlqtnwjd, DA#, DA(, 올려옴, 내려감, DOOR, 패드, 기저귀, 침례탕약, 설치, 드라이기, 유사용, 상하부, 유도등, 단자함, 소화전, 다용도실, 밸브, (근생), 정화조, 피난기, 보관소, 속도, 탑승대기공간, 주거, 배수, 비상용, 탑승대기, ST(, 탱크, 실외기, 마감, 콘크리트, 행거, 클립바, 수조, 발전기실, 집수정, ASD, W.C, 세면대, ARM실, 옷장, 용수대, 자동문, 거울, 세탁기, 기기배치, 폐쇄, 장애인겸용, 데크, 비품고, 전기실, 충전소, 급속, 폐기품, 폐기물, 콤프레셔, 설비실, 경계선, 대지안, 벽부형, 산책로, 올라옴, 수거함, 배기, FSD, DORDI, 승강식, OH4700, 유모차보관, C1A, C2A, C3A, TC1, PW1000, AG1100, 노출되는, 자전거, 피난구, DA-, 재활용, 급기, 주문제작, BC-, 부속실, 보일러실, 세탁실, 승강장, 테라스, 청결물실, 수납, 보일러, 옷방, 파우더, 선큰가든도 포함한다."""
     name = norm_name(text)
     folded = name.upper()
     if include_callouts and any(token in folded for token in LABEL_ONLY_AREA_TOKENS):
@@ -284,33 +290,6 @@ def is_equipment_label(text: str) -> bool:
     )
 
 
-def vision_bathroom_boxes(dxf_path: Path) -> list[tuple[float, float, float, float]]:
-    """같은 층 llm_review/review.json 에서 비전이 화장실로 둔 상자.
-
-    좌표는 도면 mm. 글자가 화장실이 아니어도 이 안의 라벨은 면적에서 뺀다.
-    """
-    path = Path(dxf_path).parent / "llm_review" / "review.json"
-    if not path.is_file():
-        return []
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return []
-    boxes: list[tuple[float, float, float, float]] = []
-    for item in data.get("promote_bboxes") or []:
-        if not isinstance(item, dict):
-            continue
-        if "화장실" not in norm_name(str(item.get("label") or "")):
-            continue
-        try:
-            x0, y0 = float(item["xmin"]), float(item["ymin"])
-            x1, y1 = float(item["xmax"]), float(item["ymax"])
-        except (KeyError, TypeError, ValueError):
-            continue
-        boxes.append((min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1)))
-    return boxes
-
-
 WALL_PERIMETER_MIN = 0.90
 WALL_COVER_MM = 250.0
 SEED_REACH_MM = 25000.0
@@ -376,14 +355,6 @@ def wall_perimeter_ratio(segs, pts) -> float:
         if not hit.is_empty:
             covered += min(hit.length, edge.length)
     return covered / total
-
-
-def in_vision_bathroom(x: float, y: float, boxes) -> bool:
-    """라벨 점이 비전 화장실 상자 안에 있으면 면적 대상이 아니다."""
-    for x0, y0, x1, y1 in boxes:
-        if x0 <= x <= x1 and y0 <= y <= y1:
-            return True
-    return False
 
 
 def is_room_label(text: str) -> bool:
@@ -3037,8 +3008,6 @@ def evaluate(
     doc = ezdxf.readfile(str(dxf_path))
     msp = doc.modelspace()
     lx, ly, label = find_room_label(msp, room, at)
-    if in_vision_bathroom(lx, ly, vision_bathroom_boxes(dxf_path)):
-        raise SystemExit("비전 화장실 영역이라 면적에서 제외합니다.")
     boxes = column_boxes(msp)
     closed_segs = wall_segments(msp, boxes)
     face, x_axes, y_axes, swings = _room_lines(msp, closed_segs, (lx, ly), boxes, [])

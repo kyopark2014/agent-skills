@@ -123,13 +123,13 @@ def apply_corrections(doc: Drawing, *, review=None, ...) -> dict:
 지울 `WALL` 엔티티 id 집합입니다.
 
 - 짧은 벽 (`do_short_demote`, 기본값 False)
-- 닫힌 가구 박스, 운동기구, 회의실 내부, 조경 (`do_box_demote`)
+- 닫힌 가구 박스, 운동기구, 회의실 내부, 병원 침대(선분 윤곽), 조경 (`do_box_demote`)
 - 오픈홀 중앙, 엘리베이터 문·후면, 픽토그램
 
 우선순위:
 
 - 보호 집합과 겹치면 보호가 이깁니다 (`demote_ids -= protect_ids`).
-- Vision `review["demote_bboxes"]`는 보호보다 우선합니다. 중심이 상자 안인 `WALL`만 지웁니다. 한 변 25 m 초과 또는 면적 200 m² 초과 bbox는 `normalize_bbox_list`에서 이미 버립니다.
+- Vision `review["demote_bboxes"]`는 보호보다 우선합니다. 중심이 상자 안인 `WALL`만 지웁니다. 다만 문 양옆·창문·기둥(및 기둥 맞닿은 면)은 상자 안이어도 남깁니다. 한 변 25 m 초과 또는 면적 200 m² 초과 bbox는 `normalize_bbox_list`에서 이미 버립니다.
 - 오픈홀 중앙, 픽토그램, 엘리베이터 문·후면, 가구·운동기구·조경도 보호보다 우선합니다.
 
 ### 4. 모델스페이스에 반영
