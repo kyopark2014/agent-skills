@@ -6934,7 +6934,17 @@ def find_single_door_openings(
                         continue
                     other = True
                     break
+            # 병실 화장실처럼 1.4–2.5 m 칸막이 한가운데(또는 끝)에 문이 있으면
+            # 개구가 호스트에 들어 있다. 양옆 평행 이중선은 correct_walls_around_doors 가 올린다.
+            overlap = min(open1, host_a1) - max(open0, host_a0)
+            contained = (
+                overlap >= max(500.0, 0.65 * (open1 - open0))
+                and (open1 - open0) >= 650.0
+                and hit[0] <= 80.0
+            )
             if gap_ok and other:
+                chosen = (horizontal, host)
+            elif contained:
                 chosen = (horizontal, host)
             else:
                 along, perp = _saved_along, _saved_perp
