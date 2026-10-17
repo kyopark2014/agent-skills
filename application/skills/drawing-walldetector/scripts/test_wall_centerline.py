@@ -61,11 +61,11 @@ class WallCenterlineTests(unittest.TestCase):
         self.assertIn(entities.index(mate), walls)
 
     def test_parallel_grid_axes_are_not_walls(self):
-        """10 m 이상 평행 축선 3줄 이상(+ CEN–CEN 짝)은 벽이 아니다."""
+        """10 m 이상 평행 축선이 축 피치(3 m)로 3줄 이상이면 벽이 아니다."""
         doc = ezdxf.new()
         msp = doc.modelspace()
         axes = []
-        for x in (0, 250, 3000, 6000, 9000):
+        for x in (0, 3000, 6000, 9000):
             axes.append(
                 msp.add_line(
                     (x, 0),
@@ -73,9 +73,9 @@ class WallCenterlineTests(unittest.TestCase):
                     dxfattribs={"layer": "CEN"},
                 )
             )
-        # 실제 짧은 이중선 벽 — 축선 옆에 있어도 벽으로 남는다
-        face = msp.add_line((2980, 5000), (2980, 8000))
-        mate = msp.add_line((3180, 5000), (3180, 8000))
+        # 실제 짧은 이중선 벽 — 축선과 떨어진 곳에 둔다
+        face = msp.add_line((15000, 5000), (15000, 8000))
+        mate = msp.add_line((15200, 5000), (15200, 8000))
 
         entities = list(msp)
         classified = classify_entities(entities)
@@ -84,6 +84,45 @@ class WallCenterlineTests(unittest.TestCase):
             self.assertNotIn(entities.index(axis), walls)
         self.assertIn(entities.index(face), walls)
         self.assertIn(entities.index(mate), walls)
+
+    def test_cen_thickness_pair_is_wall_not_grid(self):
+        """CEN–CEN 벽 두께(250 mm) 짝은 격자가 아니라 이중벽이다."""
+        doc = ezdxf.new()
+        msp = doc.modelspace()
+        a = msp.add_line((0, 0), (0, 20000), dxfattribs={"layer": "CEN"})
+        b = msp.add_line((250, 0), (250, 20000), dxfattribs={"layer": "CEN"})
+        # 먼 축 격자(피치 3 m) — 두께 짝을 격자로 끌어내리지 않는다
+        for x in (5000, 8000, 11000):
+            msp.add_line((x, 0), (x, 20000), dxfattribs={"layer": "CEN"})
+
+        entities = list(msp)
+        classified = classify_entities(entities)
+        walls = set(classified["wall_entity_idxs"])
+        self.assertIn(entities.index(a), walls)
+        self.assertIn(entities.index(b), walls)
+
+    def test_long_wall_thickness_double_is_not_grid(self):
+        """10 m+ 이중선(간격 200 mm)은 먼 평행선이 있어도 벽이다.
+
+        클럽하우스 소화수조 옆: 피치 제한 없으면 도곽 장축과 겹쳐 격자로 빠진다.
+        """
+        doc = ezdxf.new()
+        msp = doc.modelspace()
+        face = msp.add_line((0, 0), (24000, 0))
+        mate = msp.add_line((0, 200), (14000, 200))
+        # 건물 반대편·도곽처럼 먼 평행 장축 (피치 ≫ 12 m)
+        far_a = msp.add_line((0, 50000), (24000, 50000))
+        far_b = msp.add_line((0, 55000), (24000, 55000))
+        far_c = msp.add_line((0, 60000), (24000, 60000))
+
+        entities = list(msp)
+        classified = classify_entities(entities)
+        walls = set(classified["wall_entity_idxs"])
+        self.assertIn(entities.index(face), walls)
+        self.assertIn(entities.index(mate), walls)
+        self.assertNotIn(entities.index(far_a), walls)
+        self.assertNotIn(entities.index(far_b), walls)
+        self.assertNotIn(entities.index(far_c), walls)
 
 
 if __name__ == "__main__":

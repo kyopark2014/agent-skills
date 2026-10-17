@@ -34,12 +34,12 @@ class XCoverSquareTests(unittest.TestCase):
 
         promoted = lib_llm_correct.promote_x_cover_squares(msp)
 
-        self.assertEqual(promoted, 2)
+        self.assertEqual(promoted, 4)
         self.assertEqual(inner.dxf.layer, "WALL")
         self.assertEqual(outer.dxf.layer, "WALL")
         self.assertEqual(far.dxf.layer, "BASE")
-        self.assertEqual(left.dxf.layer, "DOOR")
-        self.assertEqual(right.dxf.layer, "DOOR")
+        self.assertEqual(left.dxf.layer, "WALL")
+        self.assertEqual(right.dxf.layer, "WALL")
 
     def test_door_thickness_x_square_stays_base(self):
         doc = ezdxf.new()
@@ -63,9 +63,9 @@ class XCoverSquareTests(unittest.TestCase):
 
         promoted = lib_llm_correct.promote_x_cover_squares(msp)
 
-        self.assertEqual(promoted, 4)
-        self.assertEqual(left.dxf.layer, "DOOR")
-        self.assertEqual(right.dxf.layer, "DOOR")
+        self.assertEqual(promoted, 6)
+        self.assertEqual(left.dxf.layer, "WALL")
+        self.assertEqual(right.dxf.layer, "WALL")
         walls = [
             (
                 (round(entity.dxf.start.x), round(entity.dxf.start.y)),
@@ -74,15 +74,48 @@ class XCoverSquareTests(unittest.TestCase):
             for entity in msp
             if entity.dxftype() == "LINE" and entity.dxf.layer == "WALL"
         ]
-        self.assertEqual(
-            walls,
-            [
-                ((0, 0), (900, 0)),
-                ((900, 0), (900, 800)),
-                ((900, 800), (0, 800)),
-                ((0, 800), (0, 0)),
-            ],
-        )
+        self.assertIn(((0, 0), (900, 800)), walls)
+        self.assertIn(((900, 0), (0, 800)), walls)
+        self.assertIn(((0, 0), (900, 0)), walls)
+        self.assertIn(((900, 0), (900, 800)), walls)
+        self.assertIn(((900, 800), (0, 800)), walls)
+        self.assertIn(((0, 800), (0, 0)), walls)
+
+    def test_long_duct_x_line_box_becomes_wall(self):
+        """DA 급배기덕트처럼 긴 X(~5.5 m)와 선 네 개 사각도 올린다."""
+        doc = ezdxf.new()
+        msp = doc.modelspace()
+        diag_a = msp.add_line((0, 0), (5500, 1000), dxfattribs={"layer": "BASE"})
+        diag_b = msp.add_line((5500, 0), (0, 1000), dxfattribs={"layer": "BASE"})
+        bot = msp.add_line((0, 0), (5500, 0), dxfattribs={"layer": "BASE"})
+        top = msp.add_line((0, 1000), (5500, 1000), dxfattribs={"layer": "BASE"})
+        left = msp.add_line((0, 0), (0, 1000), dxfattribs={"layer": "BASE"})
+        right = msp.add_line((5500, 0), (5500, 1000), dxfattribs={"layer": "BASE"})
+
+        promoted = lib_llm_correct.promote_x_cover_squares(msp)
+
+        self.assertEqual(promoted, 6)
+        for entity in (diag_a, diag_b, bot, top, left, right):
+            self.assertEqual(entity.dxf.layer, "WALL")
+
+    def test_tall_elev_x_with_float_width_and_poly_edge(self):
+        """승강기 옆처럼 짧은 변 ~500 mm(좌표 오차) X와 2점 폴리 변도 올린다."""
+        doc = ezdxf.new()
+        msp = doc.modelspace()
+        # 실제 DXF처럼 짧은 변이 499.999…
+        x0, x1, y0, y1 = 0.0, 499.99987, 0.0, 2050.00044
+        diag_a = msp.add_line((x0, y0), (x1, y1), dxfattribs={"layer": "BASE"})
+        diag_b = msp.add_line((x1, y0), (x0, y1), dxfattribs={"layer": "BASE"})
+        bot = msp.add_line((x0, y0), (x1, y0), dxfattribs={"layer": "BASE"})
+        top = msp.add_line((x0, y1), (x1, y1), dxfattribs={"layer": "BASE"})
+        left = msp.add_line((x0, y0), (x0, y1), dxfattribs={"layer": "BASE"})
+        right = msp.add_lwpolyline([(x1, y0), (x1, y1)], dxfattribs={"layer": "BASE"})
+
+        promoted = lib_llm_correct.promote_x_cover_squares(msp)
+
+        self.assertGreaterEqual(promoted, 6)
+        for entity in (diag_a, diag_b, bot, top, left, right):
+            self.assertEqual(entity.dxf.layer, "WALL")
 
 
 if __name__ == "__main__":

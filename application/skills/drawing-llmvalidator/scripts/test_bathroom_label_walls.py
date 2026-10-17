@@ -88,6 +88,29 @@ class BathroomLabelWallTests(unittest.TestCase):
         self.assertEqual(wall.dxf.layer, "BASE")
         self.assertEqual(mate.dxf.layer, "BASE")
 
+    def test_wc_label_promotes_like_bathroom(self):
+        doc = ezdxf.new()
+        msp = doc.modelspace()
+        msp.add_text("WC(여)", dxfattribs={"insert": (1500.0, 1200.0), "height": 200.0})
+        left = _pair(msp, 200, 200, 200, 2400, 150)
+        bottom = _pair(msp, 200, 200, 2800, 200, 150)
+        top = _pair(msp, 200, 2400, 2800, 2400, 150)
+        right = _pair(msp, 3000, 200, 3200, 2400, 150)
+
+        promoted = lib_llm_correct.promote_bathroom_label_walls(msp)
+
+        self.assertGreaterEqual(promoted, 8)
+        for line in left + bottom + top + right:
+            self.assertEqual(line.dxf.layer, "WALL")
+
+    def test_bathroom_tokens_loaded_from_json(self):
+        self.assertIn("bathroom", lib_llm_correct.LABEL_TOKENS)
+        self.assertIn("화장실", lib_llm_correct.BATHROOM_LABEL_TOKENS)
+        self.assertIn("WC", lib_llm_correct.BATHROOM_LABEL_TOKENS)
+        self.assertTrue(lib_llm_correct._is_bathroom_label("WC(남)"))
+        self.assertTrue(lib_llm_correct._is_bathroom_label("W.C."))
+        self.assertFalse(lib_llm_correct._is_bathroom_label("창고"))
+
 
 if __name__ == "__main__":
     unittest.main()

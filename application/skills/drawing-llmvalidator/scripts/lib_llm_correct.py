@@ -27,6 +27,71 @@ DOOR_COLOR = 3
 WINDOW_COLOR = 4
 COLUMN_COLOR = 5
 
+_LABEL_TOKENS_PATH = Path(__file__).resolve().parent / "label_tokens.json"
+
+
+def _load_label_token_group(raw: dict, key: str, *, path: Path) -> tuple[str, ...]:
+    tokens = raw.get(key)
+    if not isinstance(tokens, list) or not tokens or not all(isinstance(t, str) and t.strip() for t in tokens):
+        raise ValueError(f"label_tokens.json: {key} must be a non-empty string list ({path})")
+    return tuple(t.replace(" ", "") for t in tokens)
+
+
+def _load_label_tokens(path: Path = _LABEL_TOKENS_PATH) -> dict[str, tuple[str, ...]]:
+    """라벨 인식 토큰. 공백 제거 후 포함 여부로 맞춘다. 라틴은 대문자."""
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(raw, dict):
+        raise ValueError(f"label_tokens.json: root must be an object ({path})")
+    return {
+        "bathroom": _load_label_token_group(raw, "bathroom", path=path),
+        "elevator": _load_label_token_group(raw, "elevator", path=path),
+        "office": _load_label_token_group(raw, "office", path=path),
+    }
+
+
+LABEL_TOKENS = _load_label_tokens()
+BATHROOM_LABEL_TOKENS = LABEL_TOKENS["bathroom"]
+ELEVATOR_LABEL_TOKENS = LABEL_TOKENS["elevator"]
+OFFICE_LABEL_TOKENS = LABEL_TOKENS["office"]
+
+
+def _label_matches_tokens(text: str, tokens: tuple[str, ...], *, short_prefix: bool = False) -> bool:
+    folded = text.replace(" ", "")
+    upper = folded.upper()
+    compact = upper.replace(".", "")
+    for token in tokens:
+        if any(ord(ch) < 128 for ch in token):
+            t = token.upper().replace(".", "")
+            # E.V처럼 짧은 라틴은 LEVEL 오탐을 피하려고 접두만 본다.
+            if short_prefix and len(t) <= 3:
+                if compact == t or (
+                    compact.startswith(t)
+                    and (len(compact) == len(t) or not compact[len(t)].isalpha())
+                ):
+                    return True
+                continue
+            if t in compact or token.upper().replace(" ", "") in upper:
+                return True
+        elif token in folded:
+            return True
+    return False
+
+
+def _is_bathroom_label(text: str) -> bool:
+    """라벨이 화장실·WC 등이면 True. 목록은 label_tokens.json의 bathroom."""
+    return _label_matches_tokens(text, BATHROOM_LABEL_TOKENS)
+
+
+def _is_elevator_label(text: str) -> bool:
+    """라벨이 승강기·ELEV 등이면 True. 목록은 label_tokens.json의 elevator."""
+    return _label_matches_tokens(text, ELEVATOR_LABEL_TOKENS, short_prefix=True)
+
+
+def _is_office_label(text: str) -> bool:
+    """라벨이 사무실·PDR·회의실 등이면 True. 목록은 label_tokens.json의 office."""
+    return _label_matches_tokens(text, OFFICE_LABEL_TOKENS)
+
+
 # 강당·오픈홀: 중앙 통로/보이드에 벽이 있을 수 없음
 _OPEN_HALL_RE = re.compile(r"(강당|AUDITORIUM|\bAUDI\b)", re.IGNORECASE)
 _OPEN_HALL_SKIP_RE = re.compile(
@@ -518,7 +583,10 @@ def _has_parallel_pair(
     """BASE 이중선(벽 두께) 짝이 있으면 구조 벽 후보로 본다.
 
     cover_ratio가 있으면 짧은 사각 변처럼 일부만 겹친 짝은 이중선이 아니다.
+    짝이 여러 조각으로 쪼개져 있어도, 후보를 덮는 길이 합이 cover_ratio
+    이상이면 이중선으로 본다(클럽하우스 소화수조 옆).
     """
+    mate_spans: list[tuple[float, float]] = []
     for o in base:
         if o.is_h != cand.is_h:
             continue
@@ -527,11 +595,29 @@ def _has_parallel_pair(
         d = abs(o.ortho - cand.ortho)
         if not (thick_min <= d <= thick_max):
             continue
-        ov = min(cand.along1, o.along1) - max(cand.along0, o.along0)
+        a0 = max(cand.along0, o.along0)
+        a1 = min(cand.along1, o.along1)
+        ov = a1 - a0
+        if ov <= 0:
+            continue
+        mate_spans.append((a0, a1))
         need = max(400.0, 0.25 * min(cand.length, o.length))
         if cover_ratio > 0.0:
+            if ov >= cover_ratio * cand.length and ov >= need:
+                return True
             need = max(need, cover_ratio * max(cand.length, o.length))
         if ov >= need:
+            return True
+    if cover_ratio > 0.0 and mate_spans:
+        mate_spans.sort()
+        merged: list[tuple[float, float]] = []
+        for a0, a1 in mate_spans:
+            if not merged or a0 > merged[-1][1] + 1.0:
+                merged.append((a0, a1))
+            else:
+                merged[-1] = (merged[-1][0], max(merged[-1][1], a1))
+        covered = sum(b - a for a, b in merged)
+        if covered >= cover_ratio * cand.length:
             return True
     return False
 
@@ -2724,6 +2810,188 @@ def promote_wall_square_columns(msp) -> int:
                     pass
                 n += 1
     n += _promote_column_adjacent_doubles(boxes, h_all, v_all, promoted_ids, swings)
+    return n
+
+
+def _lwpoly_nearly_closed(ent, pts: list[tuple[float, float]] | None = None) -> bool:
+    """닫힌 플래그 또는 첫·끝점이 50 mm 안이면 닫힌 윤곽으로 본다."""
+    if bool(getattr(ent, "closed", False)):
+        return True
+    if pts is None:
+        pts = _polyline_xy(ent)
+    if len(pts) < 4:
+        return False
+    return math.hypot(pts[0][0] - pts[-1][0], pts[0][1] - pts[-1][1]) < 50.0
+
+
+def _lwpoly_axis_square_box(
+    ent, *, min_mm: float = 450.0, max_mm: float = 1500.0
+) -> tuple[float, float, float, float] | None:
+    """축평행 정사각 닫힌 폴리라인이면 (x0, y0, x1, y1)."""
+    if _dxftype(ent) != "LWPOLYLINE":
+        return None
+    pts = _polyline_xy(ent)
+    if not _lwpoly_nearly_closed(ent, pts):
+        return None
+    if not (4 <= len(pts) <= 6):
+        return None
+    xs = [p[0] for p in pts]
+    ys = [p[1] for p in pts]
+    x0, x1 = min(xs), max(xs)
+    y0, y1 = min(ys), max(ys)
+    w, h = x1 - x0, y1 - y0
+    if not (min_mm <= w <= max_mm and min_mm <= h <= max_mm):
+        return None
+    if abs(w - h) > max(w, h) * 0.22:
+        return None
+    for x, y in pts:
+        on_v = abs(x - x0) <= 5.0 or abs(x - x1) <= 5.0
+        on_h = abs(y - y0) <= 5.0 or abs(y - y1) <= 5.0
+        if not (on_v or on_h):
+            return None
+    return (x0, y0, x1, y1)
+
+
+def promote_closed_square_columns(msp) -> int:
+    """속이 빈 닫힌 정사각 폴리라인 기둥을 WALL로 올린다.
+
+    중앙 '_' 없고 선 네 개가 아니라 닫힌 윤곽만 있는 경우다.
+    클럽하우스 주방 모서리 600 mm 사각처럼 WALL이 변에서 끊기면 기둥이다.
+    """
+    h_all: list[tuple[float, float, float, str, float]] = []
+    v_all: list[tuple[float, float, float, str, float]] = []
+    arcs: list[tuple[float, float]] = []
+    for e in _entities(msp):
+        kind = _dxftype(e)
+        if kind in ("ARC", "CIRCLE"):
+            try:
+                arcs.append((_acx(e), _acy(e)))
+            except Exception:  # noqa: BLE001
+                pass
+            continue
+        parsed = _axis_line(e)
+        if parsed is None:
+            continue
+        ori, coord, a, b, length = parsed
+        layer = str(getattr(e.dxf, "layer", "") or "")
+        if ori == "H":
+            h_all.append((coord, a, b, layer, length))
+        else:
+            v_all.append((coord, a, b, layer, length))
+
+    def _pair_ys(vals: list[float]) -> bool:
+        vals = sorted(set(round(v, 1) for v in vals))
+        for i, va in enumerate(vals):
+            for vb in vals[i + 1 :]:
+                if 80.0 <= vb - va <= 350.0:
+                    return True
+        return False
+
+    def wall_abuts(x0: float, y0: float, x1: float, y1: float) -> bool:
+        """WALL이 사각 변에서 끊겨 밖으로 나가면 True.
+
+        짧은 이중 스터브(150 mm~)나, 변 위의 긴 수직·수평 연장 모두 인정한다.
+        """
+        right: list[float] = []
+        left: list[float] = []
+        for y, a, b, layer, length in h_all:
+            if layer != WALL_LAYER or length < 150.0:
+                continue
+            if not (y0 - 40.0 <= y <= y1 + 40.0):
+                continue
+            if abs(a - x1) <= 45.0 and b >= x1 + 100.0:
+                right.append(y)
+            if abs(b - x0) <= 45.0 and a <= x0 - 100.0:
+                left.append(y)
+        top: list[float] = []
+        bot: list[float] = []
+        for x, a, b, layer, length in v_all:
+            if layer != WALL_LAYER or length < 150.0:
+                continue
+            if not (x0 - 40.0 <= x <= x1 + 40.0):
+                continue
+            if abs(a - y1) <= 45.0 and b >= y1 + 100.0:
+                top.append(x)
+            if abs(b - y0) <= 45.0 and a <= y0 - 100.0:
+                bot.append(x)
+        if _pair_ys(right) or _pair_ys(left) or _pair_ys(top) or _pair_ys(bot):
+            return True
+        # 사각 변과 같은 축의 긴 WALL이 모서리에서 밖으로 이어짐
+        for x, a, b, layer, length in v_all:
+            if layer != WALL_LAYER or length < 400.0:
+                continue
+            on_left = abs(x - x0) <= 45.0
+            on_right = abs(x - x1) <= 45.0
+            if not (on_left or on_right):
+                continue
+            if abs(a - y1) <= 45.0 and b > y1 + 200.0:
+                return True
+            if abs(b - y0) <= 45.0 and a < y0 - 200.0:
+                return True
+        for y, a, b, layer, length in h_all:
+            if layer != WALL_LAYER or length < 400.0:
+                continue
+            on_bot = abs(y - y0) <= 45.0
+            on_top = abs(y - y1) <= 45.0
+            if not (on_bot or on_top):
+                continue
+            if abs(a - x1) <= 45.0 and b > x1 + 200.0:
+                return True
+            if abs(b - x0) <= 45.0 and a < x0 - 200.0:
+                return True
+        # 안쪽 면이 사각을 가로지르며 모서리에서 끊기는 경우(벽 두께 안 기둥)
+        for x, a, b, layer, length in v_all:
+            if layer != WALL_LAYER or length < 800.0:
+                continue
+            if not (x0 + 40.0 <= x <= x1 - 40.0):
+                continue
+            if abs(a - y1) <= 45.0 and b > y1 + 200.0:
+                return True
+            if abs(b - y0) <= 45.0 and a < y0 - 200.0:
+                return True
+        for y, a, b, layer, length in h_all:
+            if layer != WALL_LAYER or length < 800.0:
+                continue
+            if not (y0 + 40.0 <= y <= y1 - 40.0):
+                continue
+            if abs(a - x1) <= 45.0 and b > x1 + 200.0:
+                return True
+            if abs(b - x0) <= 45.0 and a < x0 - 200.0:
+                return True
+        return False
+
+    n = 0
+    seen: list[tuple[float, float]] = []
+    for ent in _entities(msp):
+        if getattr(ent.dxf, "layer", None) not in (BASE_LAYER, WALL_LAYER):
+            continue
+        box = _lwpoly_axis_square_box(ent)
+        if box is None:
+            continue
+        x0, y0, x1, y1 = box
+        cx, cy = (x0 + x1) * 0.5, (y0 + y1) * 0.5
+        if any(abs(cx - ox) < 40.0 and abs(cy - oy) < 40.0 for ox, oy in seen):
+            continue
+        if sum(1 for ax, ay in arcs if x0 + 40.0 <= ax <= x1 - 40.0 and y0 + 40.0 <= ay <= y1 - 40.0) >= 2:
+            continue
+        # 중앙 '_' 가 있으면 H-Beam 경로가 담당한다.
+        half = max(x1 - x0, y1 - y0) * 0.5
+        has_tick = False
+        for y, a, b, _layer, length in h_all:
+            if not (150.0 <= length <= 800.0):
+                continue
+            mx = (a + b) * 0.5
+            if abs(mx - cx) <= half * 0.45 and abs(y - cy) <= half * 0.45:
+                if x0 - 5.0 <= mx <= x1 + 5.0 and y0 - 5.0 <= y <= y1 + 5.0:
+                    has_tick = True
+                    break
+        if has_tick:
+            continue
+        if not wall_abuts(x0, y0, x1, y1):
+            continue
+        seen.append((cx, cy))
+        if _paint_layer(ent, WALL_LAYER, WALL_COLOR):
+            n += 1
     return n
 
 
@@ -5386,14 +5654,73 @@ def promote_corridor_door_flanks(
     return out
 
 
+def _stair_direction_label(text: str) -> str | None:
+    u = text.strip().upper()
+    if u in ("UP", "DN", "DOWN") or (
+        len(u) <= 6 and (u.startswith("UP") or u.startswith("DN"))
+    ):
+        return u
+    return None
+
+
+def _has_stair_tread_flight_near(
+    msp,
+    cx: float,
+    cy: float,
+    *,
+    radius_mm: float = 9000.0,
+) -> bool:
+    """UP/DN 근처에 디딤 묶음(간격 180–420 mm, 4줄 이상)이 있으면 True."""
+    segs: list[tuple[bool, float, float, float, float]] = []
+    for entity in _entities(msp):
+        if _dxftype(entity) != "LINE":
+            continue
+        parsed = _axis_line(entity)
+        if parsed is None:
+            continue
+        ori, coord, a, b, length = parsed
+        if not (800.0 <= length <= 4500.0):
+            continue
+        mx = coord if ori == "V" else (a + b) * 0.5
+        my = coord if ori == "H" else (a + b) * 0.5
+        if math.hypot(mx - cx, my - cy) > radius_mm:
+            continue
+        segs.append((ori == "H", coord, a, b, length))
+    for is_h in (True, False):
+        by_len: dict[int, list[tuple[float, float, float]]] = {}
+        for h, coord, a, b, length in segs:
+            if h != is_h:
+                continue
+            by_len.setdefault(round(length / 500.0), []).append((coord, a, b))
+        for items in by_len.values():
+            if len(items) < 4:
+                continue
+            items.sort(key=lambda t: t[0])
+            run = [items[0]]
+            for item in items[1:]:
+                step = item[0] - run[-1][0]
+                if 180.0 <= step <= 420.0:
+                    run.append(item)
+                else:
+                    if len(run) >= 4:
+                        return True
+                    run = [item]
+            if len(run) >= 4:
+                return True
+    return False
+
+
 def find_stair_cores(msp) -> list[tuple[float, float, list[str]]]:
-    """UP/DN TEXT 클러스터 → 계단실 중심 (cx, cy, labels)."""
+    """UP/DN TEXT 클러스터 → 계단실 중심 (cx, cy, labels).
+
+    DN이 있으면 그대로 계단이다. UP만 있어도 옆에 디딤 묶음이 있으면 계단이다
+    (클럽하우스 재활용장·하역장 사이 UP 계단).
+    """
     pts: list[tuple[float, float, str]] = []
     for x, y, s in _iter_text_labels(msp):
-        u = s.strip().upper()
-        if u in ("UP", "DN", "DOWN") or u.startswith("UP") or u.startswith("DN"):
-            if len(u) <= 6:  # UP/DN/DOWN only, not longer words
-                pts.append((x, y, u))
+        lab = _stair_direction_label(s)
+        if lab is not None:
+            pts.append((x, y, lab))
     if not pts:
         return []
     used = [False] * len(pts)
@@ -5414,13 +5741,72 @@ def find_stair_cores(msp) -> list[tuple[float, float, list[str]]]:
                     group.append((x2, y2, lab2))
                     used[j] = True
                     changed = True
-        # 방향만 있는 UP 화살표는 계단실이 아니다. DN이 있는 클러스터만.
-        if not any(g[2].startswith("DN") for g in group):
-            continue
         cx = sum(g[0] for g in group) / len(group)
         cy = sum(g[1] for g in group) / len(group)
+        has_dn = any(g[2].startswith("DN") or g[2] == "DOWN" for g in group)
+        if not has_dn and not _has_stair_tread_flight_near(msp, cx, cy):
+            continue
         cores.append((cx, cy, [g[2] for g in group]))
     return cores
+
+
+def _estimate_stair_bbox_from_treads(
+    segs: list[AxisSeg],
+    cx: float,
+    cy: float,
+    *,
+    search_mm: float = 9000.0,
+) -> dict[str, float] | None:
+    """디딤 묶음 범위로 계단 외곽을 잡는다. 한쪽 이중벽이 없어도 된다."""
+    short = [
+        s
+        for s in segs
+        if 800.0 <= s.length <= 4500.0
+        and abs((s.x0 + s.x1) * 0.5 - cx) <= search_mm
+        and abs((s.y0 + s.y1) * 0.5 - cy) <= search_mm
+    ]
+    best: list[AxisSeg] | None = None
+    for is_h in (True, False):
+        by_len: dict[int, list[AxisSeg]] = {}
+        for s in short:
+            if s.is_h != is_h:
+                continue
+            by_len.setdefault(round(s.length / 500.0), []).append(s)
+        for items in by_len.values():
+            if len(items) < 4:
+                continue
+            items = sorted(items, key=lambda s: s.ortho)
+            run = [items[0]]
+            for s in items[1:]:
+                step = s.ortho - run[-1].ortho
+                if 180.0 <= step <= 420.0:
+                    run.append(s)
+                else:
+                    if best is None or len(run) > len(best):
+                        best = list(run)
+                    run = [s]
+            if best is None or len(run) > len(best):
+                best = list(run)
+    if best is None or len(best) < 4:
+        return None
+    along0 = min(s.along0 for s in best)
+    along1 = max(s.along1 for s in best)
+    p0 = best[0].ortho
+    p1 = best[-1].ortho
+    pad_along = 400.0
+    pad_perp = 800.0
+    if best[0].is_h:
+        xmin, xmax = along0 - pad_along, along1 + pad_along
+        ymin, ymax = p0 - pad_perp, p1 + pad_perp
+    else:
+        xmin, xmax = p0 - pad_perp, p1 + pad_perp
+        ymin, ymax = along0 - pad_along, along1 + pad_along
+    w, h = xmax - xmin, ymax - ymin
+    if w < 1500.0 or w > 12000.0 or h < 1500.0 or h > 18000.0:
+        return None
+    if not (xmin - 2500.0 <= cx <= xmax + 2500.0 and ymin - 2500.0 <= cy <= ymax + 2500.0):
+        return None
+    return {"xmin": xmin, "ymin": ymin, "xmax": xmax, "ymax": ymax}
 
 
 def _estimate_stair_bbox(
@@ -5440,6 +5826,14 @@ def _estimate_stair_bbox(
         and abs((s.y0 + s.y1) * 0.5 - cy) <= search_mm
         and _has_parallel_pair(s, segs)
     ]
+    # 이중벽 짝이 없는 긴 면도 한쪽 외곽 후보로 쓴다(UP 계단 우측 단일면).
+    near_any = [
+        s
+        for s in segs
+        if s.length >= min_len_mm
+        and abs((s.x0 + s.x1) * 0.5 - cx) <= search_mm
+        and abs((s.y0 + s.y1) * 0.5 - cy) <= search_mm
+    ]
     left = sorted(
         {
             s.ortho
@@ -5455,6 +5849,23 @@ def _estimate_stair_bbox(
             if s.is_v and s.ortho > cx + 800.0 and s.along0 - 500 <= cy <= s.along1 + 500
         }
     )
+    if not left:
+        left = sorted(
+            {
+                s.ortho
+                for s in near_any
+                if s.is_v and s.ortho < cx - 400.0 and s.along0 - 500 <= cy <= s.along1 + 500
+            },
+            reverse=True,
+        )
+    if not right:
+        right = sorted(
+            {
+                s.ortho
+                for s in near_any
+                if s.is_v and s.ortho > cx + 400.0 and s.along0 - 500 <= cy <= s.along1 + 500
+            }
+        )
     bot = sorted(
         {
             s.ortho
@@ -5471,20 +5882,24 @@ def _estimate_stair_bbox(
         }
     )
     if not (left and right):
-        return None
+        return _estimate_stair_bbox_from_treads(segs, cx, cy, search_mm=search_mm)
     xmin, xmax = left[0], right[0]
     if bot and top:
         ymin, ymax = bot[0], top[0]
     else:
-        ymin, ymax = cy - 5500.0, cy + 5500.0
+        tread = _estimate_stair_bbox_from_treads(segs, cx, cy, search_mm=search_mm)
+        if tread is not None:
+            ymin, ymax = tread["ymin"], tread["ymax"]
+        else:
+            ymin, ymax = cy - 5500.0, cy + 5500.0
     w, h = xmax - xmin, ymax - ymin
     # 계단실 규모: 너무 크면(복도·홀) 거부, 너무 작으면 패딩
     if w < 2000.0 or w > 12000.0 or h < 3000.0 or h > 18000.0:
-        return None
+        return _estimate_stair_bbox_from_treads(segs, cx, cy, search_mm=search_mm)
     # 좌·우 벽이 추정 바닥보다 더 내려가면 그 끝까지를 외곽으로 본다.
     side = [
         s
-        for s in near
+        for s in near_any
         if s.is_v
         and s.length >= 4000.0
         and (
@@ -5553,7 +5968,8 @@ def _is_stair_tread_seg(s: AxisSeg, segs: list[AxisSeg]) -> bool:
 
     기둥 사각처럼 폭이 좁거나 닫힌 사각은 디딤이 아니다.
     """
-    if s.entity is None or not (400.0 <= s.length <= 1800.0):
+    # 클럽하우스 UP 계단 디딤은 ~1890 mm.
+    if s.entity is None or not (400.0 <= s.length <= 2800.0):
         return False
     if _is_closed_box_side(s, segs):
         return False
@@ -5566,10 +5982,7 @@ def _is_stair_tread_seg(s: AxisSeg, segs: list[AxisSeg]) -> bool:
     if labels is None or getattr(_is_stair_tread_seg, "_key", None) != key:
         labels = []
         for x, y, text in _iter_text_labels(msp):
-            u = text.strip().upper()
-            if u in ("UP", "DN", "DOWN") or (
-                len(u) <= 6 and (u.startswith("UP") or u.startswith("DN"))
-            ):
+            if _stair_direction_label(text) is not None:
                 labels.append((x, y))
         _is_stair_tread_seg._labels = labels  # type: ignore[attr-defined]
         _is_stair_tread_seg._key = key  # type: ignore[attr-defined]
@@ -5579,18 +5992,19 @@ def _is_stair_tread_seg(s: AxisSeg, segs: list[AxisSeg]) -> bool:
         return False
     orthos: set[int] = set()
     for p in segs:
-        if p.is_h != s.is_h or not (400.0 <= p.length <= 1800.0):
+        if p.is_h != s.is_h or not (400.0 <= p.length <= 2800.0):
             continue
-        if abs(p.length - s.length) > 400.0 or abs(p.ortho - s.ortho) > 2800.0:
+        if abs(p.length - s.length) > 500.0 or abs(p.ortho - s.ortho) > 2800.0:
             continue
         ov = min(s.along1, p.along1) - max(s.along0, p.along0)
         if ov < min(s.length, p.length) * 0.6:
             continue
         orthos.add(round(p.ortho / 40.0))
-    if len(orthos) < 5:
+    if len(orthos) < 4:
         return False
-    # 기둥 사각은 폭이 3.5 m 에 못 미친다. 계단 비행만 넘긴다.
-    return (max(orthos) - min(orthos)) * 40.0 >= 3500.0
+    # 기둥 사각은 폭이 좁다. 디딤 묶음은 1 m 이상이면 충분하다
+    # (클럽하우스 UP 계단 디딤 깊이 ~1.5 m).
+    return (max(orthos) - min(orthos)) * 40.0 >= 1000.0
 
 
 def _is_stair_nosing_seg(s: AxisSeg, segs: list[AxisSeg]) -> bool:
@@ -5649,12 +6063,14 @@ def promote_stair_enclosure_walls(
 
     계단은 문 개구를 제외하고 벽으로 둘러싸인다.
     중심 난간·트레드 해칭은 외곽이 아니므로 승격하지 않는다.
+    UP만 있어도 디딤 묶음이 있으면 같은 규칙이다.
     """
     cores = find_stair_cores(msp)
     if not cores:
         return []
     wall = [s for s in segs if s.layer == WALL_LAYER]
     base = [s for s in segs if s.layer == BASE_LAYER]
+    faces = wall + base
     h_wall, v_wall = _index_wall_runs(wall)
     out: list[AxisSeg] = []
     seen: set[tuple[float, float, float, float]] = set()
@@ -5666,7 +6082,9 @@ def promote_stair_enclosure_walls(
         for s in base:
             if not (min_len_mm <= s.length <= max_len_mm):
                 continue
-            if not _has_parallel_pair(s, base):
+            if _is_stair_tread_seg(s, segs):
+                continue
+            if not _has_parallel_pair(s, faces):
                 continue
             mx = (s.x0 + s.x1) * 0.5
             my = (s.y0 + s.y1) * 0.5
@@ -5710,7 +6128,9 @@ def promote_stair_enclosure_walls(
         for s in base:
             if not (1800.0 <= s.length <= 6000.0):
                 continue
-            if not _has_parallel_pair(s, base):
+            if not _has_parallel_pair(s, faces):
+                continue
+            if _is_stair_tread_seg(s, segs):
                 continue
             mx = (s.x0 + s.x1) * 0.5
             my = (s.y0 + s.y1) * 0.5
@@ -5720,7 +6140,7 @@ def promote_stair_enclosure_walls(
             ):
                 continue
             orthos = {round(s.ortho / 50.0)}
-            for p in base:
+            for p in faces:
                 if p.is_h != s.is_h or p.length < 1000.0:
                     continue
                 if abs(p.ortho - s.ortho) > 1500.0:
@@ -20371,6 +20791,231 @@ def separate_arrow_sliding_doors(msp) -> tuple[int, int]:
     return n_demote, 0
 
 
+def _axis_rect_bbox(entity) -> tuple[float, float, float, float] | None:
+    """축정렬 닫힌 사각 LWPOLYLINE의 bbox. 아니면 None."""
+    if _dxftype(entity) != "LWPOLYLINE":
+        return None
+    pts = _polyline_xy(entity)
+    if len(pts) >= 2 and math.hypot(pts[0][0] - pts[-1][0], pts[0][1] - pts[-1][1]) <= 1.0:
+        pts = pts[:-1]
+    if len(pts) != 4:
+        return None
+    for index in range(4):
+        x0, y0 = pts[index]
+        x1, y1 = pts[(index + 1) % 4]
+        if min(abs(x1 - x0), abs(y1 - y0)) > 2.0:
+            return None
+    xs = [p[0] for p in pts]
+    ys = [p[1] for p in pts]
+    return min(xs), min(ys), max(xs), max(ys)
+
+
+def _find_lr_arrow_sliding_doors(msp) -> list[dict]:
+    """좌·우(또는 상·하) 화살표가 가리키는 축정렬 미닫이.
+
+    샤프트 0.7–1.6 m, 미늘 0.12–0.5 m, 꺾임 20–55°인 축정렬 3점 폴리선이
+    화살표다. 클럽하우스 PDR 열처럼 벽 두께 안의 얇은 직사각 문짝과 화살표는
+    DOOR, 같은 벽면의 양옆·사이 구간은 WALL이다.
+    """
+    arrows: list[dict] = []
+    for entity in _entities(msp):
+        if _dxftype(entity) != "LWPOLYLINE" or getattr(entity, "closed", False):
+            continue
+        if getattr(entity.dxf, "layer", None) not in (BASE_LAYER, DOOR_LAYER, WALL_LAYER):
+            continue
+        try:
+            points = [(float(x), float(y)) for x, y in entity.get_points("xy")]
+        except Exception:  # noqa: BLE001
+            continue
+        if len(points) != 3:
+            continue
+        (ax, ay), (bx, by), (cx, cy) = points
+        first = math.hypot(bx - ax, by - ay)
+        second = math.hypot(cx - bx, cy - by)
+        longer, shorter = max(first, second), min(first, second)
+        if not (700.0 <= longer <= 1600.0 and 120.0 <= shorter <= 500.0):
+            continue
+        if first >= second:
+            sx0, sy0, sx1, sy1 = ax, ay, bx, by
+            shaft_len = first
+        else:
+            sx0, sy0, sx1, sy1 = bx, by, cx, cy
+            shaft_len = second
+        dx, dy = abs(sx1 - sx0), abs(sy1 - sy0)
+        if dx >= dy * 3.0 and dx >= 0.85 * shaft_len:
+            horizontal = True
+        elif dy >= dx * 3.0 and dy >= 0.85 * shaft_len:
+            horizontal = False
+        else:
+            continue
+        u1x = (bx - ax) / first if first else 0.0
+        u1y = (by - ay) / first if first else 0.0
+        u2x = (cx - bx) / second if second else 0.0
+        u2y = (cy - by) / second if second else 0.0
+        turn = math.degrees(math.acos(max(-1.0, min(1.0, u1x * u2x + u1y * u2y))))
+        barb = min(turn, 180.0 - turn)
+        if not (20.0 <= barb <= 55.0):
+            continue
+        arrows.append({
+            "entity": entity,
+            "horizontal": horizontal,
+            "mx": (sx0 + sx1) * 0.5,
+            "my": (sy0 + sy1) * 0.5,
+            "a0": min(sx0, sx1) if horizontal else min(sy0, sy1),
+            "a1": max(sx0, sx1) if horizontal else max(sy0, sy1),
+        })
+    if not arrows:
+        return []
+
+    panels: list[dict] = []
+    for entity in _entities(msp):
+        layer = getattr(entity.dxf, "layer", None)
+        if layer not in (BASE_LAYER, DOOR_LAYER, WALL_LAYER):
+            continue
+        box = _axis_rect_bbox(entity)
+        if box is None:
+            continue
+        x0, y0, x1, y1 = box
+        width, height = x1 - x0, y1 - y0
+        long, short = max(width, height), min(width, height)
+        if not (600.0 <= long <= 1600.0 and 35.0 <= short <= 140.0):
+            continue
+        horizontal = width >= height
+        panels.append({
+            "entity": entity,
+            "horizontal": horizontal,
+            "x0": x0, "y0": y0, "x1": x1, "y1": y1,
+            "a0": x0 if horizontal else y0,
+            "a1": x1 if horizontal else y1,
+            "p0": y0 if horizontal else x0,
+            "p1": y1 if horizontal else x1,
+            "cx": (x0 + x1) * 0.5,
+            "cy": (y0 + y1) * 0.5,
+        })
+
+    found: list[dict] = []
+    used_panels: set[int] = set()
+    for arrow in arrows:
+        hosts: list[dict] = []
+        for panel in panels:
+            if panel["horizontal"] != arrow["horizontal"]:
+                continue
+            if id(panel["entity"]) in used_panels:
+                continue
+            if arrow["horizontal"]:
+                along_gap = max(0.0, max(panel["a0"], arrow["a0"]) - min(panel["a1"], arrow["a1"]))
+                # 화살표가 문짝과 반대로 겹치면 gap=0. 조금 어긋나도 허용.
+                if along_gap > 200.0 and not (
+                    panel["a0"] - 250.0 <= arrow["mx"] <= panel["a1"] + 250.0
+                ):
+                    continue
+                perp_dist = abs(arrow["my"] - panel["cy"])
+            else:
+                along_gap = max(0.0, max(panel["a0"], arrow["a0"]) - min(panel["a1"], arrow["a1"]))
+                if along_gap > 200.0 and not (
+                    panel["a0"] - 250.0 <= arrow["my"] <= panel["a1"] + 250.0
+                ):
+                    continue
+                perp_dist = abs(arrow["mx"] - panel["cx"])
+            if perp_dist > 900.0:
+                continue
+            hosts.append(panel)
+        if not hosts:
+            continue
+        hosts.sort(
+            key=lambda panel: abs(panel["cy"] - arrow["my"])
+            if arrow["horizontal"]
+            else abs(panel["cx"] - arrow["mx"])
+        )
+        panel = hosts[0]
+        used_panels.add(id(panel["entity"]))
+        open0, open1 = panel["a0"], panel["a1"]
+        face0, face1 = panel["p0"] - 100.0, panel["p1"] + 100.0
+        door_entities = [arrow["entity"], panel["entity"]]
+        wall_entities: list = []
+        for entity in _entities(msp):
+            if entity is arrow["entity"] or entity is panel["entity"]:
+                continue
+            layer = getattr(entity.dxf, "layer", None)
+            if layer not in (BASE_LAYER, WALL_LAYER, DOOR_LAYER):
+                continue
+            kind = _dxftype(entity)
+            boxes: list[tuple[float, float, float, float]] = []
+            if kind == "LINE":
+                try:
+                    x0, y0, x1, y1 = _line_xy(entity)
+                except Exception:  # noqa: BLE001
+                    continue
+                boxes.append((min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1)))
+            elif kind == "LWPOLYLINE":
+                box = _axis_rect_bbox(entity)
+                if box is not None:
+                    boxes.append(box)
+                else:
+                    try:
+                        pts = [(float(x), float(y)) for x, y in entity.get_points("xy")]
+                    except Exception:  # noqa: BLE001
+                        continue
+                    if len(pts) < 2:
+                        continue
+                    xs = [p[0] for p in pts]
+                    ys = [p[1] for p in pts]
+                    boxes.append((min(xs), min(ys), max(xs), max(ys)))
+            else:
+                continue
+            for bx0, by0, bx1, by1 in boxes:
+                if arrow["horizontal"]:
+                    along0, along1 = bx0, bx1
+                    perp0, perp1 = by0, by1
+                else:
+                    along0, along1 = by0, by1
+                    perp0, perp1 = bx0, bx1
+                if min(perp1, face1) - max(perp0, face0) < 20.0:
+                    continue
+                length = max(along1 - along0, perp1 - perp0)
+                overlap = min(along1, open1) - max(along0, open0)
+                # 같은 벽면의 다른 문짝도 DOOR. 양옆·사이 두꺼운 면만 WALL.
+                panel_like = (
+                    600.0 <= (along1 - along0) <= 1600.0
+                    and 35.0 <= (perp1 - perp0) <= 140.0
+                )
+                if panel_like:
+                    if entity not in door_entities:
+                        door_entities.append(entity)
+                    continue
+                outside = along1 <= open0 + 40.0 or along0 >= open1 - 40.0
+                between = overlap < 0.35 * max(along1 - along0, 1.0)
+                near = (
+                    along0 <= open1 + 3500.0
+                    and along1 >= open0 - 3500.0
+                )
+                if near and (outside or between) and length >= 80.0:
+                    wall_entities.append(entity)
+                    break
+        door_ids = {id(entity) for entity in door_entities}
+        wall_entities = [entity for entity in wall_entities if id(entity) not in door_ids]
+        found.append({"door": door_entities, "wall": wall_entities})
+    return found
+
+
+def separate_lr_arrow_sliding_doors(msp) -> tuple[int, int]:
+    """좌·우(상·하) 화살표 축정렬 미닫이: 문짝·화살표는 DOOR, 인접면은 WALL."""
+    n_demote = 0
+    n_promote = 0
+    painted_door: set[int] = set()
+    for door in _find_lr_arrow_sliding_doors(msp):
+        for entity in door["door"]:
+            painted_door.add(id(entity))
+            if _paint_layer(entity, DOOR_LAYER, DOOR_COLOR):
+                n_demote += 1
+        for entity in door["wall"]:
+            if id(entity) in painted_door:
+                continue
+            if _paint_layer(entity, WALL_LAYER, WALL_COLOR):
+                n_promote += 1
+    return n_demote, n_promote
+
+
 def separate_pocket_face_doors(msp) -> tuple[int, int]:
     """포켓 미닫이 문짝은 문으로 내리고, 양면과 문 끝 벽은 올린다."""
     n_demote = 0
@@ -22309,6 +22954,14 @@ def _vision_outer_label(label: str) -> bool:
     return any(word in folded for word in ("외벽", "바깥", "외곽"))
 
 
+def _vision_office_label(label: str) -> bool:
+    """Vision 사무실 둘레 상자. label은 사무실·PDR·회의실 등."""
+    folded = label.replace(" ", "")
+    if any(word in folded for word in ("사무실", "상담실", "회의실", "접견실")):
+        return True
+    return _is_office_label(folded)
+
+
 def _clip_segment_t(
     x0: float,
     y0: float,
@@ -22437,18 +23090,8 @@ def _split_outer_segment(msp, x0: float, y0: float, x1: float, y1: float, spans:
     return promoted
 
 
-def promote_vision_outer_walls(msp, bboxes) -> int:
-    """Vision이 건물의 외벽으로 표시한 벽은 WALL로 올린다.
-
-    도곽이나 도면의 끝선이 아니라, 실내와 건물 밖을 나누는 벽만 대상이다.
-    상자는 그 벽만 얇게 감싼다. 한 선이 외벽에서 실내로 이어지면 상자 안의 구간만 벽이다.
-    문 스윙 호와 문 X는 그대로 둔다.
-    """
-    boxes = [
-        box
-        for box in normalize_bbox_list(list(bboxes or []), field="promote_bboxes")
-        if _vision_outer_label(str(box.get("label") or ""))
-    ]
+def _promote_vision_strip_walls(msp, boxes: list[dict]) -> int:
+    """얇은 vision 띠 상자 안의 선만 WALL로 올린다. 외벽·사무실 둘레 공통."""
     if not boxes:
         return 0
 
@@ -22513,6 +23156,35 @@ def promote_vision_outer_walls(msp, bboxes) -> int:
         except Exception:  # noqa: BLE001
             continue
     return n
+
+
+def promote_vision_outer_walls(msp, bboxes) -> int:
+    """Vision이 건물의 외벽으로 표시한 벽은 WALL로 올린다.
+
+    도곽이나 도면의 끝선이 아니라, 실내와 건물 밖을 나누는 벽만 대상이다.
+    상자는 그 벽만 얇게 감싼다. 한 선이 외벽에서 실내로 이어지면 상자 안의 구간만 벽이다.
+    문 스윙 호와 문 X는 그대로 둔다.
+    """
+    boxes = [
+        box
+        for box in normalize_bbox_list(list(bboxes or []), field="promote_bboxes")
+        if _vision_outer_label(str(box.get("label") or ""))
+    ]
+    return _promote_vision_strip_walls(msp, boxes)
+
+
+def promote_vision_office_walls(msp, bboxes) -> int:
+    """Vision이 사무실·PDR 둘레로 표시한 얇은 상자의 선만 WALL로 올린다.
+
+    실 전체 상자가 아니라 외벽과 같이 벽 선만 감싼 띠다. 회의 테이블·의자는 올리지 않는다.
+    문 스윙 호와 문 X는 그대로 둔다.
+    """
+    boxes = [
+        box
+        for box in normalize_bbox_list(list(bboxes or []), field="promote_bboxes")
+        if _vision_office_label(str(box.get("label") or ""))
+    ]
+    return _promote_vision_strip_walls(msp, boxes)
 
 
 def _on_outer_point(box: dict, x: float, y: float, *, margin_mm: float = 3000.0) -> bool:
@@ -22601,11 +23273,9 @@ def promote_curved_corner_walls(msp) -> int:
 def _nonarea_room_anchor(text: str) -> bool:
     folded = text.replace(" ", "")
     token = folded.upper()
-    if any(word in folded for word in ("화장실", "창고", "차고")) or _excluded_area_text(text):
+    if _is_bathroom_label(text) or any(word in folded for word in ("창고", "차고")) or _excluded_area_text(text):
         return True
-    if token in {"WC", "W.C", "W.C.", "DA", "D.A", "D.A."}:
-        return True
-    return token.startswith("WC(") or token.startswith("W.C(")
+    return token in {"DA", "D.A", "D.A."}
 
 
 def _promote_room_enclosure(msp, anchors: list[tuple[float, float]]) -> int:
@@ -22690,8 +23360,8 @@ def _promote_room_enclosure(msp, anchors: list[tuple[float, float]]) -> int:
 def _excluded_area_text(text: str) -> bool:
     """면적에서 빼는 실명 중, 둘러싼 선을 벽으로 올릴 대상.
 
-    OPEN, 홀·홈, 입구, 출구, 양치공간, 청소도구함, 청소도구실, 실외기실, 오픈, 조경, 배경, 평면도, 비품고을, 항습기, 화물, 휠체어, 린넨실, 오물처리실, (장애인, 구급자, 응급환자, 의료가스실, 기계실, (여), (남), 문서고, 기울기, 자동방화, 인), 인승, OTIS, Wlqtnwjd, DA#, DA(, 올려옴, 내려감, DOOR, 패드, 기저귀, 침례탕약, 설치, 드라이기, 유사용, 상하부, 분전함, 세척실, 탕비실, 물품, 스트레쳐, E.V, ELEV는 라벨에서만 빼고 벽으로 올리지 않는다. ELEV. HALL과 ELEV. 홀도 같다.
-    (여), (남), 문서고, 기울기, 자동방화, 인), 인승, OTIS, Wlqtnwjd, DA#, DA(, 올려옴, 내려감, DOOR, 패드, 기저귀, 침례탕약, 설치, 드라이기, 유사용, 상하부도 라벨에서만 빼고 벽으로 올리지 않는다.
+    OPEN, 홀·홈, 입구, 출구, 양치공간, 청소도구함, 청소도구실, 실외기실, 오픈, 조경, 배경, 평면도, 비품고을, 항습기, 화물, 휠체어, 린넨실, 오물처리실, (장애인, 구급자, 응급환자, 의료가스실, 기계실, (여), (남), 문서고, 기울기, 자동방화, 인), 인승, OTIS, Wlqtnwjd, DA#, DA(, 올려옴, 내려감, DOOR, 패드, 기저귀, 침례탕약, 설치, 드라이기, 유사용, 상하부, 하부, (고객), 서비스동선, Drop-off, 상부, 캐노피선, 고장이슈, 대), 자쿠지, IN-S, 분전함, 세척실, 탕비실, 물품, 스트레쳐, E.V, ELEV는 라벨에서만 빼고 벽으로 올리지 않는다. ELEV. HALL과 ELEV. 홀도 같다.
+    (여), (남), 문서고, 기울기, 자동방화, 인), 인승, OTIS, Wlqtnwjd, DA#, DA(, 올려옴, 내려감, DOOR, 패드, 기저귀, 침례탕약, 설치, 드라이기, 유사용, 상하부, 하부, (고객), 서비스동선, Drop-off, 상부, 캐노피선, 고장이슈, 대), 자쿠지, IN-S도 라벨에서만 빼고 벽으로 올리지 않는다.
     """
     room_eval = _load_room_eval()
     if any(token in room_eval.norm_name(text).upper() for token in room_eval.LABEL_ONLY_AREA_TOKENS):
@@ -22836,15 +23506,17 @@ def _promote_excluded_area_bounds(msp) -> int:
 
 
 def promote_stair_label_walls(msp) -> int:
-    """계단실 글자 주위는 벽이다. 디딤은 올리지 않는다.
+    """계단실·UP/DN 글자 주위는 벽이다. 디딤은 올리지 않는다.
 
     라벨 근처에서 180–420 mm 간격으로 네 줄 이상 쌓인 선은 디딤이다.
-    그 묶음 양끝의 이중면과, 묶음 바로 바깥의 나란한 이중면은 WALL로 둔다.
+    그 묶음 양끝(올라가는 양옆)은 평행 이중면뿐 아니라 일반 단선도 WALL로 둔다.
+    묶음 바로 바깥의 나란한 이중면도 WALL로 둔다.
+    UP만 있어도 디딤 묶음이 있으면 같다(클럽하우스 하역장 옆 UP 계단).
     """
     anchors = [
         (x, y)
         for x, y, text in _iter_text_labels(msp)
-        if "계단실" in text.replace(" ", "")
+        if "계단실" in text.replace(" ", "") or _stair_direction_label(text) is not None
     ]
     if not anchors:
         return 0
@@ -22860,7 +23532,8 @@ def promote_stair_label_walls(msp) -> int:
         except Exception:  # noqa: BLE001
             continue
         length = math.hypot(x1 - x0, y1 - y0)
-        if not (400.0 <= length <= 6000.0):
+        # 양옆 단선이 긴 외벽과 한 줄로 이어진 경우(하역장 옆 ~8.5 m)도 넣는다.
+        if not (400.0 <= length <= 15000.0):
             continue
         ang = math.atan2(y1 - y0, x1 - x0)
         if ang < 0.0 or ang >= math.pi:
@@ -22990,21 +23663,25 @@ def promote_stair_label_walls(msp) -> int:
                         ends.append(seg)
                 _paint_pairs(origin, ends)
                 _paint_pairs(origin, sides)
+                # 올라가는 양옆(디딤 끝)은 단선이어도 벽이다.
+                for seg in ends:
+                    _take(seg)
     return n
 
 
 def promote_bathroom_label_walls(msp) -> int:
-    """화장실 글자 근처의 회색 벽은 WALL로 올린다.
+    """화장실·WC 글자 근처의 회색 벽은 WALL로 올린다.
 
     비전이 화장실 상자를 빠뜨려도, 글자에서 처음 만나는 선과
     그다음 1.2 m 안의 이중선, 그 선에서 20–250 mm 떨어진 같은 방향 선을 벽으로 둔다.
     1.8 m 안에서 길이가 비슷한 선이 160–450 mm 간격으로 네 줄 이상이면 디딤이라 남긴다.
     빗금 문과 문 스윙 호는 그대로 둔다.
+    인식 문구는 label_tokens.json의 bathroom (화장실, WC, W.C 등).
     """
     anchors = [
         (x, y)
         for x, y, text in _iter_text_labels(msp)
-        if "화장실" in text.replace(" ", "")
+        if _is_bathroom_label(text)
     ]
     if not anchors:
         return 0
@@ -23148,6 +23825,165 @@ def promote_bathroom_label_walls(msp) -> int:
         if id(seg["entity"]) not in chosen or seg["layer"] != BASE_LAYER:
             continue
         if _paint_layer(seg["entity"], WALL_LAYER, WALL_COLOR):
+            seg["layer"] = WALL_LAYER
+            n += 1
+    return n
+
+
+def _office_wall_bar_bbox(entity) -> tuple[float, float, float, float] | None:
+    """벽 두께 띠(한쪽 80–350 mm) LWPOLY면 bbox, 아니면 None. 가구 네모는 제외."""
+    if _dxftype(entity) != "LWPOLYLINE":
+        return None
+    try:
+        points = _polyline_xy(entity)
+    except Exception:  # noqa: BLE001
+        return None
+    if len(points) < 2:
+        return None
+    xs = [point[0] for point in points]
+    ys = [point[1] for point in points]
+    xmin, xmax = min(xs), max(xs)
+    ymin, ymax = min(ys), max(ys)
+    width, height = xmax - xmin, ymax - ymin
+    thin, long = sorted((width, height))
+    if not (80.0 <= thin <= 350.0 and 700.0 <= long <= 12000.0):
+        return None
+    return xmin, ymin, xmax, ymax
+
+
+def promote_office_label_walls(msp) -> int:
+    """사무실·PDR·회의실 글자 근처의 회색 외곽 벽은 WALL로 올린다.
+
+    비전이 둘레 상자를 빠뜨려도, 글자에서 사방으로 처음 만나는 이중선과
+    벽 두께 띠(LWPOLY)를 올린다. 회의 테이블·의자처럼 양쪽이 두꺼운 네모는 남긴다.
+    빗금 문과 문 스윙 호는 그대로 둔다.
+    인식 문구는 label_tokens.json의 office (PDR, 사무실, 상담실, 회의실 등).
+    """
+    anchors = [
+        (x, y)
+        for x, y, text in _iter_text_labels(msp)
+        if _is_office_label(text)
+    ]
+    if not anchors:
+        return 0
+
+    n = 0
+    painted: set[int] = set()
+    for entity in _entities(msp):
+        if getattr(entity.dxf, "layer", None) != BASE_LAYER:
+            continue
+        box = _office_wall_bar_bbox(entity)
+        if box is None:
+            continue
+        xmin, ymin, xmax, ymax = box
+        cx, cy = (xmin + xmax) * 0.5, (ymin + ymax) * 0.5
+        if not any(math.hypot(cx - px, cy - py) <= 5500.0 for px, py in anchors):
+            continue
+        # 라벨이 띠 바깥(실 안)에 있을 때만. 가구가 라벨에 겹친 경우는 거의 없다.
+        if any(xmin - 80.0 <= px <= xmax + 80.0 and ymin - 80.0 <= py <= ymax + 80.0 for px, py in anchors):
+            continue
+        if id(entity) in painted:
+            continue
+        if _paint_layer(entity, WALL_LAYER, WALL_COLOR):
+            painted.add(id(entity))
+            n += 1
+
+    segs = [seg for seg in _core_segments(msp) if seg["length"] <= 9000.0]
+    if not segs:
+        return n
+
+    def _door_slash(seg: dict) -> bool:
+        dx = abs(seg["x1"] - seg["x0"])
+        dy = abs(seg["y1"] - seg["y0"])
+        span = max(dx, dy)
+        return span > 0.0 and min(dx, dy) / span > 0.35 and seg["length"] <= 6000.0
+
+    def _perp(origin: dict, seg: dict) -> float:
+        mx = (seg["x0"] + seg["x1"]) * 0.5
+        my = (seg["y0"] + seg["y1"]) * 0.5
+        return (mx - origin["x0"]) * origin["nx"] + (my - origin["y0"]) * origin["ny"]
+
+    def _overlap(origin: dict, seg: dict) -> float:
+        def _along(x: float, y: float) -> float:
+            return (x - origin["x0"]) * origin["ux"] + (y - origin["y0"]) * origin["uy"]
+
+        lo = max(0.0, min(_along(seg["x0"], seg["y0"]), _along(seg["x1"], seg["y1"])))
+        hi = min(origin["length"], max(_along(seg["x0"], seg["y0"]), _along(seg["x1"], seg["y1"])))
+        return hi - lo
+
+    def _has_mate(seed: dict) -> bool:
+        for mate in segs:
+            if mate is seed:
+                continue
+            if abs(seed["ux"] * mate["ux"] + seed["uy"] * mate["uy"]) < 0.98:
+                continue
+            gap = abs(_perp(seed, mate))
+            overlap = _overlap(seed, mate)
+            short = min(seed["length"], mate["length"])
+            if 20.0 <= gap <= 250.0 and overlap >= 400.0 and overlap >= 0.35 * short:
+                return True
+        return False
+
+    def _take(seed: dict, px: float, py: float) -> None:
+        if seed["layer"] == BASE_LAYER:
+            chosen.add(id(seed["entity"]))
+        for mate in segs:
+            if mate["layer"] != BASE_LAYER or mate is seed:
+                continue
+            if abs(seed["ux"] * mate["ux"] + seed["uy"] * mate["uy"]) < 0.98:
+                continue
+            gap = abs(_perp(seed, mate))
+            if not (20.0 <= gap <= 250.0):
+                continue
+            overlap = _overlap(seed, mate)
+            short = min(seed["length"], mate["length"])
+            if overlap < 400.0 or overlap < 0.35 * short:
+                continue
+            if mate["length"] > 8000.0 or math.hypot(
+                (mate["x0"] + mate["x1"]) * 0.5 - px,
+                (mate["y0"] + mate["y1"]) * 0.5 - py,
+            ) > 5500.0 or _door_slash(mate):
+                continue
+            chosen.add(id(mate["entity"]))
+
+    chosen: set[int] = set()
+    for px, py in anchors:
+        for step in range(72):
+            ang = math.radians(step * 5.0)
+            dx, dy = math.cos(ang), math.sin(ang)
+            hits: list[tuple[float, dict]] = []
+            for seg in segs:
+                if seg["length"] < 650.0:
+                    continue
+                dn = dx * seg["nx"] + dy * seg["ny"]
+                if abs(dn) < 0.34:
+                    continue
+                off = (px - seg["x0"]) * seg["nx"] + (py - seg["y0"]) * seg["ny"]
+                dist = -off / dn
+                if not (80.0 <= dist <= 5200.0):
+                    continue
+                hit_x, hit_y = px + dist * dx, py + dist * dy
+                along = (hit_x - seg["x0"]) * seg["ux"] + (hit_y - seg["y0"]) * seg["uy"]
+                if along < -200.0 or along > seg["length"] + 200.0:
+                    continue
+                hits.append((dist, seg))
+            hits.sort(key=lambda item: item[0])
+            # 가구 단선을 건너뛰고 이중선(벽)만 고른다.
+            for dist, seed in hits:
+                if _door_slash(seed):
+                    continue
+                if not _has_mate(seed):
+                    continue
+                _take(seed, px, py)
+                break
+
+    for seg in segs:
+        if id(seg["entity"]) not in chosen or seg["layer"] != BASE_LAYER:
+            continue
+        if id(seg["entity"]) in painted:
+            continue
+        if _paint_layer(seg["entity"], WALL_LAYER, WALL_COLOR):
+            painted.add(id(seg["entity"]))
             seg["layer"] = WALL_LAYER
             n += 1
     return n
@@ -23918,15 +24754,86 @@ def _cluster_x_boxes(
     return clusters
 
 
-def promote_x_cover_squares(msp) -> int:
-    """X를 덮는 네모는 벽이다.
+def _line_on_x_box_edge(
+    x0: float,
+    y0: float,
+    x1: float,
+    y1: float,
+    box: tuple[float, float, float, float],
+    *,
+    tol_mm: float = 45.0,
+    cover_ratio: float = 0.55,
+) -> bool:
+    """선이 X 외곽 사각의 한 변 위에 있으면 True."""
+    bx0, by0, bx1, by1 = box
+    length = math.hypot(x1 - x0, y1 - y0)
+    if length < 80.0:
+        return False
+    dx, dy = abs(x1 - x0), abs(y1 - y0)
+    if dy <= max(20.0, 0.12 * length) and dx >= dy:
+        y = (y0 + y1) * 0.5
+        on_bot = abs(y - by0) <= tol_mm
+        on_top = abs(y - by1) <= tol_mm
+        if not (on_bot or on_top):
+            return False
+        ov = min(max(x0, x1), bx1) - max(min(x0, x1), bx0)
+        return ov >= cover_ratio * (bx1 - bx0)
+    if dx <= max(20.0, 0.12 * length) and dy >= dx:
+        x = (x0 + x1) * 0.5
+        on_left = abs(x - bx0) <= tol_mm
+        on_right = abs(x - bx1) <= tol_mm
+        if not (on_left or on_right):
+            return False
+        ov = min(max(y0, y1), by1) - max(min(y0, y1), by0)
+        return ov >= cover_ratio * (by1 - by0)
+    return False
 
-    교차 대각선 바로 위의 사각형은 변을 모두 WALL로 둔다.
+
+def _x_box_edge_covered(
+    box: tuple[float, float, float, float],
+    edge: str,
+    lines: list[tuple[float, float, float, float]],
+    *,
+    tol_mm: float = 45.0,
+    cover_ratio: float = 0.55,
+) -> bool:
+    """edge: bot|top|left|right. 이미 선이 그 변을 덮으면 True."""
+    bx0, by0, bx1, by1 = box
+    for x0, y0, x1, y1 in lines:
+        length = math.hypot(x1 - x0, y1 - y0)
+        if length < 80.0:
+            continue
+        dx, dy = abs(x1 - x0), abs(y1 - y0)
+        if edge in ("bot", "top") and dy <= max(20.0, 0.12 * length) and dx >= dy:
+            y = (y0 + y1) * 0.5
+            target = by0 if edge == "bot" else by1
+            if abs(y - target) > tol_mm:
+                continue
+            ov = min(max(x0, x1), bx1) - max(min(x0, x1), bx0)
+            if ov >= cover_ratio * (bx1 - bx0):
+                return True
+        if edge in ("left", "right") and dx <= max(20.0, 0.12 * length) and dy >= dx:
+            x = (x0 + x1) * 0.5
+            target = bx0 if edge == "left" else bx1
+            if abs(x - target) > tol_mm:
+                continue
+            ov = min(max(y0, y1), by1) - max(min(y0, y1), by0)
+            if ov >= cover_ratio * (by1 - by0):
+                return True
+    return False
+
+
+def promote_x_cover_squares(msp) -> int:
+    """X와 그를 감싼 네모는 벽이다.
+
+    교차 대각선(X)과 바로 위의 사각형 변을 모두 WALL로 둔다.
     안쪽 네모와, 한 변당 약 100 mm 큰 바깥 네모가 같이 있으면 둘 다 올린다.
+    네모가 LWPOLYLINE이 아니라 선 네 개여도 그 변을 올린다.
     네모가 없고 X만 있으면 대각선 끝에 맞춘 사각형을 새로 그어 네 변을 벽으로 둔다.
     벽 두께 안에서 교차하는 문 X의 네모는 그대로 둔다.
+    긴 덕트 X(짧은 변 ≥500 mm, 긴 변 ≤12 m)도 올린다.
     """
-    diags: list[tuple[float, float, float, float, float]] = []
+    diags: list[tuple[Any, float, float, float, float, float]] = []
     for entity in _entities(msp):
         if _dxftype(entity) != "LINE":
             continue
@@ -23938,33 +24845,37 @@ def promote_x_cover_squares(msp) -> int:
             continue
         dx, dy = abs(x1 - x0), abs(y1 - y0)
         length = math.hypot(x1 - x0, y1 - y0)
-        if not (200.0 <= length <= 6000.0) or max(dx, dy) <= 0.0:
+        if not (200.0 <= length <= 15000.0) or max(dx, dy) <= 0.0:
             continue
         if min(dx, dy) / max(dx, dy) < 0.08:
             continue
-        diags.append((x0, y0, x1, y1, length))
+        diags.append((entity, x0, y0, x1, y1, length))
     crosses: list[tuple[float, float, float, float]] = []
+    cross_diag_ids: set[int] = set()
     for index, left in enumerate(diags):
         for right in diags[index + 1 :]:
-            short, long = sorted((left[4], right[4]))
+            short, long = sorted((left[5], right[5]))
             if short < long * 0.75:
                 continue
-            if not _segment_cross(left[:4], right[:4]):
+            if not _segment_cross(left[1:5], right[1:5]):
                 continue
-            xs = (left[0], left[2], right[0], right[2])
-            ys = (left[1], left[3], right[1], right[3])
+            xs = (left[1], left[3], right[1], right[3])
+            ys = (left[2], left[4], right[2], right[4])
             x0, x1 = min(xs), max(xs)
             y0, y1 = min(ys), max(ys)
             width, height = x1 - x0, y1 - y0
             thick, span = min(width, height), max(width, height)
-            if thick < 500.0 or span > 4000.0:
+            # 499: 좌표 오차로 짧은 변이 499.999인 승강기 X(~500×2050)도 통과.
+            if thick < 499.0 or span > 12000.0:
                 continue
             if 80.0 <= thick <= 360.0 and 650.0 <= span <= 1750.0 and thick / span <= 0.5:
                 continue
             crosses.append((x0, y0, x1, y1))
+            cross_diag_ids.add(id(left[0]))
+            cross_diag_ids.add(id(right[0]))
     if not crosses:
         return 0
-    chosen: set[int] = set()
+    chosen: set[int] = set(cross_diag_ids)
     covers: list[tuple[float, float, float, float]] = []
     for entity in _entities(msp):
         box = _covering_rect_bbox(entity)
@@ -23973,6 +24884,36 @@ def promote_x_cover_squares(msp) -> int:
         if any(_x_box_covers(box, cross) for cross in crosses):
             chosen.add(id(entity))
             covers.append(box)
+
+    def _edge_xy(entity) -> tuple[float, float, float, float] | None:
+        kind = _dxftype(entity)
+        if kind == "LINE":
+            try:
+                return _line_xy(entity)
+            except Exception:  # noqa: BLE001
+                return None
+        if kind == "LWPOLYLINE":
+            pts = _polyline_xy(entity)
+            if len(pts) == 2:
+                return pts[0][0], pts[0][1], pts[1][0], pts[1][1]
+            if len(pts) >= 3 and math.hypot(pts[0][0] - pts[-1][0], pts[0][1] - pts[-1][1]) <= 1.0:
+                pts = pts[:-1]
+            if len(pts) == 2:
+                return pts[0][0], pts[0][1], pts[1][0], pts[1][1]
+        return None
+
+    # 선·2점 폴리선으로 그린 사각 변을 올린다.
+    edge_lines: list[tuple[float, float, float, float]] = []
+    for entity in _entities(msp):
+        if getattr(entity.dxf, "layer", None) not in (BASE_LAYER, WALL_LAYER, DOOR_LAYER):
+            continue
+        xy = _edge_xy(entity)
+        if xy is None:
+            continue
+        x0, y0, x1, y1 = xy
+        edge_lines.append((x0, y0, x1, y1))
+        if any(_line_on_x_box_edge(x0, y0, x1, y1, cross) for cross in crosses):
+            chosen.add(id(entity))
     promoted = sum(
         1
         for entity in _entities(msp)
@@ -23985,17 +24926,21 @@ def promote_x_cover_squares(msp) -> int:
         y0 = min(box[1] for box in cluster)
         x1 = max(box[2] for box in cluster)
         y1 = max(box[3] for box in cluster)
-        if x1 - x0 < 500.0 or y1 - y0 < 500.0:
+        if x1 - x0 < 499.0 or y1 - y0 < 499.0:
             continue
+        box = (x0, y0, x1, y1)
         sides = (
-            ((x0, y0), (x1, y0)),
-            ((x1, y0), (x1, y1)),
-            ((x1, y1), (x0, y1)),
-            ((x0, y1), (x0, y0)),
+            ("bot", (x0, y0), (x1, y0)),
+            ("right", (x1, y0), (x1, y1)),
+            ("top", (x1, y1), (x0, y1)),
+            ("left", (x0, y1), (x0, y0)),
         )
-        for start, end in sides:
+        for edge, start, end in sides:
+            if _x_box_edge_covered(box, edge, edge_lines):
+                continue
             msp.add_line(start, end, dxfattribs={"layer": WALL_LAYER, "color": WALL_COLOR})
             promoted += 1
+            edge_lines.append((start[0], start[1], end[0], end[1]))
     return promoted
 
 
@@ -24168,13 +25113,13 @@ def promote_service_core_walls(msp) -> int:
 
     글자가 들어 있는 외곽과 벽 두께를 올리고, 계단 디딤도 벽으로 둔다.
     문 스윙과 샤프트 안 X는 변 길이로 걸러 남긴다.
+    승강기·ELEV 등 인식 문구는 label_tokens.json의 elevator.
     """
     segs = _core_segments(msp)
     anchors: list[tuple[float, float]] = []
     for x, y, text in _iter_text_labels(msp):
-        token = text.strip().upper().replace(" ", "")
-        shaft = token.replace(".", "")
-        if re.fullmatch(r"(?:EPS|PS)(?:[#＃-]?\d+)?", shaft) or token.startswith("ELEV") or shaft.startswith("ELEV") or "승강기" in token:
+        shaft = text.strip().upper().replace(" ", "").replace(".", "")
+        if re.fullmatch(r"(?:EPS|PS)(?:[#＃-]?\d+)?", shaft) or _is_elevator_label(text):
             anchors.append((x, y))
     n = _promote_core_rectangles(msp, segs, anchors)
     n += _promote_stair_runs(msp, segs)
@@ -24461,6 +25406,8 @@ def apply_corrections(
     n_promoted += promote_exec_meeting_right(msp)
     # 벽면 정사각 기둥. H-Beam 집계(`n_column_promoted`)와 분리한다.
     n_wall_square_promoted = promote_wall_square_columns(msp)
+    # 선 네 개가 아니라 닫힌 폴리라인만 있는 빈 정사각(클럽하우스 주방 모서리).
+    n_wall_square_promoted += promote_closed_square_columns(msp)
     n_promoted += n_wall_square_promoted
     # 조정실 아래 문짝이 문 옆 승격에 같이 올라온 것을 되돌린다.
     n_ctrl_demote, n_ctrl_promote = correct_control_room_bottom_door(msp)
@@ -24569,21 +25516,14 @@ def apply_corrections(
     n_promoted += n_h_sym
     square_boxes: list[tuple[float, float, float, float]] = []
     for ent in _entities(msp):
-        if _dxftype(ent) != "LWPOLYLINE" or not ent.closed:
+        if _dxftype(ent) != "LWPOLYLINE":
             continue
         if getattr(ent.dxf, "layer", None) != WALL_LAYER:
             continue
-        pts = _polyline_xy(ent)
-        if not (4 <= len(pts) <= 5):
+        box = _lwpoly_axis_square_box(ent, min_mm=400.0, max_mm=1500.0)
+        if box is None:
             continue
-        xs = [p[0] for p in pts]
-        ys = [p[1] for p in pts]
-        bw, bh = max(xs) - min(xs), max(ys) - min(ys)
-        if not (400.0 <= bw <= 1500.0 and 400.0 <= bh <= 1500.0):
-            continue
-        if abs(bw - bh) > max(bw, bh) * 0.22:
-            continue
-        square_boxes.append((min(xs), min(ys), max(xs), max(ys)))
+        square_boxes.append(box)
     n_promoted += promote_column_adjacent_wall_pairs(msp, h_boxes + square_boxes)
     n_leaf_side_demote, n_leaf_side_promote = correct_door_leaves_and_flanks(msp)
     n_demoted += n_leaf_side_demote
@@ -24645,6 +25585,9 @@ def apply_corrections(
     n_arrow_demote, n_arrow_promote = separate_arrow_sliding_doors(msp)
     n_demoted += n_arrow_demote
     n_promoted += n_arrow_promote
+    n_lr_arrow_demote, n_lr_arrow_promote = separate_lr_arrow_sliding_doors(msp)
+    n_demoted += n_lr_arrow_demote
+    n_promoted += n_lr_arrow_promote
     n_short_demote, n_short_promote = separate_short_staggered_doors(msp)
     n_demoted += n_short_demote
     n_promoted += n_short_promote
@@ -24678,10 +25621,11 @@ def apply_corrections(
     n_promoted += promote_sanitary_fixtures(msp)
     n_promoted += promote_vision_bathrooms(msp, review.get("promote_bboxes") or [])
     n_promoted += promote_vision_outer_walls(msp, review.get("promote_bboxes") or [])
+    n_promoted += promote_vision_office_walls(msp, review.get("promote_bboxes") or [])
     n_promoted += promote_stair_label_walls(msp)
     n_promoted += promote_nonarea_enclosures(msp)
     n_promoted += promote_bathroom_label_walls(msp)
-    n_promoted += promote_curved_corner_walls(msp)
+    n_promoted += promote_office_label_walls(msp)
     n_promoted += promote_collinear_wall_continuations(msp)
     n_promoted += promote_diagonal_wall_turns(msp)
     n_promoted += promote_mullion_diagonal_walls(msp)
@@ -24691,6 +25635,8 @@ def apply_corrections(
     n_promoted += promote_x_cover_squares(msp)
     n_promoted += promote_triple_diagonal_walls(msp)
     n_promoted += promote_slanted_double_walls(msp)
+    # 곡선 모서리는 양끝이 WALL에 닿아야 한다. 기울어진 이중선 승격 뒤에 올린다.
+    n_promoted += promote_curved_corner_walls(msp)
     # 앞선 문 처리가 가로·세로가 아닌 양개문은 닫지 않는다. 마지막에 힌지 사이를 잇는다.
     n_promoted += add_paired_swing_walls(msp)
 
@@ -26339,15 +27285,11 @@ def mark_doors_and_columns(msp) -> dict[str, Any]:
             continue
         mark = id(entity) in column_ids
         box: list[float] | None = None
-        if _dxftype(entity) == "LWPOLYLINE" and entity.closed:
-            pts = [(float(p[0]), float(p[1])) for p in _poly_xy(entity)]
-            if len(pts) >= 4:
-                xs = [p[0] for p in pts]
-                ys = [p[1] for p in pts]
-                bw, bh = max(xs) - min(xs), max(ys) - min(ys)
-                if 400.0 <= bw <= 1500.0 and 400.0 <= bh <= 1500.0 and abs(bw - bh) <= max(bw, bh) * 0.22:
-                    mark = True
-                    box = _bbox(xs, ys)
+        if _dxftype(entity) == "LWPOLYLINE":
+            sq = _lwpoly_axis_square_box(entity, min_mm=400.0, max_mm=1500.0)
+            if sq is not None:
+                mark = True
+                box = _bbox([sq[0], sq[2]], [sq[1], sq[3]])
         if not mark:
             continue
         _mark_column(entity)
@@ -26580,7 +27522,7 @@ def render_wall_dxf_png(
     hatches: list = []
     wipeouts: list = []
     extra_segs: list[tuple[list[tuple[float, float]], str, object]] = []
-    arcs: list[tuple[float, float, float, float, float, bool]] = []
+    arcs: list[tuple[float, float, float, float, float, str]] = []
     circles: list[tuple[float, float, float]] = []
     xs: list[float] = []
     ys: list[float] = []
@@ -26607,7 +27549,7 @@ def render_wall_dxf_png(
                         _ar(e),
                         _asa(e),
                         _aea(e),
-                        layer == DOOR_LAYER,
+                        layer,
                     )
                 )
                 continue
@@ -26737,8 +27679,14 @@ def render_wall_dxf_png(
         ax.add_collection(
             LineCollection(door_segs, colors="#7cba25", linewidths=1.0, antialiased=True)
         )
-    # 문 스윙은 연두, 그 밖 호는 회색.
-    for cx, cy, radius, a0, a1, is_door in arcs:
+    # 문 스윙은 연두, WALL 호(곡선 모서리)는 빨강, 그 밖은 회색.
+    for cx, cy, radius, a0, a1, layer in arcs:
+        if layer == DOOR_LAYER:
+            color, lw = "#7cba25", 0.8
+        elif layer == WALL_LAYER:
+            color, lw = "#e74c3c", 1.1
+        else:
+            color, lw = "#555555", 0.6
         ax.add_patch(
             Arc(
                 (cx, cy),
@@ -26747,8 +27695,8 @@ def render_wall_dxf_png(
                 angle=0,
                 theta1=a0,
                 theta2=a1,
-                color="#7cba25" if is_door else "#555555",
-                linewidth=0.8 if is_door else 0.6,
+                color=color,
+                linewidth=lw,
             )
         )
     for cx, cy, radius in circles:

@@ -70,8 +70,61 @@ class UpDownStairTests(unittest.TestCase):
         self.assertTrue(all(line.dxf.layer == "WALL" for line in treads))
         self.assertEqual(edge.dxf.layer, "WALL")
         self.assertEqual(far.dxf.layer, "BASE")
+        # UP+DN 전용 경로: UP만이면 디딤을 WALL로 올리지 않는다.
         self.assertEqual(up_promoted, 0)
         self.assertTrue(all(line.dxf.layer == "BASE" for line in up_treads))
+
+    def test_up_only_with_treads_promotes_end_doubles(self):
+        """UP만 있어도 디딤이 있으면 양끝 이중면은 벽이다. 디딤은 남긴다."""
+        doc = ezdxf.new()
+        msp = doc.modelspace()
+        msp.add_text("UP", dxfattribs={"insert": (1000, -200), "height": 200, "layer": "BASE"})
+        treads = [_h(msp, 0, 1900, y) for y in (0, 300, 600, 900, 1200, 1500)]
+        ends = [
+            _v(msp, 0, 0, 1500),
+            _v(msp, -200, 0, 1500),
+            _v(msp, 1900, 0, 1500),
+            _v(msp, 2100, 0, 1500),
+        ]
+        # 디딤 없는 UP 화살표는 계단이 아니다
+        lone = ezdxf.new()
+        lone_msp = lone.modelspace()
+        lone_msp.add_text("UP", dxfattribs={"insert": (0, 0), "height": 200, "layer": "BASE"})
+        lone_wall = _v(lone_msp, 0, 0, 3000)
+        lone_mate = _v(lone_msp, 200, 0, 3000)
+
+        lib_llm_correct._stair_bbox_cache.clear()
+        promoted = lib_llm_correct.promote_stair_label_walls(msp)
+        self.assertGreaterEqual(promoted, 4)
+        self.assertTrue(all(line.dxf.layer == "BASE" for line in treads))
+        self.assertTrue(all(line.dxf.layer == "WALL" for line in ends))
+
+        lib_llm_correct._stair_bbox_cache.clear()
+        self.assertEqual(lib_llm_correct.promote_stair_label_walls(lone_msp), 0)
+        self.assertEqual(lone_wall.dxf.layer, "BASE")
+        self.assertEqual(lone_mate.dxf.layer, "BASE")
+
+        lib_llm_correct._stair_bbox_cache.clear()
+        cores = lib_llm_correct.find_stair_cores(msp)
+        self.assertTrue(any("UP" in labs for _cx, _cy, labs in cores))
+        self.assertEqual(lib_llm_correct.find_stair_cores(lone_msp), [])
+
+    def test_up_stair_single_end_line_becomes_wall(self):
+        """하역장 옆처럼 한쪽만 단선이어도 양옆을 올린다. 긴 단선(~8.5 m)도 포함한다."""
+        doc = ezdxf.new()
+        msp = doc.modelspace()
+        msp.add_text("UP", dxfattribs={"insert": (1000, -200), "height": 200, "layer": "BASE"})
+        treads = [_h(msp, 0, 1900, y) for y in (0, 300, 600, 900, 1200, 1500)]
+        left_double = [_v(msp, 0, 0, 1500), _v(msp, -200, 0, 1500)]
+        right_single = _v(msp, 1900, -2000, 6500)  # 8500 mm, 이중 없음
+
+        lib_llm_correct._stair_bbox_cache.clear()
+        promoted = lib_llm_correct.promote_stair_label_walls(msp)
+
+        self.assertGreaterEqual(promoted, 3)
+        self.assertTrue(all(line.dxf.layer == "BASE" for line in treads))
+        self.assertTrue(all(line.dxf.layer == "WALL" for line in left_double))
+        self.assertEqual(right_single.dxf.layer, "WALL")
 
 
 if __name__ == "__main__":

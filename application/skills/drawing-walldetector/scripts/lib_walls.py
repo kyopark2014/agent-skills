@@ -688,6 +688,42 @@ def _midline_centerline_keys(
 GRID_AXIS_MIN_LEN_MM = 10000.0
 GRID_AXIS_MIN_COUNT = 3
 GRID_AXIS_OVERLAP_RATIO = 0.50
+# 축 피치. 벽 두께(이중선)~멀리언 간격은 빼고, 건물 반대편 장축도 빼다.
+GRID_AXIS_PITCH_MIN_MM = 1500.0
+GRID_AXIS_PITCH_MAX_MM = 12000.0
+GRID_AXIS_THICK_MIN_MM = 30.0
+GRID_AXIS_THICK_MAX_MM = 420.0
+
+
+def _seg_ortho(s: Seg, *, along_x: bool) -> float:
+    """수평 그룹이면 y, 수직 그룹이면 x."""
+    if along_x:
+        return (s.y0 + s.y1) * 0.5
+    return (s.x0 + s.x1) * 0.5
+
+
+def _has_wall_thickness_mate_seg(
+    seg: Seg,
+    group: list[Seg],
+    *,
+    along_x: bool,
+    thick_min_mm: float = GRID_AXIS_THICK_MIN_MM,
+    thick_max_mm: float = GRID_AXIS_THICK_MAX_MM,
+    overlap_ratio: float = GRID_AXIS_OVERLAP_RATIO,
+) -> bool:
+    """벽 두께 대역의 평행 짝이 있으면 구조/창호 면이다. CEN 축이 아니다."""
+    ortho = _seg_ortho(seg, along_x=along_x)
+    for other in group:
+        if other.key == seg.key:
+            continue
+        pitch = abs(_seg_ortho(other, along_x=along_x) - ortho)
+        if not (thick_min_mm <= pitch <= thick_max_mm):
+            continue
+        if _pair_overlap(seg, other, along_x=along_x) >= overlap_ratio * min(
+            seg.length, other.length
+        ):
+            return True
+    return False
 
 
 def _parallel_grid_axis_keys(
@@ -697,10 +733,14 @@ def _parallel_grid_axis_keys(
     min_len_mm: float = GRID_AXIS_MIN_LEN_MM,
     min_count: int = GRID_AXIS_MIN_COUNT,
     overlap_ratio: float = GRID_AXIS_OVERLAP_RATIO,
+    pitch_min_mm: float = GRID_AXIS_PITCH_MIN_MM,
+    pitch_max_mm: float = GRID_AXIS_PITCH_MAX_MM,
 ) -> set[tuple[int, int]]:
     """층 스팬 긴 평행선이 여러 줄이면 기둥 축 격자로 보고 벽에서 뺀다.
 
-    CEN–CEN 이중선 짝, 짧은 벽면에 스친 긴 축선이 벽으로 오인되는 것을 막는다.
+    이웃 줄은 축 피치(1.5–12 m) 안에 있을 때만 센다.
+    길이·겹침만 보면 외벽·창호 이중선(간격 200 mm)도 격자로 빠진다.
+    벽 두께 이중선 짝이 있는 면은 격자가 아니다.
     실 테두리(보통 12 m 미만 조각)나 외벽 장축 1–2줄은 min_count에 못 미쳐 유지된다.
     """
     long = [s for s in group if s.length >= min_len_mm]
@@ -709,9 +749,15 @@ def _parallel_grid_axis_keys(
     found: set[tuple[int, int]] = set()
     need_peers = min_count - 1
     for s in long:
+        if _has_wall_thickness_mate_seg(s, group, along_x=along_x):
+            continue
         peers = 0
+        s_ortho = _seg_ortho(s, along_x=along_x)
         for other in long:
             if other.key == s.key:
+                continue
+            pitch = abs(_seg_ortho(other, along_x=along_x) - s_ortho)
+            if not (pitch_min_mm <= pitch <= pitch_max_mm):
                 continue
             ov = _pair_overlap(s, other, along_x=along_x)
             if ov >= overlap_ratio * min(s.length, other.length):
@@ -1531,7 +1577,8 @@ def classify_entities(
     - 글상자(TBOX) 변은 벽 면이 아니다. 나란한 중심선도 벽으로 올리지 않는다.
     - 기둥 축 격자(XC) 변은 벽 면이 아니다.
     - 이중선 한가운데 중심선(CEN 축선 등)은 벽 면이 아니다. 바깥 면끼리만 짝한다.
-    - 10 m 이상 평행선이 3줄 이상이면 기둥 축 격자다. 벽 면이 아니다.
+    - 10 m 이상 평행선이 축 피치(1.5–12 m)로 3줄 이상이면 기둥 축 격자다.
+      벽 두께 이중선(30–420 mm) 짝이 있으면 격자가 아니다.
     """
     profiles = _wall_condition_profiles(conditions, project)
     angle_tol = max(float(profile["candidate"]["angle_tolerance_deg"]) for profile in profiles)

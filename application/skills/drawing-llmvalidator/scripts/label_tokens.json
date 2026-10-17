@@ -1,0 +1,27 @@
+{
+  "bathroom": [
+    "화장실",
+    "WC",
+    "W.C",
+    "W.C.",
+    "TOILET",
+    "RESTROOM"
+  ],
+  "elevator": [
+    "승강기",
+    "엘리베이터",
+    "ELEV",
+    "E.V",
+    "E.V.",
+    "LIFT"
+  ],
+  "office": [
+    "PDR",
+    "사무실",
+    "상담실",
+    "회의실",
+    "접견실",
+    "OFFICE",
+    "MEETING"
+  ]
+}
