@@ -25,15 +25,16 @@ description: >-
 3. **층 단위만** — 기본 산출은 `floors/<F>/floor_original.dxf` (+ `.png`). `parts/`·`floor_parts_index.json`·`split_plan.*`를 **만들지 않는다**.
 4. **치수** — 층 PNG/DXF 미리보기에 전체·그리드 치수를 포함한다 (`lib_render.py`).
 5. **여러 층은 한 번에, 확인 없이** — 층이 둘 이상이면 `extract_2d.py`를 **한 번** 실행한다. `--floor all` 또는 `--floor 1F,3F` 처럼 쉼표로 적는다. 스크립트가 물리 CPU 코어 수만큼 층을 동시에 추출한다. `for FLOOR in …` 루프는 쓰지 않는다. 한 층이면 `--floor <F>`. 층 사이에 사용자 확인은 없다.
-6. **전 층 연속** — 다층이어도 파일럿 확인을 받지 않는다. 발견된 층을 순서대로 끝까지 추출한 뒤 구조 분석으로 넘어간다.
-7. **산출물 경로** — 층 산출은 **사용자 artifacts** (`$ARTIFACTS_DIR/<drawing_id>/`) 아래에만 저장한다. 예외는 프로젝트 도면 목록 `$ARTIFACTS_DIR/drawing_list.json` 하나다. 추출할 때마다 이 파일을 갱신하고, 다른 `drawing_id` 항목은 지우지 않는다. (아래 [Artifacts](#artifacts-layout))
-8. **미리보기** — 층 시각 확인은 `floors/<F>/floor_original.png`만 사용. `floor_structure.*` / `floor_overview.*` / `floor_*_2d.png` / `floor_*_geom.json`을 **만들지 않는다**. 도곽(sheet) 추출 시 미리보기 `bbox_mm` 핵은 그 층 도곽이다. 기존 meta가 DXF와 안 겹치면 primary 기하로 되돌린다(이중 도곽 bbox 혼선·흰 PNG 방지).
-9. **스크립트 사용** — 추출·분석은 스킬 `scripts/` 로만 수행한다. ad-hoc 일회성 코드로 대용량 DXF를 우회하지 않는다.
-10. **작업 로그** — 전체 작업 내용·파일 목록을 하나의 Markdown으로 남기고 사용자에게 전달한다.
-11. 응답은 **한국어**. 경로·JSON 키는 영문/숫자 유지.
-12. **타일 분할(레거시)** — 추후 다시 나눌 수 있으나 **현재 기본 경로가 아님**. 사용자가 명시할 때만 `plan_split.py` / `split_floor.py`를 사용한다.
-13. **DWG** — `--dxf`에 `.dwg`를 그대로 넣는다. `extract_2d.py`가 `$ARTIFACTS_DIR/<drawing_id>/<원본이름>.dxf`를 만든 뒤 그 DXF로 층을 추출한다. 그 DXF가 DWG보다 새로우면 다시 변환하지 않는다. 변환은 ODA File Converter, 없으면 `dwg2dxf`다. 에이전트가 따로 변환 명령을 만들지 않는다. 원본 DWG는 수정하지 않는다.
-14. **원본 파일명** — `--dxf`와 `--raw-dxf`에는 사용자가 올린 파일 경로를 그대로 넣는다. artifacts에 다른 이름으로 복사하지 않는다. `source_filename`과 `source_path`는 그 원본 파일이다.
+6. **extract는 백그라운드** — `extract_2d.py`는 대용량 DXF에서 수분~수십 분이 걸린다. 에이전트 bash/Shell **포그라운드 대기(기본 ~300초)로 돌리지 않는다**. `nohup … > /tmp/<drawing_id>_extract.log 2>&1 & echo $!` 로 띄운 뒤, 로그와 `$ARTIFACTS_DIR/<drawing_id>/extract_summary.json` 생성을 폴링한다. `summary →`가 로그에 나타나거나 `extract_summary.json`이 생길 때까지 구조 분석으로 넘어가지 않는다. `--list-floors`만 포그라운드가 허용된다.
+7. **전 층 연속** — 다층이어도 파일럿 확인을 받지 않는다. 발견된 층을 순서대로 끝까지 추출한 뒤 구조 분석으로 넘어간다.
+8. **산출물 경로** — 층 산출은 **사용자 artifacts** (`$ARTIFACTS_DIR/<drawing_id>/`) 아래에만 저장한다. 예외는 프로젝트 도면 목록 `$ARTIFACTS_DIR/drawing_list.json` 하나다. 추출할 때마다 이 파일을 갱신하고, 다른 `drawing_id` 항목은 지우지 않는다. (아래 [Artifacts](#artifacts-layout))
+9. **미리보기** — 층 시각 확인은 `floors/<F>/floor_original.png`만 사용. `floor_structure.*` / `floor_overview.*` / `floor_*_2d.png` / `floor_*_geom.json`을 **만들지 않는다**. 도곽(sheet) 추출 시 미리보기 `bbox_mm` 핵은 그 층 도곽이다. 기존 meta가 DXF와 안 겹치면 primary 기하로 되돌린다(이중 도곽 bbox 혼선·흰 PNG 방지).
+10. **스크립트 사용** — 추출·분석은 스킬 `scripts/` 로만 수행한다. ad-hoc 일회성 코드로 대용량 DXF를 우회하지 않는다.
+11. **작업 로그** — 전체 작업 내용·파일 목록을 하나의 Markdown으로 남기고 사용자에게 전달한다.
+12. 응답은 **한국어**. 경로·JSON 키는 영문/숫자 유지.
+13. **타일 분할(레거시)** — 추후 다시 나눌 수 있으나 **현재 기본 경로가 아님**. 사용자가 명시할 때만 `plan_split.py` / `split_floor.py`를 사용한다.
+14. **DWG** — `--dxf`에 `.dwg`를 그대로 넣는다. `extract_2d.py`가 `$ARTIFACTS_DIR/<drawing_id>/<원본이름>.dxf`를 만든 뒤 그 DXF로 층을 추출한다. 그 DXF가 DWG보다 새로우면 다시 변환하지 않는다. 변환은 ODA File Converter, 없으면 `dwg2dxf`다. 에이전트가 따로 변환 명령을 만들지 않는다. 원본 DWG는 수정하지 않는다.
+15. **원본 파일명** — `--dxf`와 `--raw-dxf`에는 사용자가 올린 파일 경로를 그대로 넣는다. artifacts에 다른 이름으로 복사하지 않는다. `source_filename`과 `source_path`는 그 원본 파일이다.
 
 ## Script Location
 
@@ -136,21 +137,26 @@ DXF 또는 DWG 입력 (artifacts/ 또는 --dxf)
 
 `drawing_id` 폴더가 이미 있어도 **묻지 않고** ①부터 진행한다. `floor_original.dxf` / `.png` / `_meta.json`과 `structure.md` / `structure.json` / `work_log.md`는 덮어쓴다. 폴더 전체를 삭제하지 않는다.
 
-### ① 층 추출 (확인 없이 전 층)
+### ① 층 추출 (확인 없이 전 층 · 백그라운드)
 
 ```bash
 # 위 Script Location bootstrap 후
-python3 "$SCRIPTS/extract_2d.py" \
+LOG="/tmp/<drawing_id>_extract.log"
+nohup python3 "$SCRIPTS/extract_2d.py" \
   --dxf "<업로드된 원본 DXF 또는 DWG 경로>" \
   --floor 12F \
   --out "$ARTIFACTS_DIR" \
-  --drawing-id <drawing_id>
+  --drawing-id <drawing_id> \
+  > "$LOG" 2>&1 &
+echo "PID=$! LOG=$LOG"
+# 완료 폴링: grep -q 'summary →' "$LOG" 또는 test -f "$ART/extract_summary.json"
 ```
 
 성공 시 `floors/12F/floor_original.dxf` / `.png` / `_meta.json`이 생긴다. 같은 파일이 있으면 덮어쓴다.  
 도곽 안에 건축 레이어(`ARCH`, `*_BG`·`*_CEN` 제외)가 있으면 그 선·실명과 문 스윙만 남긴다. 그 레이어의 창선은 벽과 같이 남긴다. 가구·카세트 배관·등고선은 넣지 않는다. 이 결과도 파일명은 `floor_original.png` 이다.  
 꺼진 레이어 위의 숨은선(`HIDDEN`, `HID2`, `HID` 등)은 뺀다. 켜진 레이어의 점선과 실선은 남긴다.  
-다층이면 **멈추지 말고** 다음 층을 바로 추출한다. 사용자 허락을 받지 않는다.
+다층이면 **멈추지 말고** 다음 층을 바로 추출한다. 사용자 허락을 받지 않는다.  
+포그라운드로 `python3 …extract_2d.py`를 붙잡고 기다리지 않는다(에이전트 bash ~300초 timeout).
 
 ### 층 구분 (블록 이름 → 도곽)
 
@@ -165,24 +171,31 @@ python3 "$SCRIPTS/extract_2d.py" \
   --list-floors
 ```
 
-4. 목록에 층이 있으면 **확인 없이 전 층**을 추출한다. 원본 DXF는 수정하지 않는다. 기존 `floor_original.*` 는 덮어쓴다.
+4. 목록에 층이 있으면 **확인 없이 전 층**을 **백그라운드**로 추출한다. 원본 DXF는 수정하지 않는다. 기존 `floor_original.*` 는 덮어쓴다.
 
 ```bash
-python3 "$SCRIPTS/extract_2d.py" \
+LOG="/tmp/<drawing_id>_extract.log"
+nohup python3 "$SCRIPTS/extract_2d.py" \
   --dxf "<업로드된 원본 DXF 또는 DWG 경로>" \
   --floor 1F \
   --out "$ARTIFACTS_DIR" \
-  --drawing-id <drawing_id>
+  --drawing-id <drawing_id> \
+  > "$LOG" 2>&1 &
+echo "PID=$! LOG=$LOG"
 ```
 
 층이 둘 이상이면 아래 한 번으로 추출한다. `--workers`를 생략하면 물리 CPU 코어 수다.
 
 ```bash
-python3 "$SCRIPTS/extract_2d.py" \
+LOG="/tmp/<drawing_id>_extract.log"
+nohup python3 "$SCRIPTS/extract_2d.py" \
   --dxf "<업로드된 원본 DXF 또는 DWG 경로>" \
   --floor all \
   --out "$ARTIFACTS_DIR" \
-  --drawing-id <drawing_id>
+  --drawing-id <drawing_id> \
+  > "$LOG" 2>&1 &
+echo "PID=$! LOG=$LOG"
+# 완료까지: tail -n 50 "$LOG" / test -f "$ARTIFACTS_DIR/<drawing_id>/extract_summary.json"
 ```
 
 `for FLOOR in …` 로 `extract_2d.py`를 여러 번 호출하지 않는다.
@@ -346,6 +359,7 @@ $ARTIFACTS_DIR/
 - [ ] 다층이면 확인 없이 전 층을 이어서 추출했는가
 - [ ] `XA-S-{N}F` 블록이 없으면 도곽·층 제목(`--list-floors`)으로 넘어갔는가 (중단하고 스킬 수정을 묻지 않음)
 - [ ] 여러 층은 `extract_2d.py` 한 번(`--floor all` 또는 쉼표 층)인가. `for` 루프는 없는가
+- [ ] `extract_2d.py`를 `nohup … > /tmp/<id>_extract.log 2>&1 &` 백그라운드로 돌렸는가. 포그라운드 대기는 아닌가
 - [ ] 미리보기로 `floor_structure.*` / `floor_*_2d.png` / `floor_overview.*`를 쓰지 않는가 (`floor_original.png`만)
 - [ ] `drawing_list.json` 각 도면에 원본 DXF `source_filename`을 `floors`보다 앞에 넣었는가
 
@@ -363,6 +377,7 @@ $ARTIFACTS_DIR/
 | 도곽은 있으나 층 제목·시설 평면도 제목·도면번호 TEXT가 없음 | `sheet_01`부터 도곽만으로 확인 없이 추출한다. PDF 임포트 도면이 이 경우다 |
 | 도곽·층 제목·시설 평면도 제목·도곽 테두리도 없음 | 추출하지 않는다. 원본은 그대로 두고 경고를 보고한다 |
 | `TimeoutExpired` (extract) | `--floor all` 은 유지한다. 동시에 너무 많으면 `--workers` 를 줄인다. `for` 루프로 나누지 않는다 |
+| bash/Shell `timed out after 300s` (extract) | 포그라운드 대기가 원인이다. `nohup … > /tmp/<id>_extract.log 2>&1 &` 로 재실행하고 로그·`extract_summary.json`을 폴링한다. timeout 값을 키워 포그라운드로 붙잡지 않는다 |
 | PNG에 도면이 좌·우 둘 | primary 클러스터(LINE 많은 쪽)만 bbox — `extract_2d` 공통 |
 | 치수 없음 | `--with-dims`, PNG 오버레이 + DXF `DIMS` 레이어 |
 | 원본 277MB 로드 실패 | 층별 `floor_original.dxf`를 먼저 만든 뒤 후속 스킬 |

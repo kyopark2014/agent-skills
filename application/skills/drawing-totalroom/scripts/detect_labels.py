@@ -3,6 +3,7 @@
 floor_label_detected.dxf / .png / .json 으로 쓴다.
 
 면적 계산은 drawing-roomevaluator 와 같다.
+면적·영역 제외와 집기·설비 토큰은 drawing-roomevaluator/scripts/label_info.json 을 따른다.
 DXF 는 검증 도면을 복사한 뒤 라벨마다 레이어를 더한다.
 그 레이어의 HATCH 면적이 그 라벨의 면적이고, 이름과 면적 문자가 같이 있다.
 PNG 는 그 DXF 를 검증 도면과 같은 렌더러로 그린 것이다.
@@ -52,32 +53,9 @@ MIN_LABEL_AREA_M2 = 2.0
 TINY_AREA_SKIP_REASON = "면적이 2 m² 이하입니다"
 # 가까운 거리부터 왼쪽·오른쪽·위·아래(mm).
 NUDGE_STEPS_MM = (100.0, 200.0, 300.0, 400.0, 600.0, 800.0, 1000.0, 1500.0, 2000.0)
-# 객실 안 집기 표기. 실이 아니므로 면적을 잡지 않는다.
-_FIXTURE_NAMES = (
-    "미니바",
-    "미비바",
-    "옷장",
-    "신발장",
-    "화분",
-    "어항",
-    "화장대",
-    "월풀욕조",
-    "욕조",
-    "장애인",
-    "(장애인)",
-)
-_FIXTURE_TAIL = re.compile(r"^(?:[#＃]?\d+|[（(]\d+[）)])?$")
-
-
 def is_fixture_label(text: str) -> bool:
-    """집기 이름, 또는 그 뒤에 번호만 붙은 표기."""
-    if room.is_equipment_label(text):
-        return True
-    name = room.norm_name(text)
-    return any(
-        name == fixture or (name.startswith(fixture) and _FIXTURE_TAIL.fullmatch(name[len(fixture) :]))
-        for fixture in _FIXTURE_NAMES
-    )
+    """집기 이름, 또는 그 뒤에 번호만 붙은 표기. 목록은 drawing-roomevaluator label_info.json."""
+    return room.is_fixture_label(text)
 
 
 def collect_labels(msp) -> list[tuple[float, float, str]]:
@@ -563,7 +541,7 @@ def _subtract_anchor_faces(msp, segs, detected: list[dict]) -> list[dict]:
 def _divide_on_dividers(msp, boxes, segs, detected: list[dict], door: str) -> list[dict]:
     """한 면에 라벨이 여러 개이면 그 사이의 벽이 아닌 선으로 면을 나눈다.
 
-    창고·차고·화장실·방풍실·보관실·퇴식대·샤워실·고압·저압·계단실·복도·승강기·EPS·OPEN·오픈·홀-·홈-·입구·출구·양치공간·청소도구함·청소도구실·실외기실·조경·배경·평면도·비품고을·항습기·화물·휠체어·린넨실·오물처리실·구급자·응급환자·의료가스실·기계실·(여)·(남)·문서고·기울기·자동방화·인)·인승·OTIS·Wlqtnwjd·DA#·DA(·올려옴·내려감·DOOR·패드·기저귀·침례탕약·설치·드라이기·유사용·상하부·분전함·세척실·탕비실·물품·스트레쳐·E.V·ELEV·ELEV. HALL·ELEV. 홀·WC·DA·유도등·단자함·소화전·다용도실·밸브·(근생)·정화조·피난기·보관소·속도·탑승대기공간·주거·배수·비상용·탑승대기·ST( 쪽은 실로 남기지 않는다.
+    창고·차고·화장실·방풍실·보관실·퇴식대·샤워실·고압·저압·계단실·복도·승강기·EPS·OPEN·오픈·홀-·홈-·입구·출구·양치공간·청소도구함·청소도구실·실외기실·조경·배경·평면도·비품고을·항습기·화물·휠체어·린넨실·오물처리실·구급자·응급환자·의료가스실·기계실·(여)·(남)·문서고·기울기·자동방화·인)·인승·OTIS·Wlqtnwjd·DA#·DA(·올려옴·내려감·DOOR·패드·기저귀·침례탕약·설치·드라이기·유사용·상하부·분전함·세척실·탕비실·물품·스트레쳐·E.V·ELEV·ELEV. HALL·ELEV. 홀·WC·DA·유도등·단자함·소화전·다용도실·밸브·(근생)·정화조·피난기·보관소·속도·주거·배수·비상용·탑승대기·ST( 쪽은 실로 남기지 않는다.
     """
     labels = [
         (x, y, text)
@@ -945,7 +923,7 @@ def detect(dxf_path: Path, meta_path: Path, door: str = "close") -> dict:
         "labels": public_labels,
         "skipped": skipped,
         "rules": {
-            "labels": "Korean room names, or Latin names with 2+ letters and a digit; stacked lines within 1.8 text heights are joined top to bottom; fixture callouts such as 미니바, 옷장, 신발장, 수납장, 하부장, 상부장, 옷봉설치, 장비, 데스크, 서랍, 온수기, 살균기, 소독기, 도어, 테이블, 정수기, 휴대폰장, 게시판, 렉장, 랙장, 냉장고, 제빙기, 머신, 커피, 전자레인지, 텀블러, 세척기, EV, 화분, 화장대, 월풀욕조, 욕조, (장애인) and non-area names 방풍실, 보관실, 퇴식대, 샤워실, 고압, 저압, 계단실, 복도, 승강기, EPS, OPEN, 오픈, 홀-, 홈-, 입구, 출구, 양치공간, 청소도구함, 청소도구실, 실외기실, 조경, 배경, 평면도, 비품고을, 항습기, 화물, 휠체어, 린넨실, 오물처리실, (장애인, 구급자, 응급환자, 의료가스실, 기계실, (여), (남), 문서고, 기울기, 자동방화, 인), 인승, OTIS, Wlqtnwjd, DA#, DA(, 올려옴, 내려감, DOOR, 패드, 기저귀, 침례탕약, 설치, 드라이기, 유사용, 상하부, 분전함, 세척실, 탕비실, 물품, 스트레쳐, E.V, ELEV, ELEV. HALL, ELEV. 홀, 유도등, 단자함, 소화전, 다용도실, 밸브, (근생), 정화조, 피난기, 보관소, 속도, 탑승대기공간, 주거, 배수, 비상용, 탑승대기, ST(, 탱크, 실외기, 마감, 콘크리트, 행거, 클립바, 수조, 발전기실, 집수정, ASD, W.C, 세면대, ARM실, 옷장, 용수대, 자동문, 거울, 세탁기, 기기배치, 폐쇄, 장애인겸용, 데크, 비품고, 전기실, 충전소, 급속, 폐기품, 폐기물, 콤프레셔, 설비실, 경계선, 대지안, 벽부형, 산책로, 올라옴, 수거함, 배기, FSD, DORDI, 승강식, OH4700, 유모차보관, C1A, C2A, C3A, TC1, PW1000, AG1100, 노출되는, 자전거, 피난구, DA-, 재활용, 급기, 주문제작, BC-, 부속실, 보일러실, 세탁실, 승강장, 테라스, 청결물실, 수납, 보일러, 옷방, 파우더, 선큰가든, 발코니, 정원, 배선실, 병동, 수족관, 피난용, 설비, 셔틀, 커텐, 공조실, 공조기, (관통), GS건설, MDF, 펌프실, 축척, 사물함, 석], 공용욕실, S.L-, F.L-, S.L, F.L, D.A, 장애인통로, 야외전망대, 안방욕실, LT-, 220V, 시공 are excluded",
+            "labels": "Korean room names, or Latin names with 2+ letters and a digit; stacked lines within 1.8 text heights are joined top to bottom; fixture callouts such as 미니바, 옷장, 신발장, 수납장, 하부장, 상부장, 옷봉설치, 장비, 데스크, 서랍, 온수기, 살균기, 소독기, 도어, 테이블, 정수기, 휴대폰장, 게시판, 렉장, 랙장, 냉장고, 제빙기, 머신, 커피, 전자레인지, 텀블러, 세척기, EV, 화분, 화장대, 월풀욕조, 욕조, (장애인) and non-area names 방풍실, 보관실, 퇴식대, 샤워실, 고압, 저압, 계단실, 복도, 승강기, EPS, OPEN, 오픈, 홀-, 홈-, 입구, 출구, 양치공간, 청소도구함, 청소도구실, 실외기실, 조경, 배경, 평면도, 비품고을, 항습기, 화물, 휠체어, 린넨실, 오물처리실, (장애인, 구급자, 응급환자, 의료가스실, 기계실, (여), (남), 문서고, 기울기, 자동방화, 인), 인승, OTIS, Wlqtnwjd, DA#, DA(, 올려옴, 내려감, DOOR, 패드, 기저귀, 침례탕약, 설치, 드라이기, 유사용, 상하부, 분전함, 세척실, 탕비실, 물품, 스트레쳐, E.V, ELEV, ELEV. HALL, ELEV. 홀, 유도등, 단자함, 소화전, 다용도실, 밸브, (근생), 정화조, 피난기, 보관소, 속도, 주거, 배수, 비상용, 탑승대기, ST(, 탱크, 실외기, 마감, 콘크리트, 행거, 클립바, 수조, 발전기실, 집수정, ASD, W.C, 세면대, ARM실, 옷장, 용수대, 자동문, 거울, 세탁기, 기기배치, 폐쇄, 장애인겸용, 데크, 비품고, 전기실, 충전소, 급속, 폐기품, 폐기물, 콤프레셔, 경계선, 대지안, 벽부형, 산책로, 올라옴, 수거함, 배기, FSD, DORDI, 승강식, OH4700, 유모차보관, C1A, C2A, C3A, TC1, PW1000, AG1100, 노출되는, 자전거, 피난구, DA-, 재활용, 급기, 주문제작, BC-, 부속실, 세탁실, 승강장, 테라스, 청결물실, 수납, 보일러, 옷방, 파우더, 선큰가든, 발코니, 정원, 배선실, 병동, 수족관, 피난용, 설비, 셔틀, 커텐, 공조실, 공조기, (관통), GS건설, MDF, 펌프실, 축척, 사물함, 석], 공용욕실, S.L, F.L, D.A, 장애인통로, 야외전망대, 안방욕실, LT-, 220V, 시공 are excluded",
             "font": "PNG text is the TEXT stored on each label layer, drawn by the floor sheet renderer",
             "png": "rendered from floor_label_detected.dxf",
             "door": door,

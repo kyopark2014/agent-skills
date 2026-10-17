@@ -89,234 +89,84 @@ def _roomish(text: str) -> bool:
     return re.search(r"[가-힣]", name) is not None
 
 
-# 면적 라벨에서만 뺀다. 이 글자로 벽을 올리지 않는다.
-LABEL_ONLY_AREA_TOKENS = (
-    "(여)",
-    "（여）",
-    "(남)",
-    "（남）",
-    "문서고",
-    "기울기",
-    "자동방화",
-    "인)",
-    "인）",
-    "인승",
-    "OTIS",
-    "WLQTNWJD",
-    "DA#",
-    "DA(",
-    "DA（",
-    "올려옴",
-    "내려감",
-    "DOOR",
-    "패드",
-    "기저귀",
-    "침례탕약",
-    "설치",
-    "드라이기",
-    "유사용",
-    "상하부",
-    "유도등",
-    "단자함",
-    "소화전",
-    "다용도실",
-    "밸브",
-    "(근생)",
-    "（근생）",
-    "정화조",
-    "피난기",
-    "보관소",
-    "속도",
-    "탑승대기공간",
-    "탑승대기",
-    "주거",
-    "배수",
-    "비상용",
-    "ST(",
-    "ST（",
-    "탱크",
-    "실외기",
-    "마감",
-    "콘크리트",
-    "행거",
-    "클립바",
-    "수조",
-    "발전기실",
-    "집수정",
-    "ASD",
-    "W.C",
-    "세면대",
-    "ARM실",
-    "옷장",
-    "용수대",
-    "자동문",
-    "거울",
-    "세탁기",
-    "기기배치",
-    "폐쇄",
-    "장애인겸용",
-    "데크",
-    "비품고",
-    "전기실",
-    "충전소",
-    "급속",
-    "폐기품",
-    "폐기물",
-    "콤프레셔",
-    "설비실",
-    "경계선",
-    "대지안",
-    "벽부형",
-    "산책로",
-    "올라옴",
-    "수거함",
-    "배기",
-    "FSD",
-    "DORDI",
-    "승강식",
-    "OH4700",
-    "유모차보관",
-    "C1A",
-    "C2A",
-    "C3A",
-    "TC1",
-    "PW1000",
-    "AG1100",
-    "노출되는",
-    "자전거",
-    "피난구",
-    "DA-",
-    "재활용",
-    "급기",
-    "주문제작",
-    "BC-",
-    "부속실",
-    "보일러실",
-    "세탁실",
-    "승강장",
-    "테라스",
-    "청결물실",
-    "수납",
-    "보일러",
-    "옷방",
-    "파우더",
-    "선큰가든",
-    "발코니",
-    "정원",
-    "배선실",
-    "병동",
-    "수족관",
-    "피난용",
-    "설비",
-    "셔틀",
-    "커텐",
-    "공조실",
-    "공조기",
-    "(관통)",
-    "GS건설",
-    "MDF",
-    "펌프실",
-    "축척",
-    "사물함",
-    "석]",
-    "공용욕실",
-    "S.L-",
-    "F.L-",
-    "S.L",
-    "F.L",
-    "D.A",
-    "장애인통로",
-    "야외전망대",
-    "안방욕실",
-    "LT-",
-    "220V",
-    "시공",
-)
+# 면적 제외·집기·설비 토큰 목록은 label_info.json.
+_LABEL_INFO_PATH = Path(__file__).resolve().parent / "label_info.json"
+_FIXTURE_TAIL = re.compile(r"^(?:[#＃]?\d+|[（(]\d+[）)])?$")
+
+
+def _require_string_list(data: dict, key: str, path: Path) -> list[str]:
+    tokens = data.get(key)
+    if not isinstance(tokens, list) or not all(isinstance(t, str) and t for t in tokens):
+        raise ValueError(f"label_info.json: {key} must be a non-empty string list ({path})")
+    return tokens
+
+
+def _load_label_info(path: Path = _LABEL_INFO_PATH) -> dict[str, tuple[str, ...]]:
+    data = json.loads(path.read_text(encoding="utf-8"))
+    # 부분 문자열 매칭은 공백 제거·영문 대문자. fixture 이름은 표기 그대로 norm 만.
+    return {
+        "label_only_area_tokens": tuple(
+            norm_name(t).upper() for t in _require_string_list(data, "label_only_area_tokens", path)
+        ),
+        "region_area_tokens": tuple(
+            norm_name(t).upper() for t in _require_string_list(data, "region_area_tokens", path)
+        ),
+        "equipment_tokens": tuple(
+            norm_name(t).upper().replace(".", "")
+            for t in _require_string_list(data, "equipment_tokens", path)
+        ),
+        "fixture_names": tuple(norm_name(t) for t in _require_string_list(data, "fixture_names", path)),
+        "non_room_tokens": tuple(
+            norm_name(t).upper() for t in _require_string_list(data, "non_room_tokens", path)
+        ),
+    }
+
+
+_LABEL_INFO = _load_label_info()
+LABEL_ONLY_AREA_TOKENS = _LABEL_INFO["label_only_area_tokens"]
+REGION_AREA_TOKENS = _LABEL_INFO["region_area_tokens"]
+EQUIPMENT_TOKENS = _LABEL_INFO["equipment_tokens"]
+FIXTURE_NAMES = _LABEL_INFO["fixture_names"]
+NON_ROOM_TOKENS = _LABEL_INFO["non_room_tokens"]
 
 
 def is_excluded_area_label(text: str, *, include_callouts: bool = True) -> bool:
-    """면적과 실 라벨에서 빼는 이름. 방풍실, 보관실, 퇴식대, 샤워실, 고압, 저압, 계단실, 복도, 승강기, EPS, OPEN, 홀-, 홈-, 입구, 출구, 양치공간, 청소도구함, 청소도구실, 실외기실, 오픈, 조경, 배경, 평면도, 비품고을, 항습기, 화물, 휠체어, 린넨실, 오물처리실, (장애인, 구급자, 응급환자, 의료가스실, 기계실, (여), (남), 문서고, 기울기, 자동방화, 인), 인승, OTIS, Wlqtnwjd, DA#, DA(, 올려옴, 내려감, DOOR, 패드, 기저귀, 침례탕약, 설치, 드라이기, 유사용, 상하부, 분전함, 세척실, 탕비실, 물품, 스트레쳐, E.V, ELEV. ELEV. HALL과 ELEV. 홀도 포함한다. (여), (남), 문서고, 기울기, 자동방화, 인), 인승, OTIS, Wlqtnwjd, DA#, DA(, 올려옴, 내려감, DOOR, 패드, 기저귀, 침례탕약, 설치, 드라이기, 유사용, 상하부, 유도등, 단자함, 소화전, 다용도실, 밸브, (근생), 정화조, 피난기, 보관소, 속도, 탑승대기공간, 주거, 배수, 비상용, 탑승대기, ST(, 탱크, 실외기, 마감, 콘크리트, 행거, 클립바, 수조, 발전기실, 집수정, ASD, W.C, 세면대, ARM실, 옷장, 용수대, 자동문, 거울, 세탁기, 기기배치, 폐쇄, 장애인겸용, 데크, 비품고, 전기실, 충전소, 급속, 폐기품, 폐기물, 콤프레셔, 설비실, 경계선, 대지안, 벽부형, 산책로, 올라옴, 수거함, 배기, FSD, DORDI, 승강식, OH4700, 유모차보관, C1A, C2A, C3A, TC1, PW1000, AG1100, 노출되는, 자전거, 피난구, DA-, 재활용, 급기, 주문제작, BC-, 부속실, 보일러실, 세탁실, 승강장, 테라스, 청결물실, 수납, 보일러, 옷방, 파우더, 선큰가든, 발코니, 정원, 배선실, 병동, 수족관, 피난용, 설비, 셔틀, 커텐, 공조실, 공조기, (관통), GS건설, MDF, 펌프실, 축척, 사물함, 석], 공용욕실, S.L-, F.L-, S.L, F.L, D.A, 장애인통로, 야외전망대, 안방욕실, LT-, 220V, 시공도 포함한다."""
+    """면적과 실 라벨에서 빼는 이름.
+
+    `label_info.json`의 `region_area_tokens`는 항상 제외하고,
+    `label_only_area_tokens`는 `include_callouts=True`일 때만 제외한다.
+    E.V / ELEV / EPS / PS 형태 매칭은 코드에 둔다. 공백을 없애고 영문은 대문자로 본다.
+    """
     name = norm_name(text)
     folded = name.upper()
     if include_callouts and any(token in folded for token in LABEL_ONLY_AREA_TOKENS):
         return True
-    if (
-        "OPEN" in folded
-        or "입구" in folded
-        or "출구" in folded
-        or "양치공간" in folded
-        or "청소도구함" in folded
-        or "청소도구실" in folded
-        or "실외기실" in folded
-        or "오픈" in folded
-        or "조경" in folded
-        or "배경" in folded
-        or "평면도" in folded
-        or "비품고을" in folded
-        or "항습기" in folded
-        or "화물" in folded
-        or "휠체어" in folded
-        or "린넨실" in folded
-        or "오물처리실" in folded
-        or "구급자" in folded
-        or "응급환자" in folded
-        or "의료가스실" in folded
-        or "기계실" in folded
-        or "분전함" in folded
-        or "세척실" in folded
-        or "(장애인" in folded
-        or "（장애인" in folded
-        or "탕비실" in folded
-        or "물품" in folded
-        or "스트레쳐" in folded
-        or "스트레처" in folded
-        or re.fullmatch(r"EV(?:[#＃-]?\d+)?", folded.replace(".", "")) is not None
-        or "ELEV" in folded.replace(".", "")
-        or folded.startswith("홀-")
-        or folded.startswith("홈-")
-    ):
+    if any(token in folded for token in REGION_AREA_TOKENS):
         return True
-    if any(token in folded for token in ("방풍실", "보관실", "퇴식대", "샤워실", "고압", "저압", "계단실", "복도", "승강기")):
+    nodot = folded.replace(".", "")
+    if re.fullmatch(r"EV(?:[#＃-]?\d+)?", nodot) is not None:
         return True
-    shaft = folded.replace(".", "")
-    return re.fullmatch(r"(?:EPS|PS)(?:[#＃-]?\d+)?", shaft) is not None
+    if "ELEV" in nodot:
+        return True
+    return re.fullmatch(r"(?:EPS|PS)(?:[#＃-]?\d+)?", nodot) is not None
 
 
 def is_equipment_label(text: str) -> bool:
-    """면적을 잡지 않는 집기·설비 표기. E.V는 여기가 아니라 면적 제외 이름이다."""
+    """면적을 잡지 않는 집기·설비 표기. 목록은 label_info.json의 equipment_tokens.
+    E.V는 여기가 아니라 면적 제외 이름이다."""
     name = norm_name(text)
     folded = name.upper().replace(".", "")
+    return any(token in folded for token in EQUIPMENT_TOKENS)
+
+
+def is_fixture_label(text: str) -> bool:
+    """객실 안 집기 이름, 또는 그 뒤에 번호만 붙은 표기. fixture_names + equipment_tokens."""
+    if is_equipment_label(text):
+        return True
+    name = norm_name(text)
     return any(
-        token in folded
-        for token in (
-            "수납장",
-            "하부장",
-            "상부장",
-            "옷봉설치",
-            "장비",
-            "데스크",
-            "서랍",
-            "온수기",
-            "살균기",
-            "소독기",
-            "도어",
-            "테이블",
-            "신발장",
-            "정수기",
-            "휴대폰장",
-            "게시판",
-            "렉장",
-            "랙장",
-            "냉장고",
-            "제빙기",
-            "머신",
-            "커피",
-            "전자랜지",
-            "전자레인지",
-            "템블러",
-            "텀블러",
-            "세척기",
-        )
+        name == fixture or (name.startswith(fixture) and _FIXTURE_TAIL.fullmatch(name[len(fixture) :]))
+        for fixture in FIXTURE_NAMES
     )
 
 
@@ -392,9 +242,9 @@ def is_room_label(text: str) -> bool:
     name = norm_name(text)
     # 마감·비치·주차 안내, 창고, 차고, 화장실, 방풍실, 보관실, 퇴식대, 샤워실, 고압, 저압, 계단실, 복도, EPS, WC, 입구, 출구, 상부 OPEN, DA는 면적 실이 아니다.
     folded = name.upper()
-    if is_excluded_area_label(text) or is_equipment_label(text):
+    if is_excluded_area_label(text) or is_fixture_label(text):
         return False
-    if any(token in folded for token in ("노출콘크리트", "질식소화덮개", "주차", "창고", "차고", "화장실", "입구", "출구", "상부OPEN")):
+    if any(token in folded for token in NON_ROOM_TOKENS):
         return False
     if folded in {"DA", "D.A", "D.A.", "WC", "W.C", "W.C.", "상부"}:
         return False
@@ -432,15 +282,13 @@ def is_region_label(text: str) -> bool:
     """한 면을 가를 때 다른 영역으로 보는 글자. 집기는 호출자가 뺀다."""
     if is_room_label(text) or is_split_anchor(text):
         return True
-    if is_equipment_label(text):
+    if is_equipment_label(text) or is_fixture_label(text):
         return is_excluded_area_label(text, include_callouts=False)
-    name = norm_name(text)
-    folded = name.upper()
-    if "창고" in folded or "차고" in folded:
-        return True
     # 패드1, 패드2처럼 번호만 붙은 표기는 면을 가를 때 참조하지 않는다.
     if is_excluded_area_label(text, include_callouts=False):
         return True
+    name = norm_name(text)
+    folded = name.upper()
     return folded in {"DA", "D.A", "D.A."}
 
 
