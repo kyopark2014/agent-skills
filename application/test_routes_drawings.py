@@ -65,6 +65,21 @@ class DrawingIdTests(unittest.TestCase):
             self.assertEqual(floors["drawing_id"], drawing_id)
             self.assertEqual(floors["floors"][0]["id"], "1F")
             self.assertTrue(floors["floors"][0]["original"])
+            self.assertEqual(floors["floors"][0]["label_count"], 0)
+
+            (floor_dir / "floor_label_detected.json").write_text(
+                json.dumps(
+                    {
+                        "labels": [
+                            {"label": "회의실", "area_m2": 12.0, "color": [1, 2, 3]},
+                            {"label": "", "area_m2": 1.0, "color": [1, 2, 3]},
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            floors = list_floor_catalog(artifacts, drawing_id)
+            self.assertEqual(floors["floors"][0]["label_count"], 1)
 
     def test_path_escape_ids_are_rejected(self):
         with tempfile.TemporaryDirectory() as raw:
@@ -332,7 +347,7 @@ class DrawingIdTests(unittest.TestCase):
                     self.assertLessEqual(tag["y"], 1280)
                     self.assertGreater(tag["area_m2"], 0)
 
-    def test_drawing_rating_defaults_to_neutral_and_updates(self):
+    def test_drawing_rating_defaults_to_pending_and_updates(self):
         with tempfile.TemporaryDirectory() as raw:
             artifacts = Path(raw)
             drawing_id = "hotel"
@@ -354,18 +369,71 @@ class DrawingIdTests(unittest.TestCase):
                 encoding="utf-8",
             )
             listed = list_drawings(artifacts)
-            self.assertEqual(listed["drawings"][0]["rating"], "neutral")
+            self.assertEqual(listed["drawings"][0]["rating"], "pending")
             self.assertIsNone(listed["drawings"][0]["size"])
             floors = list_floor_catalog(artifacts, drawing_id)
-            self.assertEqual(floors["rating"], "neutral")
+            self.assertEqual(floors["rating"], "pending")
             updated = set_drawing_rating(artifacts, drawing_id, "good")
             self.assertEqual(updated["rating"], "good")
             listed = list_drawings(artifacts)
             self.assertEqual(listed["drawings"][0]["rating"], "good")
             floors = list_floor_catalog(artifacts, drawing_id)
             self.assertEqual(floors["rating"], "good")
+            reviewed = set_drawing_rating(artifacts, drawing_id, "review")
+            self.assertEqual(reviewed["rating"], "review")
+            listed = list_drawings(artifacts)
+            self.assertEqual(listed["drawings"][0]["rating"], "review")
+            confirmed = set_drawing_rating(artifacts, drawing_id, "confirmed")
+            self.assertEqual(confirmed["rating"], "confirmed")
+            retested = set_drawing_rating(artifacts, drawing_id, "retest")
+            self.assertEqual(retested["rating"], "retest")
+            waiting = set_drawing_rating(artifacts, drawing_id, "pending")
+            self.assertEqual(waiting["rating"], "pending")
             with self.assertRaises(HTTPException):
                 set_drawing_rating(artifacts, drawing_id, "excellent")
+
+    def test_drawing_rating_does_not_bump_list_order(self):
+        with tempfile.TemporaryDirectory() as raw:
+            artifacts = Path(raw)
+            (artifacts / "drawing_list.json").write_text(
+                json.dumps(
+                    {
+                        "drawings": [
+                            {
+                                "drawing_id": "newer_edit",
+                                "folder": "newer_edit",
+                                "created_at": "2026-10-14T01:00:00+09:00",
+                                "updated_at": "2026-10-15T07:00:00+09:00",
+                                "status": "ready",
+                            },
+                            {
+                                "drawing_id": "older_edit",
+                                "folder": "older_edit",
+                                "created_at": "2026-10-15T01:00:00+09:00",
+                                "updated_at": "2026-10-15T02:00:00+09:00",
+                                "status": "ready",
+                            },
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            before = list_drawings(artifacts)
+            self.assertEqual(
+                [item["drawing_id"] for item in before["drawings"]],
+                ["newer_edit", "older_edit"],
+            )
+            set_drawing_rating(artifacts, "older_edit", "good")
+            after = list_drawings(artifacts)
+            self.assertEqual(
+                [item["drawing_id"] for item in after["drawings"]],
+                ["newer_edit", "older_edit"],
+            )
+            self.assertEqual(after["drawings"][1]["rating"], "good")
+            self.assertEqual(
+                after["drawings"][1]["updated_at"],
+                "2026-10-15T02:00:00+09:00",
+            )
 
     def test_drawing_list_includes_source_size_bytes(self):
         with tempfile.TemporaryDirectory() as raw:

@@ -12,6 +12,7 @@ function isNearBottom(el: HTMLElement): boolean {
 interface Props {
   messages: Message[];
   streaming: boolean;
+  loading?: boolean;
   streamText: string;
   streamEvents: ToolEvent[];
   taskTitle: string;
@@ -22,6 +23,7 @@ interface Props {
 export function ChatThread({
   messages,
   streaming,
+  loading = false,
   streamText,
   streamEvents,
   taskTitle,
@@ -74,6 +76,13 @@ export function ChatThread({
       </header>
       <div className="chat-scroll" ref={scrollRef}>
         <div className="chat-thread">
+          {loading ? (
+            <div className="chat-messages-loading" role="status" aria-live="polite">
+              <div className="sync-progress-spinner" aria-hidden="true" />
+              <p>메시지를 불러오는 중…</p>
+            </div>
+          ) : (
+            <>
           {messages.length === 0 && !streaming && (
             <div className="empty-state">
               <p>Amazon Bedrock AgentCore 기반 에이전트입니다.</p>
@@ -110,6 +119,8 @@ export function ChatThread({
             </>
           )}
           <div ref={bottomRef} />
+            </>
+          )}
         </div>
       </div>
       {footer}

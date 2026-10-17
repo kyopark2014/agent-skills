@@ -85,6 +85,9 @@ export default function App() {
   const [queuePausedByTaskId, setQueuePausedByTaskId] = useState<
     Record<string, boolean>
   >({});
+  /** Task id while GET /messages is in flight for the selected task. */
+  const [messagesLoadingTaskId, setMessagesLoadingTaskId] = useState<string | null>(null);
+  const messagesLoadingCountRef = useRef(0);
   /** True while polling /run after refresh when messages end on user. */
   const [recoveringTaskId, setRecoveringTaskId] = useState<string | null>(null);
   /** Stops re-polling a draft once /run says the agent is no longer active. */
@@ -113,6 +116,8 @@ export default function App() {
     recoverySettledKey !== recoveryKey;
   const isRecovering =
     Boolean(activeTaskId) && recoveringTaskId === activeTaskId;
+  const messagesLoading =
+    Boolean(activeTaskId) && messagesLoadingTaskId === activeTaskId;
   const showWaiting = activeStream.streaming || isRecovering;
   const activeQueuedMessages = activeTaskId
     ? (queuedByTaskId[activeTaskId] ?? [])
@@ -130,15 +135,31 @@ export default function App() {
   }, [queuedByTaskId]);
 
   const loadMessages = useCallback(async (taskId: string) => {
+    messagesLoadingCountRef.current += 1;
+    setMessagesLoadingTaskId(taskId);
     uiLog("messages:load start", { taskId });
-    const rows = await appDataService.getMessages(taskId);
-    uiLog("messages:load complete", {
-      taskId,
-      count: rows.length,
-      roles: rows.map((m) => m.role),
-    });
-    setMessages((prev) => stabilizeMessageKeys(prev, rows));
-    return rows;
+    try {
+      const rows = await appDataService.getMessages(taskId);
+      uiLog("messages:load complete", {
+        taskId,
+        count: rows.length,
+        roles: rows.map((m) => m.role),
+      });
+      if (activeTaskIdRef.current === taskId) {
+        setMessages((prev) => stabilizeMessageKeys(prev, rows));
+      }
+      return rows;
+    } finally {
+      messagesLoadingCountRef.current = Math.max(
+        0,
+        messagesLoadingCountRef.current - 1,
+      );
+      if (messagesLoadingCountRef.current === 0) {
+        setMessagesLoadingTaskId(null);
+      } else {
+        setMessagesLoadingTaskId(activeTaskIdRef.current);
+      }
+    }
   }, []);
 
   const refreshTasks = useCallback(async () => {
@@ -971,6 +992,7 @@ export default function App() {
           <ChatThread
             messages={messages}
             streaming={showWaiting}
+            loading={messagesLoading}
             streamText={activeStream.streamText}
             streamEvents={activeStream.streamEvents}
             taskTitle={activeTask?.title ?? "New task"}

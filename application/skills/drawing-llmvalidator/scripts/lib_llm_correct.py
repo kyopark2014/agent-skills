@@ -26512,6 +26512,25 @@ def floor_plot_bounds(bbox_mm: dict[str, float]) -> tuple[float, float, float, f
     return xmin, ymin, xmax, ymax, tick
 
 
+def bbox_overlaps_xy(
+    bbox_mm: dict[str, float],
+    xs: list[float],
+    ys: list[float],
+) -> bool:
+    """True when axis-aligned ``bbox_mm`` overlaps the point cloud."""
+    if not xs or not ys:
+        return True
+    try:
+        return not (
+            float(bbox_mm["xmax"]) < min(xs)
+            or float(bbox_mm["xmin"]) > max(xs)
+            or float(bbox_mm["ymax"]) < min(ys)
+            or float(bbox_mm["ymin"]) > max(ys)
+        )
+    except (KeyError, TypeError, ValueError):
+        return False
+
+
 def floor_sheet_mm_per_inch(bbox_mm: dict[str, float], px_width: int, dpi: int = 200) -> float:
     """층 PNG에서 도면 1인치가 차지하는 mm. 라벨 판 크기를 글자와 맞출 때 쓴다."""
     xmin, _ymin, xmax, _ymax, _tick = floor_plot_bounds(bbox_mm)
@@ -26665,6 +26684,15 @@ def render_wall_dxf_png(
             base_segs.append(pts)
         else:
             extra_segs.append((pts, layer, e))
+
+    if bbox_mm and xs and ys and not bbox_overlaps_xy(bbox_mm, xs, ys):
+        print(
+            "  [warn] bbox_mm misses DXF geometry "
+            f"(bbox y={float(bbox_mm.get('ymin', 0)):.1f}..{float(bbox_mm.get('ymax', 0)):.1f}, "
+            f"geom y={min(ys):.1f}..{max(ys):.1f}); using entity extents",
+            flush=True,
+        )
+        bbox_mm = None
 
     if bbox_mm:
         cx0 = float(bbox_mm["xmin"])

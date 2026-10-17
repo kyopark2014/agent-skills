@@ -1887,6 +1887,23 @@ def render_walls_png(
             continue
         wall_segs.append([(s.x0, s.y0), (s.x1, s.y1)])
 
+    if bbox_mm is not None and xs and ys:
+        if isinstance(bbox_mm, dict):
+            bx0 = float(bbox_mm["xmin"])
+            by0 = float(bbox_mm["ymin"])
+            bx1 = float(bbox_mm["xmax"])
+            by1 = float(bbox_mm["ymax"])
+        else:
+            bx0, by0, bx1, by1 = (float(v) for v in bbox_mm)
+        if bx1 < min(xs) or bx0 > max(xs) or by1 < min(ys) or by0 > max(ys):
+            print(
+                "  [warn] bbox_mm misses DXF geometry "
+                f"(bbox y={by0:.1f}..{by1:.1f}, geom y={min(ys):.1f}..{max(ys):.1f}); "
+                "using entity extents",
+                flush=True,
+            )
+            bbox_mm = None
+
     if bbox_mm is not None:
         if isinstance(bbox_mm, dict):
             cx0 = float(bbox_mm["xmin"])

@@ -8,7 +8,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from extract_2d import original_upload_source
+from extract_2d import original_upload_source, upsert_drawing_list
 
 
 class OriginalUploadSourceTests(unittest.TestCase):
@@ -34,6 +34,33 @@ class OriginalUploadSourceTests(unittest.TestCase):
             copy = artifacts / "slug.dxf"
             copy.write_bytes(b"same")
             self.assertEqual(original_upload_source(copy), copy.resolve())
+
+    def test_upsert_resets_rating_to_pending(self):
+        import json
+        from types import SimpleNamespace
+
+        with self._tree() as (root, upload, artifacts):
+            source = upload / "plan.dxf"
+            source.write_bytes(b"plan")
+            (artifacts / "drawing_list.json").write_text(
+                json.dumps(
+                    {
+                        "drawings": [
+                            {
+                                "drawing_id": "hotel",
+                                "folder": "hotel",
+                                "rating": "good",
+                                "floors": [],
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            layout = SimpleNamespace(method="test", floors=["1F"], sheets=[], warnings=[])
+            upsert_drawing_list(artifacts, "hotel", source, layout, [])
+            catalog = json.loads((artifacts / "drawing_list.json").read_text(encoding="utf-8"))
+            self.assertEqual(catalog["drawings"][0]["rating"], "pending")
 
     def _tree(self):
         import tempfile

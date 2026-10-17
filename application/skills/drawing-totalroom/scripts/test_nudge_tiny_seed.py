@@ -107,6 +107,28 @@ class NudgeTinySeedTest(unittest.TestCase):
         self.assertGreater(found["area_m2"], labels.MIN_LABEL_AREA_M2)
         self.assertEqual((seed_x, seed_y), (4000.0, 4000.0))
 
+    def test_isolated_tiny_room_is_discarded(self):
+        """옆 큰 실이 없으면 2 m² 이하 칸은 버린다."""
+        doc = ezdxf.new()
+        msp = doc.modelspace()
+        _wall_room(msp, [(0.0, 0.0), (800.0, 0.0), (800.0, 800.0), (0.0, 800.0)])
+        boxes = labels.room.column_boxes(msp)
+        segs = labels.room.wall_segments(msp, boxes)
+
+        found, reason, seed_x, seed_y = labels.detect_one_with_nudge(
+            msp, boxes, segs, 400.0, 400.0
+        )
+        self.assertIsNone(found)
+        self.assertEqual(reason, labels.TINY_AREA_SKIP_REASON)
+        self.assertEqual((seed_x, seed_y), (400.0, 400.0))
+
+        kept, skipped = labels._drop_tiny_faces(
+            [{"text": "창고", "x": 1.0, "y": 2.0, "area_m2": 1.5}],
+            [],
+        )
+        self.assertEqual(kept, [])
+        self.assertEqual(skipped[0]["reason"], labels.TINY_AREA_SKIP_REASON)
+
 
 if __name__ == "__main__":
     unittest.main()

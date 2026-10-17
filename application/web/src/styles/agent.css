@@ -887,6 +887,22 @@ select {
   line-height: 1.6;
 }
 
+.chat-messages-loading {
+  margin: auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 14px;
+  color: var(--text-muted);
+  text-align: center;
+}
+
+.chat-messages-loading p {
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.45;
+}
+
 .message-row {
   display: flex;
   flex-direction: column;
@@ -2954,6 +2970,12 @@ button.config-popover-choice.is-selected {
   -webkit-appearance: none;
 }
 
+.drawing-list-select.is-rating-pending {
+  color: #8a8a8a;
+  -webkit-text-fill-color: #8a8a8a;
+  border-color: var(--border);
+}
+
 .drawing-list-select.is-rating-good {
   color: #3d9a5f;
   -webkit-text-fill-color: #3d9a5f;
@@ -2963,6 +2985,24 @@ button.config-popover-choice.is-selected {
 .drawing-list-select.is-rating-bad {
   color: #e091a8;
   -webkit-text-fill-color: #e091a8;
+  border-color: var(--border);
+}
+
+.drawing-list-select.is-rating-review {
+  color: #c9a227;
+  -webkit-text-fill-color: #c9a227;
+  border-color: var(--border);
+}
+
+.drawing-list-select.is-rating-confirmed {
+  color: #4a90c8;
+  -webkit-text-fill-color: #4a90c8;
+  border-color: var(--border);
+}
+
+.drawing-list-select.is-rating-retest {
+  color: #e07a3d;
+  -webkit-text-fill-color: #e07a3d;
   border-color: var(--border);
 }
 

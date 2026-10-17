@@ -27,7 +27,7 @@ description: >-
 5. **여러 층은 한 번에, 확인 없이** — 층이 둘 이상이면 `extract_2d.py`를 **한 번** 실행한다. `--floor all` 또는 `--floor 1F,3F` 처럼 쉼표로 적는다. 스크립트가 물리 CPU 코어 수만큼 층을 동시에 추출한다. `for FLOOR in …` 루프는 쓰지 않는다. 한 층이면 `--floor <F>`. 층 사이에 사용자 확인은 없다.
 6. **전 층 연속** — 다층이어도 파일럿 확인을 받지 않는다. 발견된 층을 순서대로 끝까지 추출한 뒤 구조 분석으로 넘어간다.
 7. **산출물 경로** — 층 산출은 **사용자 artifacts** (`$ARTIFACTS_DIR/<drawing_id>/`) 아래에만 저장한다. 예외는 프로젝트 도면 목록 `$ARTIFACTS_DIR/drawing_list.json` 하나다. 추출할 때마다 이 파일을 갱신하고, 다른 `drawing_id` 항목은 지우지 않는다. (아래 [Artifacts](#artifacts-layout))
-8. **미리보기** — 층 시각 확인은 `floors/<F>/floor_original.png`만 사용. `floor_structure.*` / `floor_overview.*` / `floor_*_2d.png` / `floor_*_geom.json`을 **만들지 않는다**.
+8. **미리보기** — 층 시각 확인은 `floors/<F>/floor_original.png`만 사용. `floor_structure.*` / `floor_overview.*` / `floor_*_2d.png` / `floor_*_geom.json`을 **만들지 않는다**. 도곽(sheet) 추출 시 미리보기 `bbox_mm` 핵은 그 층 도곽이다. 기존 meta가 DXF와 안 겹치면 primary 기하로 되돌린다(이중 도곽 bbox 혼선·흰 PNG 방지).
 9. **스크립트 사용** — 추출·분석은 스킬 `scripts/` 로만 수행한다. ad-hoc 일회성 코드로 대용량 DXF를 우회하지 않는다.
 10. **작업 로그** — 전체 작업 내용·파일 목록을 하나의 Markdown으로 남기고 사용자에게 전달한다.
 11. 응답은 **한국어**. 경로·JSON 키는 영문/숫자 유지.
@@ -268,9 +268,12 @@ $ARTIFACTS_DIR/
   "created_at": "",
   "updated_at": "",
   "status": "ready",
+  "rating": "pending",
   "floors": []
 }
 ```
+
+`rating`은 사람 평가 마킹이다. 값은 `pending`(대기) / `good`(좋음) / `neutral`(중립) / `bad`(나쁨) / `review`(검토). 기본·재추출 시에는 항상 `pending`으로 둔다.
 
 ---
 

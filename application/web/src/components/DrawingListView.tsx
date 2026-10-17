@@ -4,14 +4,28 @@ import { api, type DrawingFloorRef, type DrawingRating, type DrawingSummary } fr
 import { MenuIcon } from "./SidebarIcons";
 
 const RATING_OPTIONS: Array<{ value: DrawingRating; label: string }> = [
+  { value: "pending", label: "대기" },
   { value: "good", label: "좋음" },
   { value: "neutral", label: "중립" },
   { value: "bad", label: "나쁨" },
+  { value: "review", label: "검토" },
+  { value: "confirmed", label: "확인" },
+  { value: "retest", label: "다시" },
 ];
 
 function normalizeRating(value: string | undefined | null): DrawingRating {
-  if (value === "good" || value === "bad" || value === "neutral") return value;
-  return "neutral";
+  if (
+    value === "pending" ||
+    value === "good" ||
+    value === "bad" ||
+    value === "neutral" ||
+    value === "review" ||
+    value === "confirmed" ||
+    value === "retest"
+  ) {
+    return value;
+  }
+  return "pending";
 }
 
 interface Props {
@@ -23,7 +37,7 @@ interface Props {
   onRestart: (drawing: DrawingSummary) => Promise<void>;
 }
 
-function formatCreatedAt(value: string | undefined): string {
+function formatListStamp(value: string | undefined): string {
   const raw = (value || "").trim();
   if (!raw) return "—";
   const date = new Date(raw);
@@ -35,6 +49,37 @@ function formatCreatedAt(value: string | undefined): string {
     hour: "2-digit",
     minute: "2-digit",
   });
+}
+
+/** Prefer updated_at so the list tracks recent edits, not first create. */
+function listStamp(drawing: DrawingSummary): string {
+  return (drawing.updated_at || drawing.created_at || "").trim();
+}
+
+function byListStampDesc(a: DrawingSummary, b: DrawingSummary): number {
+  return listStamp(b).localeCompare(listStamp(a));
+}
+
+/** Same folder (or same source file) can appear more than once after re-extract; keep newest. */
+function dedupeKey(drawing: DrawingSummary): string {
+  const folder = (drawing.folder || "").trim();
+  if (folder) return `folder:${folder}`;
+  const name = (drawing.source_filename || "").trim();
+  if (name) return `file:${name}`;
+  return `id:${drawing.drawing_id}`;
+}
+
+function keepLatestDrawings(drawings: DrawingSummary[]): DrawingSummary[] {
+  const sorted = drawings.slice().sort(byListStampDesc);
+  const seen = new Set<string>();
+  const out: DrawingSummary[] = [];
+  for (const drawing of sorted) {
+    const key = dedupeKey(drawing);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(drawing);
+  }
+  return out;
 }
 
 function formatFileSize(bytes: number | null | undefined): string {
@@ -74,7 +119,9 @@ export function DrawingListView({
       setError(null);
       try {
         const data = await api.listDrawings();
-        if (!cancelled) setDrawings(data.drawings ?? []);
+        if (!cancelled) {
+          setDrawings(keepLatestDrawings(data.drawings ?? []));
+        }
       } catch (err) {
         if (!cancelled) {
           setError(err instanceof Error ? err.message : "도면 목록을 불러오지 못했습니다.");
@@ -129,15 +176,20 @@ export function DrawingListView({
     if (previous === rating) return;
     setRatingBusyId(drawing.drawing_id);
     setError(null);
+    // Rating is marking-only; keep list order (do not bump updated_at).
     setDrawings((prev) =>
-      prev.map((item) => (item.drawing_id === drawing.drawing_id ? { ...item, rating } : item)),
+      prev.map((item) =>
+        item.drawing_id === drawing.drawing_id ? { ...item, rating } : item,
+      ),
     );
     try {
       await api.setDrawingRating(drawing.drawing_id, rating);
     } catch (err) {
       setDrawings((prev) =>
         prev.map((item) =>
-          item.drawing_id === drawing.drawing_id ? { ...item, rating: previous } : item,
+          item.drawing_id === drawing.drawing_id
+            ? { ...item, rating: previous }
+            : item,
         ),
       );
       setError(err instanceof Error ? err.message : "평가를 저장하지 못했습니다.");
@@ -224,7 +276,7 @@ export function DrawingListView({
                           {title}
                         </span>
                         <span className="drawing-list-sub">
-                          {`생성: ${formatCreatedAt(drawing.created_at)}`}
+                          {`수정: ${formatListStamp(listStamp(drawing))}`}
                           {" · "}
                           {`폴더: ${drawing.folder || "—"}`}
                           {" · "}

@@ -31,6 +31,27 @@ _IMAGE_KINDS = {
 }
 _LABEL_JSON = "floor_label_detected.json"
 _ORIGINAL_META = "floor_original_meta.json"
+
+
+def _floor_label_count(floor_dir: Path) -> int:
+    """How many named labels ``floor_label_detected.json`` still lists."""
+    path = floor_dir / _LABEL_JSON
+    if not path.is_file():
+        return 0
+    try:
+        loaded = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return 0
+    if not isinstance(loaded, dict):
+        return 0
+    count = 0
+    for item in loaded.get("labels") or []:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("label") or item.get("layer") or "").strip()
+        if name:
+            count += 1
+    return count
 # Must match render_wall_dxf_png canvas padding (top, right, bottom).
 _PNG_PAD_TOP = 160
 _PNG_PAD_RIGHT = 200
@@ -113,8 +134,8 @@ class DrawingRatingBody(BaseModel):
     rating: str
 
 
-_RATING_VALUES = frozenset({"good", "neutral", "bad"})
-_DEFAULT_RATING = "neutral"
+_RATING_VALUES = frozenset({"pending", "good", "neutral", "bad", "review", "confirmed", "retest"})
+_DEFAULT_RATING = "pending"
 
 
 def _normalize_rating(value: object) -> str:
@@ -365,6 +386,7 @@ def list_floor_catalog(artifacts: Path, drawing_id: str) -> dict:
                 "wall": (floor_dir / _IMAGE_KINDS["wall"]).is_file(),
                 "validated": (floor_dir / _IMAGE_KINDS["validated"]).is_file(),
                 "label": (floor_dir / _IMAGE_KINDS["label"]).is_file(),
+                "label_count": _floor_label_count(floor_dir),
             }
         )
     return {
@@ -729,19 +751,19 @@ def delete_drawing(artifacts: Path, drawing_id: str) -> dict:
 
 
 def set_drawing_rating(artifacts: Path, drawing_id: str, rating: str) -> dict:
-    """Persist good / neutral / bad on the drawing catalog row."""
+    """Persist pending / good / neutral / bad / review / confirmed / retest on the drawing catalog row."""
     drawing_id = _safe_id(drawing_id) or ""
     if not drawing_id:
         raise HTTPException(status_code=400, detail="Invalid drawing id")
     normalized = _normalize_rating(rating)
     if str(rating or "").strip().lower() not in _RATING_VALUES:
-        raise HTTPException(status_code=400, detail="평가는 좋음, 중립, 나쁨 중 하나여야 합니다.")
+        raise HTTPException(status_code=400, detail="평가는 대기, 좋음, 중립, 나쁨, 검토, 확인, 다시 중 하나여야 합니다.")
     catalog = load_drawing_catalog(artifacts)
     entry = _find_entry(catalog, drawing_id)
     if entry is None:
         raise HTTPException(status_code=404, detail="Drawing not found")
     entry["rating"] = normalized
-    entry["updated_at"] = datetime.now().astimezone().isoformat(timespec="seconds")
+    # Rating is marking-only; do not bump updated_at or list order.
     _write_catalog(artifacts, catalog)
     summary = _summary(entry, artifacts)
     assert summary is not None

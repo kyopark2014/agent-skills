@@ -469,11 +469,16 @@ def create_task(
     llm_gateway_enabled: bool = False,
     memory_enabled: bool = True,
     title: str = "New task",
+    persist: bool = True,
 ) -> dict[str, Any]:
     task_id = str(uuid.uuid4())
     # Keep the checkpoint namespace aligned with the task identity.
     runtime_session_id = task_id
     now = _now_iso()
+    skill_list = list(skills or [])
+    mcp_list = list(mcp_servers or [])
+    resolved_model = model_name or DEFAULT_MODEL
+    resolved_title = title or "New task"
     with _connect_user(user_id) as conn:
         conn.execute(
             """
@@ -486,11 +491,11 @@ def create_task(
             (
                 task_id,
                 user_id,
-                title,
+                resolved_title,
                 runtime_session_id,
-                model_name or DEFAULT_MODEL,
-                json.dumps(skills or [], ensure_ascii=False),
-                json.dumps(mcp_servers or [], ensure_ascii=False),
+                resolved_model,
+                json.dumps(skill_list, ensure_ascii=False),
+                json.dumps(mcp_list, ensure_ascii=False),
                 1 if guardrail_enabled else 0,
                 1 if llm_gateway_enabled else 0,
                 1 if memory_enabled else 0,
@@ -500,8 +505,26 @@ def create_task(
         )
     # Flush immediately so sibling ECS tasks / replacements can see the row
     # (debounced persist alone loses creates during rolling deploys).
-    flush_persist(user_id)
-    return get_task(task_id, user_id)  # type: ignore[return-value]
+    # Batch callers pass persist=False and flush once.
+    if persist:
+        flush_persist(user_id)
+    else:
+        schedule_persist(user_id)
+    return {
+        "id": task_id,
+        "user_id": user_id,
+        "title": resolved_title,
+        "runtime_session_id": runtime_session_id,
+        "model_name": resolved_model,
+        "skills": skill_list,
+        "mcp_servers": mcp_list,
+        "guardrail_enabled": bool(guardrail_enabled),
+        "llm_gateway_enabled": bool(llm_gateway_enabled),
+        "memory_enabled": bool(memory_enabled),
+        "pinned": False,
+        "created_at": now,
+        "updated_at": now,
+    }
 
 
 def update_task(task_id: str, user_id: str, **fields: Any) -> dict[str, Any] | None:

@@ -529,6 +529,7 @@ _DRAWING_KEY_ORDER = (
     "created_at",
     "updated_at",
     "status",
+    "rating",
     "layout_method",
     "discovered_floors",
     "layout_warnings",
@@ -632,6 +633,8 @@ def upsert_drawing_list(
         entry["source_path"] = str(source)
         entry["source_size_bytes"] = entry.get("source_size_bytes")
     entry["updated_at"] = now
+    # Re-extraction resets human marking; pending = 대기.
+    entry["rating"] = "pending"
     entry["layout_method"] = getattr(layout, "method", None)
     discovered = list(getattr(layout, "floors", []) or [])
     entry["discovered_floors"] = discovered
@@ -1084,8 +1087,10 @@ def extract_sheet_floor(
         raise RuntimeError(f"{floor}: 도곽 안에 기하가 없습니다 ({sheet.title})")
 
     bbox = clip
-    # 미리보기 bbox는 크롭 범위라 좌표 원점이 아니다. 맞추면 재추출마다 도면이 밀린다.
-    plan_bb = None
+    # 미리보기 핵은 도곽(시트) bbox. 엔티티는 이 범위로 잘렸으므로 창이 도면과 맞다.
+    # origin_shift 에는 쓰지 않는다(재추출 시 좌표 밀림 방지). plan_bb=None 이면
+    # render_floor_original_preview 가 다른 층 stale meta 를 재사용해 흰 PNG 가 날 수 있다.
+    plan_bb = (x0, y0, x1, y1)
     if origin_shift_mode == "bbox":
         origin = (bbox[0], bbox[1])
         align_note = "origin=bbox min"

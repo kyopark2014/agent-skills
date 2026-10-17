@@ -266,10 +266,62 @@ class ExcludedAreaLabelTests(unittest.TestCase):
             "51병동",
             "병동1",
             "병동-2",
+            "수족관",
+            "수족관-1",
+            "피난용",
+            "설비",
+            "설비구역",
+            "셔틀",
+            "셔틀엘리베이터",
+            "커텐",
+            "커텐박스",
+            "공조실",
+            "공조실-1",
+            "공조기",
+            "공조기-1",
+            "(관통)",
+            "관통(관통)",
+            "GS건설",
+            "gs건설",
+            "MDF",
+            "MDF실",
+            "mdf",
+            "펌프실",
+            "펌프실-1",
+            "축척",
+            "축척1",
+            "사물함",
+            "사물함-1",
+            "석]",
+            "공용욕실",
+            "공용욕실-1",
+            "S.L-",
+            "S.L-1",
+            "S.L",
+            "F.L-",
+            "F.L+100",
+            "F.L",
+            "장애인 통로",
+            "장애인통로",
+            "야외전망대",
+            "야외전망대-1",
+            "안방욕실",
+            "안방욕실1",
+            "LT-",
+            "LT-07",
+            "lt-07",
+            "220V",
+            "220v",
+            "시공",
+            "시공범위",
         ):
             self.assertTrue(evaluate_room.is_excluded_area_label(text), text)
             self.assertFalse(evaluate_room.is_room_label(text), text)
             self.assertFalse(evaluate_room.is_region_label(text), text)
+        for text in ("D.A", "D.A."):
+            self.assertTrue(evaluate_room.is_excluded_area_label(text), text)
+            self.assertFalse(evaluate_room.is_room_label(text), text)
+            self.assertTrue(evaluate_room.is_region_label(text), text)
         for text in ("패드1", "패드2", "패드 2", "패드-1", "패드#2", "문서고1", "DOOR1", "OTIS2", "기저귀2", "설치1", "DA#2"):
             self.assertTrue(evaluate_room.is_excluded_area_label(text), text)
             self.assertFalse(evaluate_room.is_room_label(text), text)

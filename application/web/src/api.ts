@@ -53,6 +53,31 @@ export interface LlmGatewayVerifyResult {
   ui_models?: string[];
 }
 
+function formatHttpErrorMessage(status: number, body: string, statusText: string): string {
+  const text = (body || "").trim();
+  if (text) {
+    try {
+      const parsed = JSON.parse(text) as { detail?: string | { msg?: string }[] };
+      if (typeof parsed.detail === "string" && parsed.detail) {
+        return parsed.detail;
+      }
+    } catch {
+      // HTML/gateway pages (CloudFront 504, ALB errors) are not JSON.
+    }
+    const lower = text.toLowerCase();
+    if (lower.includes("<html") || lower.includes("<!doctype")) {
+      if (status === 504 || lower.includes("504") || lower.includes("gateway timeout")) {
+        return "요청 시간이 초과되었습니다. 선택한 항목 수를 줄이거나 잠시 후 다시 시도하세요.";
+      }
+      if (status === 502 || status === 503 || lower.includes("502") || lower.includes("503")) {
+        return "서버에 일시적으로 연결할 수 없습니다. 잠시 후 다시 시도하세요.";
+      }
+      return `요청에 실패했습니다 (${status || "error"}). 잠시 후 다시 시도하세요.`;
+    }
+  }
+  return text || statusText || `Request failed (${status}).`;
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const method = init?.method ?? "GET";
   uiLog(`api:${method} ${path}`);
@@ -67,16 +92,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   if (!res.ok) {
     const text = await res.text();
     uiError(`api:${method} ${path} failed`, { status: res.status, body: text });
-    let message = text || res.statusText;
-    try {
-      const parsed = JSON.parse(text) as { detail?: string | { msg?: string }[] };
-      if (typeof parsed.detail === "string" && parsed.detail) {
-        message = parsed.detail;
-      }
-    } catch {
-      // keep raw text
-    }
-    throw new Error(message);
+    throw new Error(formatHttpErrorMessage(res.status, text, res.statusText));
   }
   if (res.status === 204) {
     uiLog(`api:${method} ${path} -> 204`);
@@ -120,7 +136,7 @@ export interface DrawingFloorRef {
   title?: string | null;
 }
 
-export type DrawingRating = "good" | "neutral" | "bad";
+export type DrawingRating = "pending" | "good" | "neutral" | "bad" | "review" | "confirmed" | "retest";
 
 export interface DrawingSummary {
   drawing_id: string;
@@ -143,6 +159,8 @@ export interface DrawingFloor {
   wall: boolean;
   validated: boolean;
   label: boolean;
+  /** Named rooms in floor_label_detected.json; 0 means none. */
+  label_count?: number;
 }
 
 export interface UploadDrawing {

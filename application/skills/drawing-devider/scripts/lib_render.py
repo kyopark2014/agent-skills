@@ -886,6 +886,9 @@ def render_floor_original_preview(
     doc = ezdxf.readfile(str(dxf_path))
     raw = list(doc.modelspace())
 
+    def _bbox_overlap(a: tuple[float, float, float, float], b: tuple[float, float, float, float]) -> bool:
+        return not (a[2] < b[0] or a[0] > b[2] or a[3] < b[1] or a[1] > b[3])
+
     if isinstance(plan_bbox, dict):
         core = (
             float(plan_bbox["xmin"]),
@@ -896,21 +899,34 @@ def render_floor_original_preview(
     elif plan_bbox is not None:
         core = tuple(plan_bbox)  # type: ignore[assignment]
     else:
-        # 기존 floor_original_meta 또는 LINE primary
+        # 기존 floor_original_meta 또는 LINE primary.
+        # meta 가 DXF 기하와 안 겹치면(이중 도곽 층 bbox 혼선 등) primary 로 되돌린다.
+        from lib_split import find_primary_line_bbox
+
+        primary = find_primary_line_bbox(raw)
         prev = dxf_path.parent / "floor_original_meta.json"
+        core = None
         if prev.is_file():
             data = json.loads(prev.read_text(encoding="utf-8"))
             bb = data.get("bbox_mm") or {}
-            core = (
-                float(bb["xmin"]),
-                float(bb["ymin"]),
-                float(bb["xmax"]),
-                float(bb["ymax"]),
-            )
-        else:
-            from lib_split import find_primary_line_bbox
-
-            core = find_primary_line_bbox(raw)
+            try:
+                candidate = (
+                    float(bb["xmin"]),
+                    float(bb["ymin"]),
+                    float(bb["xmax"]),
+                    float(bb["ymax"]),
+                )
+            except (KeyError, TypeError, ValueError):
+                candidate = None
+            if candidate is not None and (primary is None or _bbox_overlap(candidate, primary)):
+                core = candidate
+            elif candidate is not None and primary is not None:
+                print(
+                    f"  [warn] {floor}: floor_original_meta bbox misses DXF; using primary",
+                    flush=True,
+                )
+        if core is None:
+            core = primary
             if core is None:
                 raise RuntimeError(f"{floor}: preview bbox를 계산할 수 없음")
 

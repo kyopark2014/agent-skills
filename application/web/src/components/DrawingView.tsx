@@ -14,14 +14,28 @@ const MAX_ZOOM = 16;
 const ZOOM_STEP = 1.25;
 
 const RATING_OPTIONS: Array<{ value: DrawingRating; label: string }> = [
+  { value: "pending", label: "대기" },
   { value: "good", label: "좋음" },
   { value: "neutral", label: "중립" },
   { value: "bad", label: "나쁨" },
+  { value: "review", label: "검토" },
+  { value: "confirmed", label: "확인" },
+  { value: "retest", label: "다시" },
 ];
 
 function normalizeRating(value: string | undefined | null): DrawingRating {
-  if (value === "good" || value === "bad" || value === "neutral") return value;
-  return "neutral";
+  if (
+    value === "pending" ||
+    value === "good" ||
+    value === "bad" ||
+    value === "neutral" ||
+    value === "review" ||
+    value === "confirmed" ||
+    value === "retest"
+  ) {
+    return value;
+  }
+  return "pending";
 }
 
 const PREVIEWS = [
@@ -210,7 +224,7 @@ export function DrawingView({ drawingId, initialFloor, onMenuClick, onBack }: Pr
   const [selectedLabels, setSelectedLabels] = useState<Set<string>>(() => new Set());
   const [legendPos, setLegendPos] = useState<{ left: number; top: number } | null>(null);
   const [legendDragging, setLegendDragging] = useState(false);
-  const [rating, setRating] = useState<DrawingRating>("neutral");
+  const [rating, setRating] = useState<DrawingRating>("pending");
   const [ratingBusy, setRatingBusy] = useState(false);
 
   const stageRef = useRef<HTMLDivElement>(null);
@@ -234,9 +248,16 @@ export function DrawingView({ drawingId, initialFloor, onMenuClick, onBack }: Pr
   const preview = PREVIEWS.find((item) => item.kind === kind) ?? PREVIEWS[0];
   const floors = catalog?.floors ?? [];
   const floorNeedle = floorQuery.trim().toLowerCase();
+  const floorLabel = (item: (typeof floors)[number]) => {
+    const id = item.id;
+    const count = item.label_count ?? 0;
+    return count > 0 ? `${id} (${count})` : `${id} (라벨없음)`;
+  };
   const visibleFloors = floorNeedle
     ? floors.filter((item) =>
-        [item.id, item.title].some((value) => (value || "").toLowerCase().includes(floorNeedle)),
+        [item.id, item.title, floorLabel(item)].some((value) =>
+          (value || "").toLowerCase().includes(floorNeedle),
+        ),
       )
     : floors;
   const selected = floors.find((item) => item.id === floor);
@@ -252,7 +273,7 @@ export function DrawingView({ drawingId, initialFloor, onMenuClick, onBack }: Pr
     setError(null);
     setLabelData(null);
     setLabelError(null);
-    setRating("neutral");
+    setRating("pending");
     setRatingBusy(false);
     api
       .getDrawingFloors(drawingId)
@@ -539,20 +560,25 @@ export function DrawingView({ drawingId, initialFloor, onMenuClick, onBack }: Pr
           <div className="drawing-floor-list">
             {visibleFloors.map((item) => {
               const floorTitle = (item.title || "").trim();
+              const floorIdLabel = floorLabel(item);
               return (
                 <button
                   key={item.id}
                   type="button"
                   className={`drawing-floor-btn${floor === item.id ? " is-active" : ""}`}
                   aria-current={floor === item.id ? "true" : undefined}
-                  title={floorTitle && floorTitle !== item.id ? `${item.id} · ${floorTitle}` : item.id}
+                  title={
+                    floorTitle && floorTitle !== item.id
+                      ? `${floorIdLabel} · ${floorTitle}`
+                      : floorIdLabel
+                  }
                   onClick={() => {
                     if (item.id === floor) return;
                     setFloor(item.id);
                     beginImage();
                   }}
                 >
-                  <span className="drawing-floor-id">{item.id}</span>
+                  <span className="drawing-floor-id">{floorIdLabel}</span>
                   {floorTitle && floorTitle !== item.id ? (
                     <span className="drawing-floor-title">{floorTitle}</span>
                   ) : null}

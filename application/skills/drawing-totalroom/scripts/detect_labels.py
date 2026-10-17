@@ -37,12 +37,19 @@ import evaluate_room as room  # noqa: E402
 _VALIDATOR_SCRIPTS = Path(__file__).resolve().parents[2] / "drawing-llmvalidator" / "scripts"
 if str(_VALIDATOR_SCRIPTS) not in sys.path:
     sys.path.insert(0, str(_VALIDATOR_SCRIPTS))
-from lib_llm_correct import floor_sheet_mm_per_inch, png_text_cap_mm, render_wall_dxf_png  # noqa: E402
+from lib_llm_correct import (  # noqa: E402
+    bbox_overlaps_xy,
+    floor_sheet_mm_per_inch,
+    png_text_cap_mm,
+    render_wall_dxf_png,
+)
 
 _LAYER_BAD = set('<>/\\":;?*=`')
 OUT_STEM = "floor_label_detected"
 # 라벨이 작은 칸·모서리 주머니에 떨어지면 면적이 이보다 작다(2 m² 이하). 씨앗을 옮겨 다시 잰다.
+# 옮겨도 이 이하면 면적 표기에서 버린다.
 MIN_LABEL_AREA_M2 = 2.0
+TINY_AREA_SKIP_REASON = "면적이 2 m² 이하입니다"
 # 가까운 거리부터 왼쪽·오른쪽·위·아래(mm).
 NUDGE_STEPS_MM = (100.0, 200.0, 300.0, 400.0, 600.0, 800.0, 1000.0, 1500.0, 2000.0)
 # 객실 안 집기 표기. 실이 아니므로 면적을 잡지 않는다.
@@ -172,6 +179,7 @@ def detect_one_with_nudge(
     """detect_one. 면적이 2 m² 이하면 씨앗을 상하좌우로 옮겨 다시 잰다.
 
     같은 거리에서 여러 방향이 되면 면적이 큰 쪽을 고른다.
+    옮겨도 2 m²를 넘지 못하면 버린다.
     반환은 (면, 실패 이유, 씨앗 x, 씨앗 y).
     """
     found, reason = detect_one(msp, boxes, segs, x, y, door=door)
@@ -203,7 +211,32 @@ def detect_one_with_nudge(
                 flush=True,
             )
             return best, None, best_xy[0], best_xy[1]
-    return tiny, None, x, y
+    return None, TINY_AREA_SKIP_REASON, x, y
+
+
+def _drop_tiny_faces(
+    detected: list[dict], skipped: list[dict]
+) -> tuple[list[dict], list[dict]]:
+    """면적이 2 m² 이하인 실을 결과에서 뺀다."""
+    kept: list[dict] = []
+    for inst in detected:
+        if float(inst.get("area_m2") or 0.0) > MIN_LABEL_AREA_M2:
+            kept.append(inst)
+            continue
+        skipped.append(
+            {
+                "text": inst.get("text") or inst.get("name") or "",
+                "x": round(float(inst.get("x") or 0.0), 1),
+                "y": round(float(inst.get("y") or 0.0), 1),
+                "reason": TINY_AREA_SKIP_REASON,
+            }
+        )
+        print(
+            f"[drop] {inst.get('text') or inst.get('name')}  "
+            f"{float(inst.get('area_m2') or 0.0):.2f} m2 <= {MIN_LABEL_AREA_M2:.0f} m2",
+            flush=True,
+        )
+    return kept, skipped
 
 
 def _record_face(msp, boxes, face, x_axes, y_axes, swings, x: float, y: float, door: str) -> dict | None:
@@ -713,6 +746,71 @@ def _px_width(meta: dict) -> int:
     return max(width, 100)
 
 
+# structure span → floor_*_meta 와 같은 여백(mm).
+_SPAN_PAD_L = 4500.0
+_SPAN_PAD_B = 4500.0
+_SPAN_PAD_R = 6000.0
+_SPAN_PAD_T = 4500.0
+
+
+def _msp_xy_extents(msp) -> tuple[list[float], list[float]]:
+    """렌더 bbox 검증용으로 LINE/LWPOLYLINE 좌표만 모은다."""
+    xs: list[float] = []
+    ys: list[float] = []
+    for e in msp:
+        try:
+            t = e.dxftype()
+            if t == "LINE":
+                xs.extend([float(e.dxf.start.x), float(e.dxf.end.x)])
+                ys.extend([float(e.dxf.start.y), float(e.dxf.end.y)])
+            elif t == "LWPOLYLINE":
+                for x, y, *_ in e.get_points("xy"):
+                    xs.append(float(x))
+                    ys.append(float(y))
+        except Exception:  # noqa: BLE001
+            continue
+        if len(xs) > 80_000:
+            break
+    return xs, ys
+
+
+def _bbox_from_xy(xs: list[float], ys: list[float]) -> dict[str, float]:
+    return {
+        "xmin": min(xs) - _SPAN_PAD_L,
+        "ymin": min(ys) - _SPAN_PAD_B,
+        "xmax": max(xs) + _SPAN_PAD_R,
+        "ymax": max(ys) + _SPAN_PAD_T,
+    }
+
+
+def resolve_label_meta_bbox(meta: dict, msp) -> dict:
+    """meta bbox 가 DXF 와 안 겹치면 기하 기준으로 고친 메타를 돌려준다."""
+    bbox = meta.get("bbox_mm") if isinstance(meta.get("bbox_mm"), dict) else None
+    xs, ys = _msp_xy_extents(msp)
+    if not xs or not ys:
+        return meta
+    if bbox and bbox_overlaps_xy(bbox, xs, ys):
+        return meta
+    fixed = dict(meta)
+    new_bb = _bbox_from_xy(xs, ys)
+    fixed["bbox_mm"] = new_bb
+    fixed["size_m"] = {
+        "width": (new_bb["xmax"] - new_bb["xmin"]) / 1000.0,
+        "height": (new_bb["ymax"] - new_bb["ymin"]) / 1000.0,
+    }
+    old_y = (
+        f"{float(bbox['ymin']):.1f}..{float(bbox['ymax']):.1f}"
+        if bbox
+        else "missing"
+    )
+    print(
+        f"  [warn] meta bbox misses DXF (y={old_y}); "
+        f"using geom y={min(ys):.1f}..{max(ys):.1f}",
+        flush=True,
+    )
+    return fixed
+
+
 def render_label_png(dxf_path: Path, meta: dict, png_path: Path) -> None:
     """floor_label_detected.dxf 의 HATCH·문자·흰 판을 PNG 로 그린다."""
     render_wall_dxf_png(
@@ -772,6 +870,7 @@ def detect(dxf_path: Path, meta_path: Path, door: str = "close") -> dict:
     detected = _divide_shared_faces(msp, boxes, segs, detected, door)
     detected = _divide_on_dividers(msp, boxes, segs, detected, door)
     detected = _subtract_anchor_faces(msp, segs, detected)
+    detected, skipped = _drop_tiny_faces(detected, skipped)
 
     by_face: dict[tuple, list[str]] = {}
     for inst in detected:
@@ -798,7 +897,10 @@ def detect(dxf_path: Path, meta_path: Path, door: str = "close") -> dict:
     dxf_out = out_dir / f"{OUT_STEM}.dxf"
     png_out = out_dir / f"{OUT_STEM}.png"
     json_out = out_dir / f"{OUT_STEM}.json"
-    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    meta = resolve_label_meta_bbox(
+        json.loads(meta_path.read_text(encoding="utf-8")),
+        msp,
+    )
     bbox = meta.get("bbox_mm") if isinstance(meta.get("bbox_mm"), dict) else {}
     mm_per_inch = floor_sheet_mm_per_inch(bbox, _px_width(meta))
     write_dxf(
@@ -843,7 +945,7 @@ def detect(dxf_path: Path, meta_path: Path, door: str = "close") -> dict:
         "labels": public_labels,
         "skipped": skipped,
         "rules": {
-            "labels": "Korean room names, or Latin names with 2+ letters and a digit; stacked lines within 1.8 text heights are joined top to bottom; fixture callouts such as 미니바, 옷장, 신발장, 수납장, 하부장, 상부장, 옷봉설치, 장비, 데스크, 서랍, 온수기, 살균기, 소독기, 도어, 테이블, 정수기, 휴대폰장, 게시판, 렉장, 랙장, 냉장고, 제빙기, 머신, 커피, 전자레인지, 텀블러, 세척기, EV, 화분, 화장대, 월풀욕조, 욕조, (장애인) and non-area names 방풍실, 보관실, 퇴식대, 샤워실, 고압, 저압, 계단실, 복도, 승강기, EPS, OPEN, 오픈, 홀-, 홈-, 입구, 출구, 양치공간, 청소도구함, 청소도구실, 실외기실, 조경, 배경, 평면도, 비품고을, 항습기, 화물, 휠체어, 린넨실, 오물처리실, (장애인, 구급자, 응급환자, 의료가스실, 기계실, (여), (남), 문서고, 기울기, 자동방화, 인), 인승, OTIS, Wlqtnwjd, DA#, DA(, 올려옴, 내려감, DOOR, 패드, 기저귀, 침례탕약, 설치, 드라이기, 유사용, 상하부, 분전함, 세척실, 탕비실, 물품, 스트레쳐, E.V, ELEV, ELEV. HALL, ELEV. 홀, 유도등, 단자함, 소화전, 다용도실, 밸브, (근생), 정화조, 피난기, 보관소, 속도, 탑승대기공간, 주거, 배수, 비상용, 탑승대기, ST(, 탱크, 실외기, 마감, 콘크리트, 행거, 클립바, 수조, 발전기실, 집수정, ASD, W.C, 세면대, ARM실, 옷장, 용수대, 자동문, 거울, 세탁기, 기기배치, 폐쇄, 장애인겸용, 데크, 비품고, 전기실, 충전소, 급속, 폐기품, 폐기물, 콤프레셔, 설비실, 경계선, 대지안, 벽부형, 산책로, 올라옴, 수거함, 배기, FSD, DORDI, 승강식, OH4700, 유모차보관, C1A, C2A, C3A, TC1, PW1000, AG1100, 노출되는, 자전거, 피난구, DA-, 재활용, 급기, 주문제작, BC-, 부속실, 보일러실, 세탁실, 승강장, 테라스, 청결물실, 수납, 보일러, 옷방, 파우더, 선큰가든, 발코니, 정원, 배선실, 병동 are excluded",
+            "labels": "Korean room names, or Latin names with 2+ letters and a digit; stacked lines within 1.8 text heights are joined top to bottom; fixture callouts such as 미니바, 옷장, 신발장, 수납장, 하부장, 상부장, 옷봉설치, 장비, 데스크, 서랍, 온수기, 살균기, 소독기, 도어, 테이블, 정수기, 휴대폰장, 게시판, 렉장, 랙장, 냉장고, 제빙기, 머신, 커피, 전자레인지, 텀블러, 세척기, EV, 화분, 화장대, 월풀욕조, 욕조, (장애인) and non-area names 방풍실, 보관실, 퇴식대, 샤워실, 고압, 저압, 계단실, 복도, 승강기, EPS, OPEN, 오픈, 홀-, 홈-, 입구, 출구, 양치공간, 청소도구함, 청소도구실, 실외기실, 조경, 배경, 평면도, 비품고을, 항습기, 화물, 휠체어, 린넨실, 오물처리실, (장애인, 구급자, 응급환자, 의료가스실, 기계실, (여), (남), 문서고, 기울기, 자동방화, 인), 인승, OTIS, Wlqtnwjd, DA#, DA(, 올려옴, 내려감, DOOR, 패드, 기저귀, 침례탕약, 설치, 드라이기, 유사용, 상하부, 분전함, 세척실, 탕비실, 물품, 스트레쳐, E.V, ELEV, ELEV. HALL, ELEV. 홀, 유도등, 단자함, 소화전, 다용도실, 밸브, (근생), 정화조, 피난기, 보관소, 속도, 탑승대기공간, 주거, 배수, 비상용, 탑승대기, ST(, 탱크, 실외기, 마감, 콘크리트, 행거, 클립바, 수조, 발전기실, 집수정, ASD, W.C, 세면대, ARM실, 옷장, 용수대, 자동문, 거울, 세탁기, 기기배치, 폐쇄, 장애인겸용, 데크, 비품고, 전기실, 충전소, 급속, 폐기품, 폐기물, 콤프레셔, 설비실, 경계선, 대지안, 벽부형, 산책로, 올라옴, 수거함, 배기, FSD, DORDI, 승강식, OH4700, 유모차보관, C1A, C2A, C3A, TC1, PW1000, AG1100, 노출되는, 자전거, 피난구, DA-, 재활용, 급기, 주문제작, BC-, 부속실, 보일러실, 세탁실, 승강장, 테라스, 청결물실, 수납, 보일러, 옷방, 파우더, 선큰가든, 발코니, 정원, 배선실, 병동, 수족관, 피난용, 설비, 셔틀, 커텐, 공조실, 공조기, (관통), GS건설, MDF, 펌프실, 축척, 사물함, 석], 공용욕실, S.L-, F.L-, S.L, F.L, D.A, 장애인통로, 야외전망대, 안방욕실, LT-, 220V, 시공 are excluded",
             "font": "PNG text is the TEXT stored on each label layer, drawn by the floor sheet renderer",
             "png": "rendered from floor_label_detected.dxf",
             "door": door,
