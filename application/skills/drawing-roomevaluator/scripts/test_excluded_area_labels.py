@@ -345,6 +345,20 @@ class ExcludedAreaLabelTests(unittest.TestCase):
             "220v",
             "시공",
             "시공범위",
+            "리무진",
+            "리무진버스",
+            "세차",
+            "세차장",
+            "정비",
+            "정비실",
+            "카트",
+            "카트보관",
+            "용수",
+            "용수실",
+            "하역장",
+            "하역장-1",
+            "방재실",
+            "방재실-1",
         ):
             self.assertTrue(evaluate_room.is_excluded_area_label(text), text)
             self.assertFalse(evaluate_room.is_room_label(text), text)
