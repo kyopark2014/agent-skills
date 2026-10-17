@@ -20946,6 +20946,14 @@ def _find_lr_arrow_sliding_doors(msp) -> list[dict]:
                     x0, y0, x1, y1 = _line_xy(entity)
                 except Exception:  # noqa: BLE001
                     continue
+                dx, dy = abs(x1 - x0), abs(y1 - y0)
+                # 경사 LINE(보이드 X 등)은 문 옆 벽면이 아니다.
+                if max(dx, dy) > 1e-6 and min(dx, dy) / max(dx, dy) > 0.08:
+                    continue
+                line_len = math.hypot(dx, dy)
+                # near 창(±3500)보다 긴 축선·그리드선은 AABB만 겹쳐도 오탐된다.
+                if line_len > (open1 - open0) + 7000.0:
+                    continue
                 boxes.append((min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1)))
             elif kind == "LWPOLYLINE":
                 box = _axis_rect_bbox(entity)
@@ -20972,19 +20980,24 @@ def _find_lr_arrow_sliding_doors(msp) -> list[dict]:
                     perp0, perp1 = bx0, bx1
                 if min(perp1, face1) - max(perp0, face0) < 20.0:
                     continue
-                length = max(along1 - along0, perp1 - perp0)
+                along_span = along1 - along0
+                perp_span = perp1 - perp0
+                # 도곽·넓은 AABB는 한 변이 벽 두께(≤250)가 아니다.
+                if min(along_span, perp_span) > 250.0:
+                    continue
+                length = max(along_span, perp_span)
                 overlap = min(along1, open1) - max(along0, open0)
                 # 같은 벽면의 다른 문짝도 DOOR. 양옆·사이 두꺼운 면만 WALL.
                 panel_like = (
-                    600.0 <= (along1 - along0) <= 1600.0
-                    and 35.0 <= (perp1 - perp0) <= 140.0
+                    600.0 <= along_span <= 1600.0
+                    and 35.0 <= perp_span <= 140.0
                 )
                 if panel_like:
                     if entity not in door_entities:
                         door_entities.append(entity)
                     continue
                 outside = along1 <= open0 + 40.0 or along0 >= open1 - 40.0
-                between = overlap < 0.35 * max(along1 - along0, 1.0)
+                between = overlap < 0.35 * max(along_span, 1.0)
                 near = (
                     along0 <= open1 + 3500.0
                     and along1 >= open0 - 3500.0

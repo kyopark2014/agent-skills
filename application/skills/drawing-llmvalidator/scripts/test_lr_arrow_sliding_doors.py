@@ -61,6 +61,33 @@ class LrArrowSlidingDoorTests(unittest.TestCase):
         self.assertEqual(panel.dxf.layer, "BASE")
         self.assertEqual(wall.dxf.layer, "BASE")
 
+    def test_void_x_and_sheet_border_stay_base(self):
+        """AABB만 겹치는 보이드 X·도곽은 WALL로 올리지 않는다."""
+        doc = ezdxf.new()
+        msp = doc.modelspace()
+        wall_left = _rect(msp, 0, 0, 900, 150)
+        panel = _rect(msp, 1000, 50, 2100, 120)
+        wall_right = _rect(msp, 2200, 0, 3200, 150)
+        arrow = msp.add_lwpolyline(
+            [(1000.0, -400.0), (2167.0, -400.0), (1987.0, -535.0)],
+            dxfattribs={"layer": "BASE"},
+        )
+        arrow.closed = False
+        # 문 면 근처에서 시작하는 긴 대각선(주차장 상부 OPEN X)
+        void_x = msp.add_line((1500.0, 80.0), (-20000.0, -40000.0), dxfattribs={"layer": "BASE"})
+        sheet = _rect(msp, -50000, -50000, 120000, 80000)
+
+        demoted, promoted = lib_llm_correct.separate_lr_arrow_sliding_doors(msp)
+
+        self.assertGreaterEqual(demoted, 2)
+        self.assertGreaterEqual(promoted, 1)
+        self.assertEqual(panel.dxf.layer, "DOOR")
+        self.assertEqual(arrow.dxf.layer, "DOOR")
+        self.assertEqual(wall_left.dxf.layer, "WALL")
+        self.assertEqual(wall_right.dxf.layer, "WALL")
+        self.assertEqual(void_x.dxf.layer, "BASE")
+        self.assertEqual(sheet.dxf.layer, "BASE")
+
 
 if __name__ == "__main__":
     unittest.main()
