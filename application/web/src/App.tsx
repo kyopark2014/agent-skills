@@ -85,9 +85,11 @@ export default function App() {
   const [queuePausedByTaskId, setQueuePausedByTaskId] = useState<
     Record<string, boolean>
   >({});
-  /** Task id while GET /messages is in flight for the selected task. */
+  /** Task id while the first GET /messages for this task visit is in flight. */
   const [messagesLoadingTaskId, setMessagesLoadingTaskId] = useState<string | null>(null);
   const messagesLoadingCountRef = useRef(0);
+  /** Task id that already claimed the initial messages loading UI this visit. */
+  const messagesLoadingClaimRef = useRef<string | null>(null);
   /** True while polling /run after refresh when messages end on user. */
   const [recoveringTaskId, setRecoveringTaskId] = useState<string | null>(null);
   /** Stops re-polling a draft once /run says the agent is no longer active. */
@@ -135,9 +137,15 @@ export default function App() {
   }, [queuedByTaskId]);
 
   const loadMessages = useCallback(async (taskId: string) => {
-    messagesLoadingCountRef.current += 1;
-    setMessagesLoadingTaskId(taskId);
-    uiLog("messages:load start", { taskId });
+    // Show the loading screen only for the first fetch after entering a task.
+    // Later refreshes (recovery poll, post-send reload) keep the thread visible.
+    const showLoading = messagesLoadingClaimRef.current !== taskId;
+    if (showLoading) {
+      messagesLoadingClaimRef.current = taskId;
+      messagesLoadingCountRef.current += 1;
+      setMessagesLoadingTaskId(taskId);
+    }
+    uiLog("messages:load start", { taskId, showLoading });
     try {
       const rows = await appDataService.getMessages(taskId);
       uiLog("messages:load complete", {
@@ -150,14 +158,16 @@ export default function App() {
       }
       return rows;
     } finally {
-      messagesLoadingCountRef.current = Math.max(
-        0,
-        messagesLoadingCountRef.current - 1,
-      );
-      if (messagesLoadingCountRef.current === 0) {
-        setMessagesLoadingTaskId(null);
-      } else {
-        setMessagesLoadingTaskId(activeTaskIdRef.current);
+      if (showLoading) {
+        messagesLoadingCountRef.current = Math.max(
+          0,
+          messagesLoadingCountRef.current - 1,
+        );
+        if (messagesLoadingCountRef.current === 0) {
+          setMessagesLoadingTaskId(null);
+        } else {
+          setMessagesLoadingTaskId(activeTaskIdRef.current);
+        }
       }
     }
   }, []);
@@ -441,12 +451,15 @@ export default function App() {
     }
     tasksBootstrappedForUserRef.current = null;
     emptyTaskBootstrapRef.current = null;
+    messagesLoadingClaimRef.current = null;
     setUserId(null);
     setLlmGatewayReady(false);
     setKnowledgeGraphEnabled(true);
     setTasks([]);
     setActiveTaskId(null);
     setMessages([]);
+    setMessagesLoadingTaskId(null);
+    messagesLoadingCountRef.current = 0;
     setDrawer(null);
     setView("chat");
     setQueuedByTaskId({});
