@@ -4,6 +4,8 @@
 XA-S-{N}F 평면 블록이 없는 도면용 폴백.
 modelspace와 얕은 INSERT에서 큰 축정렬 사각형과
 '1층 평면도', 'B1F', '지하1층' 같은 제목을 짝짓는다.
+시트 블록(ooa-sheet 등) INSERT의 전역 bbox도 도곽으로 쓴다.
+건물 평면이 최상위 INSERT에만 있을 때는 그 INSERT의 기하 bbox로 층을 둔다.
 층 표기가 없고 시설 평면도 제목과 도면번호만 있으면 도면번호로 나눈다.
 제목·도면번호가 없어도 크기 조건을 만족하는 도곽이면 sheet_01부터 남긴다.
 그것도 없으면 종이공간 제목과 켜진 평면 뷰포트를 쓴다.
@@ -168,6 +170,21 @@ def _strip_equipment_prefix(raw: str) -> str:
 _DRAWING_NUMBER = re.compile(r"^[A-Za-z]{2,6}-\d{2,4}$")
 _PLAN_WORD = re.compile(r"평면도|단면도|입면도|배치도|\bPLAN\b|\bSECTION\b|\bELEVATION\b", re.I)
 _REPEATED_FLOOR_NOTE = 8
+_SHEET_INSERT_NAME = re.compile(
+    r"(?:^|[^A-Za-z0-9])(?:ooa[_-]?)?sheet(?:$|[^A-Za-z0-9])|"
+    r"도[곽각]|a-sheet|x-sheet|dwg.?sheet",
+    re.I,
+)
+_BUILDING_INSERT_NAME = re.compile(
+    r"^PL\d+|평면|클럽|관리동?|스타트|티하우스|티\d|경비|골프|club|building",
+    re.I,
+)
+_INSERT_FLOOR_B = re.compile(r"-B(\d+)\s*$", re.I)
+_INSERT_FLOOR_N = re.compile(r"-(\d+)\s*$")
+_MIN_INSERT_GEOM = 200
+_MIN_FRAME_GEOM = 30
+_INSERT_BBOX_SAMPLE = 40_000
+_INSERT_BBOX_TRIM = 0.02
 
 
 def _is_construction_layer(name: str) -> bool:
@@ -704,23 +721,27 @@ def _assign_sheet_ids(frames: list[SheetFrame], warnings: list[str]) -> list[She
             ),
         )
         picked.append(best)
-    picked.sort(key=lambda frame: (frame.bbox[0], frame.bbox[1]))
 
-    counts: dict[str, int] = {}
+    by_floor: dict[str, list[SheetFrame]] = defaultdict(list)
     for frame in picked:
-        counts[frame.floor] = counts.get(frame.floor, 0) + 1
-    seq: dict[str, int] = {}
+        by_floor[frame.floor].append(frame)
+
     out: list[SheetFrame] = []
-    for frame in picked:
-        seq[frame.floor] = seq.get(frame.floor, 0) + 1
-        token = frame.floor if seq[frame.floor] == 1 else f"{frame.floor}_{seq[frame.floor]}"
-        if counts[frame.floor] > 1 and seq[frame.floor] == 2:
-            names = [frame.floor] + [f"{frame.floor}_{i}" for i in range(2, counts[frame.floor] + 1)]
+    for floor in sorted(by_floor.keys(), key=floor_sort_key):
+        # 같은 층이 여러 동에 있으면 큰 도면(본관 평면)이 접미 없는 이름을 받는다.
+        group = sorted(
+            by_floor[floor],
+            key=lambda frame: (-_area(frame.bbox), frame.bbox[0], frame.bbox[1]),
+        )
+        if len(group) > 1:
+            names = [floor] + [f"{floor}_{i}" for i in range(2, len(group) + 1)]
             warnings.append(
-                f"제목 {frame.title!r} 도곽이 {counts[frame.floor]}곳입니다. "
-                f"왼쪽부터 {', '.join(names)} 입니다."
+                f"제목 {group[0].title!r} 도곽이 {len(group)}곳입니다. "
+                f"면적이 큰 순서로 {', '.join(names)} 입니다."
             )
-        out.append(SheetFrame(token, frame.title, frame.bbox, frame.title_height))
+        for index, frame in enumerate(group, start=1):
+            token = floor if index == 1 else f"{floor}_{index}"
+            out.append(SheetFrame(token, frame.title, frame.bbox, frame.title_height))
     return out
 
 
@@ -1124,6 +1145,295 @@ def discover_block_floors(doc) -> list[str]:
     return sorted(found, key=floor_sort_key)
 
 
+def parse_floor_from_block_name(name: str) -> str | None:
+    """'PL250224-클럽-B1' → B1F, 'PL260224-클럽-1' → 1F."""
+    raw = str(name or "").strip()
+    if not raw or _SHEET_INSERT_NAME.search(raw):
+        return None
+    matched = _INSERT_FLOOR_B.search(raw)
+    if matched:
+        return f"B{int(matched.group(1))}F"
+    matched = _INSERT_FLOOR_N.search(raw)
+    if matched:
+        return f"{int(matched.group(1))}F"
+    return None
+
+
+def _ezbbox_module():
+    try:
+        from ezdxf import bbox as ezbbox
+    except Exception:
+        return None
+    return ezbbox
+
+
+def _insert_extents_bbox(entity, cache) -> tuple[float, float, float, float] | None:
+    ezbbox = _ezbbox_module()
+    if ezbbox is None:
+        return None
+    try:
+        ext = ezbbox.extents([entity], cache=cache)
+    except Exception:
+        return None
+    if not ext.has_data:
+        return None
+    return (
+        float(ext.extmin.x),
+        float(ext.extmin.y),
+        float(ext.extmax.x),
+        float(ext.extmax.y),
+    )
+
+
+def _percentile_trim_range(values: list[float], trim: float) -> tuple[float, float] | None:
+    if len(values) < 20:
+        return None
+    ordered = sorted(values)
+    lo = int(len(ordered) * trim)
+    hi = max(lo + 1, int(len(ordered) * (1.0 - trim)))
+    hi = min(hi, len(ordered))
+    clipped = ordered[lo:hi]
+    if not clipped:
+        return None
+    return clipped[0], clipped[-1]
+
+
+def _primary_insert_bbox(entity, cache) -> tuple[float, float, float, float] | None:
+    """INSERT 기하의 이상치를 뺀 주 군집 bbox. 삽입점도 포함해 추출 clip에 잡히게 한다."""
+    ezbbox = _ezbbox_module()
+    if ezbbox is None:
+        return None
+    xs: list[float] = []
+    ys: list[float] = []
+    try:
+        children = entity.virtual_entities()
+    except Exception:
+        return _insert_extents_bbox(entity, cache)
+    for child in children:
+        if child.dxftype() not in {"LINE", "LWPOLYLINE", "ARC", "CIRCLE", "POLYLINE"}:
+            continue
+        try:
+            ext = ezbbox.extents([child], cache=cache)
+        except Exception:
+            continue
+        if not ext.has_data:
+            continue
+        xs.append((float(ext.extmin.x) + float(ext.extmax.x)) / 2.0)
+        ys.append((float(ext.extmin.y) + float(ext.extmax.y)) / 2.0)
+        if len(xs) >= _INSERT_BBOX_SAMPLE:
+            break
+    if len(xs) < _MIN_INSERT_GEOM:
+        return None
+    xr = _percentile_trim_range(xs, _INSERT_BBOX_TRIM)
+    yr = _percentile_trim_range(ys, _INSERT_BBOX_TRIM)
+    if xr is None or yr is None:
+        return None
+    x0, x1 = xr
+    y0, y1 = yr
+    try:
+        ix = float(entity.dxf.insert.x)
+        iy = float(entity.dxf.insert.y)
+    except Exception:
+        ix = iy = None
+    if ix is not None:
+        x0, x1 = min(x0, ix), max(x1, ix)
+        y0, y1 = min(y0, iy), max(y1, iy)
+    pad = max(500.0, 0.02 * max(x1 - x0, y1 - y0))
+    box = (x0 - pad, y0 - pad, x1 + pad, y1 + pad)
+    if not _accept_size(box[2] - box[0], box[3] - box[1]):
+        return None
+    return box
+
+
+def _collect_sheet_insert_rects(doc) -> list[tuple[float, float, float, float]]:
+    """시트 틀 블록(ooa-sheet 등) INSERT의 전역 bbox를 도곽으로 모은다."""
+    ezbbox = _ezbbox_module()
+    if ezbbox is None:
+        return []
+    cache = ezbbox.Cache()
+    rects: list[tuple[float, float, float, float]] = []
+    for entity in doc.modelspace().query("INSERT"):
+        name = str(getattr(entity.dxf, "name", "") or "")
+        if not _SHEET_INSERT_NAME.search(name):
+            continue
+        box = _insert_extents_bbox(entity, cache)
+        if box is None:
+            continue
+        if _accept_size(box[2] - box[0], box[3] - box[1]):
+            rects.append(box)
+    return rects
+
+
+def _nearest_floor_hit(
+    texts: list[_TextHit], x: float, y: float, *, max_dist: float
+) -> _TextHit | None:
+    best: _TextHit | None = None
+    best_dist = max_dist
+    for hit in texts:
+        dist = math.hypot(hit.x - x, hit.y - y)
+        if dist < best_dist:
+            best = hit
+            best_dist = dist
+    return best
+
+
+def _building_insert_frames(
+    doc,
+    texts: list[_TextHit],
+    existing: list[SheetFrame],
+    warnings: list[str],
+) -> list[SheetFrame]:
+    """건물 평면이 최상위 INSERT에만 있을 때 그 기하 bbox로 층을 추가한다.
+
+    이미 도곽으로 덮인 INSERT는 건너뛴다. 층 이름은 블록명 접미(-B1, -1) 또는
+    가장 가까운 층 제목이다.
+    """
+    ezbbox = _ezbbox_module()
+    if ezbbox is None:
+        return []
+    cache = ezbbox.Cache()
+    added: list[SheetFrame] = []
+    for entity in doc.modelspace().query("INSERT"):
+        name = str(getattr(entity.dxf, "name", "") or "")
+        if not _BUILDING_INSERT_NAME.search(name):
+            continue
+        if _SHEET_INSERT_NAME.search(name):
+            continue
+        if re.search(r"XA-S-\d+F\s*평면$", name):
+            continue
+        box = _primary_insert_bbox(entity, cache)
+        if box is None:
+            continue
+        if any(_iou(box, frame.bbox) >= 0.2 or _contains(frame.bbox, box) for frame in existing):
+            continue
+        if any(_iou(box, frame.bbox) >= 0.2 or _contains(frame.bbox, box) for frame in added):
+            continue
+        floor = parse_floor_from_block_name(name)
+        title = name
+        height = 0.0
+        cx = (box[0] + box[2]) / 2.0
+        cy = (box[1] + box[3]) / 2.0
+        span = max(box[2] - box[0], box[3] - box[1])
+        near = _nearest_floor_hit(texts, cx, cy, max_dist=max(40_000.0, span * 1.5))
+        if near is not None:
+            if floor is None:
+                floor = near.floor
+            title = plain_text(near.text)
+            height = near.height
+        if floor is None:
+            continue
+        added.append(SheetFrame(floor, title, box, height))
+    if added:
+        warnings.append(
+            "건물 평면 INSERT의 전역 bbox로 층을 추가했습니다. "
+            + ", ".join(frame.floor for frame in added)
+            + " 입니다."
+        )
+    return added
+
+
+def _point_in_bbox(bbox, x: float, y: float, pad: float = 0.0) -> bool:
+    return bbox[0] - pad <= x <= bbox[2] + pad and bbox[1] - pad <= y <= bbox[3] + pad
+
+
+def _frame_geometry_count(doc, bbox: tuple[float, float, float, float]) -> int:
+    """도곽 clip 안에 잡힐 modelspace 기하·INSERT 개수(대략)."""
+    count = 0
+    for entity in doc.modelspace():
+        kind = entity.dxftype()
+        if kind == "INSERT":
+            try:
+                ix = float(entity.dxf.insert.x)
+                iy = float(entity.dxf.insert.y)
+            except Exception:
+                continue
+            if _point_in_bbox(bbox, ix, iy):
+                count += _MIN_FRAME_GEOM
+            continue
+        if kind not in {"LINE", "LWPOLYLINE", "ARC", "CIRCLE", "POLYLINE", "TEXT", "MTEXT"}:
+            continue
+        try:
+            if kind == "LINE":
+                mx = (float(entity.dxf.start.x) + float(entity.dxf.end.x)) / 2.0
+                my = (float(entity.dxf.start.y) + float(entity.dxf.end.y)) / 2.0
+            else:
+                mx = float(entity.dxf.insert.x)
+                my = float(entity.dxf.insert.y)
+        except Exception:
+            continue
+        if _point_in_bbox(bbox, mx, my):
+            count += 1
+            if count >= _MIN_FRAME_GEOM * 4:
+                break
+    return count
+
+
+def _drop_empty_frames(
+    doc, frames: list[SheetFrame], warnings: list[str]
+) -> list[SheetFrame]:
+    """기하·INSERT가 거의 없는 도곽(복제 제목 칸 등)을 뺀다."""
+    if not frames:
+        return frames
+    kept: list[SheetFrame] = []
+    dropped: list[str] = []
+    for frame in frames:
+        if _frame_geometry_count(doc, frame.bbox) >= _MIN_FRAME_GEOM:
+            kept.append(frame)
+        else:
+            dropped.append(frame.floor)
+    if dropped and kept:
+        warnings.append(
+            "도곽 안에 기하가 없어 제외한 층: " + ", ".join(dropped) + " 입니다."
+        )
+        return kept
+    return frames if not kept else kept
+
+
+def _base_floor_token(floor: str) -> str:
+    """'1F_2' → '1F'. 복제 접미만 벗긴다. 'sheet_01' 은 그대로 둔다."""
+    matched = re.fullmatch(r"(.+)_(\d+)$", floor)
+    if not matched:
+        return floor
+    base = matched.group(1)
+    if base == "sheet" or base.startswith("sheet_"):
+        return floor
+    try:
+        normalize_floor_token(base)
+    except ValueError:
+        return floor
+    return base
+
+
+def _prefer_largest_same_floor(frames: list[SheetFrame]) -> list[SheetFrame]:
+    """같은 층이 큰 시트와 작은 칸에 동시에 있으면 큰 도곽만 남긴다.
+
+    빈 복제 제목 칸이 1F_2 로 승격되지 않게 한다.
+    겹치지 않는 같은 층(서로 다른 동)은 그대로 둔다.
+    """
+    if len(frames) < 2:
+        return frames
+    ordered = sorted(frames, key=lambda frame: _area(frame.bbox), reverse=True)
+    kept: list[SheetFrame] = []
+    for frame in ordered:
+        base = _base_floor_token(frame.floor)
+        if any(
+            _base_floor_token(prev.floor) == base
+            and (_contains(prev.bbox, frame.bbox) or _iou(prev.bbox, frame.bbox) >= 0.15)
+            for prev in kept
+        ):
+            continue
+        kept.append(frame)
+    return kept
+
+
+def _rebase_floor_frames(frames: list[SheetFrame]) -> list[SheetFrame]:
+    """접미가 붙은 층 이름을 다시 매기기 위해 base 토큰으로 되돌린다."""
+    return [
+        SheetFrame(_base_floor_token(frame.floor), frame.title, frame.bbox, frame.title_height)
+        for frame in frames
+    ]
+
+
 def discover_sheet_floors(doc) -> LayoutDiscovery:
     rects, lines, texts, plans, numbers, truncated = _collect_primitives(doc)
     warnings: list[str] = []
@@ -1138,6 +1448,12 @@ def discover_sheet_floors(doc) -> LayoutDiscovery:
     if truncated:
         warnings.append("긴 선이 많아 일부 선분 도곽은 건너뛰고 폴리라인 테두리를 우선합니다.")
     rects.extend(_rects_from_lines(lines))
+    sheet_inserts = _collect_sheet_insert_rects(doc)
+    if sheet_inserts:
+        rects.extend(sheet_inserts)
+        warnings.append(
+            f"시트 블록 INSERT {len(sheet_inserts)}곳을 도곽으로 사용했습니다."
+        )
     frames = _frames_from_sheet_rects(rects, texts, plans, numbers, warnings)
     if not frames:
         # 도면틀 LINE이 끊기고 실제 테두리만 Defpoints 닫힌 폴리라인에 있는 경우
@@ -1148,6 +1464,20 @@ def discover_sheet_floors(doc) -> LayoutDiscovery:
                 warnings.append(
                     "일반 도곽이 없어 Defpoints 등 보조선 레이어의 닫힌 도곽을 사용했습니다."
                 )
+    frames = _prefer_largest_same_floor(frames)
+    building = _building_insert_frames(doc, texts, frames, warnings)
+    if building:
+        frames = _prefer_largest_same_floor(_rebase_floor_frames(frames) + building)
+    frames = _drop_empty_frames(doc, frames, warnings)
+    # 큰 시트만 남기거나 빈 칸을 뺀 뒤 접미(1F_2)를 다시 매긴다.
+    renumber: list[str] = []
+    frames = _assign_sheet_ids(_rebase_floor_frames(frames), renumber)
+    warnings[:] = [
+        note
+        for note in warnings
+        if "도곽이" not in note or "왼쪽부터" not in note
+    ]
+    warnings.extend(renumber)
     if not frames:
         warnings.append("도곽과 층 제목으로 구분할 층을 찾지 못했습니다.")
     return LayoutDiscovery(
@@ -1161,7 +1491,7 @@ def discover_sheet_floors(doc) -> LayoutDiscovery:
 def discover_layout(doc, *, mode: str = "auto") -> LayoutDiscovery:
     """mode: auto | block | sheet.
 
-    auto는 XA-S-{N}F 평면 블록, 모델스페이스 도곽·층 제목,
+    auto는 XA-S-{N}F 평면 블록, 모델스페이스 도곽·층 제목(시트·건물 INSERT 포함),
     종이공간 제목·뷰포트 순으로 층을 나눈다.
     """
     if mode not in {"auto", "block", "sheet"}:

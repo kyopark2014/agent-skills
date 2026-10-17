@@ -93,7 +93,7 @@ class FacilityPlanSheetTests(unittest.TestCase):
 
         found = lib_sheet.discover_layout(doc, mode="sheet")
 
-        self.assertEqual(found.floors, ["AA409", "AA406"])
+        self.assertEqual(found.floors, ["AA406", "AA409"])
         titles = {sheet.floor: sheet.title for sheet in found.sheets}
         self.assertEqual(titles["AA409"], "경비실-2, 티카페, 경로당 평면도")
         self.assertEqual(titles["AA406"], "피트니스센터, 에듀센터, 관리사무소 평면도")
@@ -186,6 +186,80 @@ class FacilityPlanSheetTests(unittest.TestCase):
         self.assertEqual([frame.floor for frame in found.sheets], ["sheet_01"])
         self.assertAlmostEqual(found.sheets[0].bbox[0], 68_702, delta=1)
         self.assertTrue(any("Defpoints" in note for note in found.warnings))
+
+
+class BlockNameAndSheetInsertTests(unittest.TestCase):
+    def test_parse_floor_from_block_name(self):
+        self.assertEqual(lib_sheet.parse_floor_from_block_name("PL250224-클럽-B1"), "B1F")
+        self.assertEqual(lib_sheet.parse_floor_from_block_name("PL260224-클럽-1"), "1F")
+        self.assertEqual(lib_sheet.parse_floor_from_block_name("PL260224-관리-2"), "2F")
+        self.assertIsNone(lib_sheet.parse_floor_from_block_name("ooa-sheet-1"))
+        self.assertIsNone(lib_sheet.parse_floor_from_block_name("door-handle"))
+
+    def test_sheet_insert_bbox_beats_tiny_duplicate_title_cell(self):
+        """시트 INSERT 큰 도곽이 있으면 복제 제목용 작은 칸은 같은 층으로 흡수된다."""
+        import ezdxf
+
+        doc = ezdxf.new()
+        msp = doc.modelspace()
+        sheet = doc.blocks.new("ooa-sheet-1")
+        sheet.add_lwpolyline(
+            [(0, 0), (168_000, 0), (168_000, 118_800), (0, 118_800)],
+            close=True,
+        )
+        msp.add_blockref("ooa-sheet-1", insert=(0, 0))
+        # 실제 도면 제목(시트 안)
+        msp.add_text(
+            "지하1층 전열설비 평면도(클럽하우스)",
+            dxfattribs={"insert": (60_000, 10_000), "height": 1200},
+        )
+        # 복제 제목이 들어간 작은 칸(시트 안 오른쪽)
+        msp.add_lwpolyline(
+            [(140_000, 5_000), (156_000, 5_000), (156_000, 22_600), (140_000, 22_600)],
+            close=True,
+        )
+        msp.add_text(
+            "지하1층 전열설비 평면도(클럽하우스)",
+            dxfattribs={"insert": (142_000, 12_000), "height": 1200},
+        )
+        # 시트 안에 잡힐 건물 INSERT(기하)
+        plan = doc.blocks.new("PL250224-클럽-B1")
+        for index in range(250):
+            x = 40_000 + (index % 20) * 500
+            y = 40_000 + (index // 20) * 500
+            plan.add_line((x, y), (x + 400, y))
+        msp.add_blockref("PL250224-클럽-B1", insert=(50_000, 50_000))
+
+        found = lib_sheet.discover_layout(doc, mode="sheet")
+
+        self.assertIn("B1F", found.floors)
+        self.assertNotIn("B1F_2", found.floors)
+        b1 = next(sheet for sheet in found.sheets if sheet.floor == "B1F")
+        self.assertGreater(b1.bbox[2] - b1.bbox[0], 100_000)
+        self.assertTrue(any("시트 블록 INSERT" in note for note in found.warnings))
+
+    def test_building_insert_used_when_no_sheet_frame(self):
+        """도곽·시트 블록이 없으면 건물 INSERT 기하 bbox로 층을 만든다."""
+        import ezdxf
+
+        doc = ezdxf.new()
+        msp = doc.modelspace()
+        plan = doc.blocks.new("PL260224-클럽-1")
+        for index in range(400):
+            x = (index % 20) * 2_000
+            y = (index // 20) * 1_500
+            plan.add_line((x, y), (x + 1_200, y + 200))
+        msp.add_blockref("PL260224-클럽-1", insert=(0, 0))
+        msp.add_text(
+            "1층 전열설비 평면도(클럽하우스)",
+            dxfattribs={"insert": (5_000, -5_000), "height": 1000},
+        )
+
+        found = lib_sheet.discover_layout(doc, mode="sheet")
+
+        self.assertEqual(found.floors, ["1F"])
+        self.assertTrue(any("건물 평면 INSERT" in note for note in found.warnings))
+        self.assertGreater(found.sheets[0].bbox[2] - found.sheets[0].bbox[0], 10_000)
 
 
 class PaperspaceFloorTests(unittest.TestCase):
