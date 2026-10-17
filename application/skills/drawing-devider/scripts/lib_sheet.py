@@ -1455,15 +1455,25 @@ def discover_sheet_floors(doc) -> LayoutDiscovery:
             f"시트 블록 INSERT {len(sheet_inserts)}곳을 도곽으로 사용했습니다."
         )
     frames = _frames_from_sheet_rects(rects, texts, plans, numbers, warnings)
-    if not frames:
-        # 도면틀 LINE이 끊기고 실제 테두리만 Defpoints 닫힌 폴리라인에 있는 경우
-        construction = _collect_construction_poly_rects(doc)
-        if construction:
-            frames = _frames_from_sheet_rects(construction, texts, plans, numbers, warnings)
+    # Defpoints LINE은 쓰지 않지만, 닫힌 폴리라인 도곽은 후보로 둔다.
+    # 일반 도곽이 없거나(도면틀 끊김), 일부 층만 잡힌 경우(예: 한 장짜리 큰 테두리)에
+    # Defpoints 닫힌 도곽이 더 많은 층을 설명하면 그쪽을 쓴다.
+    construction = _collect_construction_poly_rects(doc)
+    if construction:
+        alt_notes: list[str] = []
+        alt = _frames_from_sheet_rects(construction, texts, plans, numbers, alt_notes)
+        if alt and (not frames or len(alt) > len(frames)):
             if frames:
+                warnings.append(
+                    "일반 도곽이 일부 층만 잡아 Defpoints 등 보조선 레이어의 "
+                    "닫힌 도곽으로 층을 다시 나눴습니다."
+                )
+            else:
                 warnings.append(
                     "일반 도곽이 없어 Defpoints 등 보조선 레이어의 닫힌 도곽을 사용했습니다."
                 )
+            frames = alt
+            warnings.extend(alt_notes)
     frames = _prefer_largest_same_floor(frames)
     building = _building_insert_frames(doc, texts, frames, warnings)
     if building:

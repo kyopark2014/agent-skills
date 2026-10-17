@@ -2,6 +2,10 @@
 
 우선순위는 ODA File Converter, 없으면 libredwg ``dwg2dxf``다.
 이미 만든 DXF가 DWG보다 새로우면 다시 변환하지 않는다.
+
+LibreDWG가 만든 DXF는 ``SORTENTSTABLE``에 ``(331, 331)`` 쌍을 넣는 경우가
+있다. ezdxf는 ``(331, 5)``만 받아 ``Invalid sort handle code 331, expected 5``로
+연다. 변환·재사용 직후 그 쌍만 ``(331, 5)``로 고친다.
 """
 
 from __future__ import annotations
@@ -20,7 +24,10 @@ def ensure_dxf(source: Path, dest_dir: Path | None = None, *, convert=None) -> P
     """DXF는 그대로 반환하고, DWG는 ``dest_dir``(없으면 DWG 옆)에 DXF를 만든다."""
     source = Path(source)
     if source.suffix.lower() != ".dwg":
-        return source
+        path = source
+        if path.suffix.lower() == ".dxf":
+            _repair_libredwg_sortents(path)
+        return path
     if not source.is_file():
         raise FileNotFoundError(f"DWG 없음: {source}")
 
@@ -29,6 +36,7 @@ def ensure_dxf(source: Path, dest_dir: Path | None = None, *, convert=None) -> P
     dest = folder / f"{source.stem}.dxf"
     if _fresh(dest, source):
         print(f"reuse dxf {dest}", flush=True)
+        _repair_libredwg_sortents(dest)
         return dest
 
     print(f"converting {source.name} -> {dest}", flush=True)
@@ -36,6 +44,7 @@ def ensure_dxf(source: Path, dest_dir: Path | None = None, *, convert=None) -> P
     runner(source, dest)
     if not dest.is_file() or dest.stat().st_size == 0:
         raise DwgConvertError(f"DXF가 만들어지지 않았습니다: {dest}")
+    _repair_libredwg_sortents(dest)
     return dest
 
 
@@ -99,7 +108,7 @@ def _convert_with_dwg2dxf(exe: str, source: Path, dest: Path) -> None:
     if tmp.exists():
         tmp.unlink()
     proc = subprocess.run(
-        [exe, "-o", str(tmp), str(source)],
+        [exe, "-y", "-o", str(tmp), str(source)],
         capture_output=True,
         text=True,
     )
@@ -112,3 +121,92 @@ def _convert_with_dwg2dxf(exe: str, source: Path, dest: Path) -> None:
     if warnings:
         print(f"dwg2dxf warnings: {warnings}", file=sys.stderr)
     tmp.replace(dest)
+
+
+def _repair_libredwg_sortents(path: Path) -> int:
+    """LibreDWG ``SORTENTSTABLE``의 ``(331, 331)`` 쌍을 ``(331, 5)``로 고친다.
+
+    도면 기하·레이어는 건드리지 않는다. 고친 쌍 개수를 반환한다.
+    """
+    path = Path(path)
+    if not path.is_file() or path.suffix.lower() != ".dxf":
+        return 0
+    if not _sortents_has_bad_pairs(path):
+        return 0
+    fixed = _rewrite_sortents_pairs(path)
+    if fixed:
+        print(f"repaired LibreDWG SORTENTSTABLE pairs: {fixed} in {path}", flush=True)
+    return fixed
+
+
+def _sortents_has_bad_pairs(path: Path) -> bool:
+    in_sort = False
+    with path.open("r", encoding="utf-8", errors="surrogateescape", newline="") as fh:
+        while True:
+            raw = fh.readline()
+            if not raw:
+                return False
+            token = raw.strip()
+            if token == "SORTENTSTABLE":
+                in_sort = True
+                continue
+            if not in_sort:
+                continue
+            if token == "0":
+                in_sort = False
+                continue
+            if token != "331":
+                continue
+            # 331 / entity-handle / sort-code / sort-handle
+            if not fh.readline():
+                return False
+            code_line = fh.readline()
+            if not code_line:
+                return False
+            if code_line.strip() == "331":
+                return True
+            fh.readline()  # sort-handle value when code is already valid
+
+
+def _rewrite_sortents_pairs(path: Path) -> int:
+    tmp = path.with_name(f".{path.stem}.sortents.dxf")
+    fixed = 0
+    in_sort = False
+    with path.open("r", encoding="utf-8", errors="surrogateescape", newline="") as src, tmp.open(
+        "w", encoding="utf-8", errors="surrogateescape", newline=""
+    ) as dst:
+        while True:
+            raw = src.readline()
+            if not raw:
+                break
+            token = raw.strip()
+            if token == "SORTENTSTABLE":
+                in_sort = True
+                dst.write(raw)
+                continue
+            if in_sort and token == "0":
+                in_sort = False
+                dst.write(raw)
+                continue
+            if in_sort and token == "331":
+                handle = src.readline()
+                code = src.readline()
+                value = src.readline() if code else ""
+                dst.write(raw)
+                if handle:
+                    dst.write(handle)
+                if code and code.strip() == "331":
+                    # Preserve original whitespace style when possible.
+                    dst.write("5\n" if code.endswith("\n") else "5")
+                    fixed += 1
+                elif code:
+                    dst.write(code)
+                if value:
+                    dst.write(value)
+                continue
+            dst.write(raw)
+    if fixed:
+        tmp.replace(path)
+    else:
+        tmp.unlink(missing_ok=True)
+    return fixed

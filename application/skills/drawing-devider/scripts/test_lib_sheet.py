@@ -187,6 +187,42 @@ class FacilityPlanSheetTests(unittest.TestCase):
         self.assertAlmostEqual(found.sheets[0].bbox[0], 68_702, delta=1)
         self.assertTrue(any("Defpoints" in note for note in found.warnings))
 
+    def test_defpoints_preferred_when_partial_frame_misses_floors(self):
+        """일반 도곽이 한 층만 잡아도 Defpoints 닫힌 도곽이 더 많으면 그쪽을 쓴다.
+
+        260713처럼 큰 테두리 하나에 짧은 '5F'만 있고, 실제 층 테두리는
+        Defpoint 닫힌 폴리라인에만 있는 경우를 막는다.
+        """
+        import ezdxf
+
+        doc = ezdxf.new()
+        msp = doc.modelspace()
+        # 일부 층만 담는 일반 레이어 큰 도곽 + 짧은 층 코드
+        msp.add_lwpolyline(
+            [(0, 0), (200_000, 0), (200_000, 150_000), (0, 150_000)],
+            close=True,
+            dxfattribs={"layer": "0"},
+        )
+        msp.add_text("5F", dxfattribs={"insert": (20_000, 20_000), "height": 5000})
+        # Defpoints 에 층별 도곽
+        msp.add_lwpolyline(
+            [(0, 0), (180_000, 0), (180_000, 120_000), (0, 120_000)],
+            close=True,
+            dxfattribs={"layer": "Defpoints"},
+        )
+        msp.add_text("5층 평면도", dxfattribs={"insert": (30_000, 10_000), "height": 3000})
+        msp.add_lwpolyline(
+            [(0, 200_000), (180_000, 200_000), (180_000, 320_000), (0, 320_000)],
+            close=True,
+            dxfattribs={"layer": "Defpoints"},
+        )
+        msp.add_text("13층 평면도", dxfattribs={"insert": (30_000, 210_000), "height": 3000})
+
+        found = lib_sheet.discover_layout(doc, mode="sheet")
+
+        self.assertEqual(found.floors, ["5F", "13F"])
+        self.assertTrue(any("다시 나눴" in note for note in found.warnings))
+
 
 class BlockNameAndSheetInsertTests(unittest.TestCase):
     def test_parse_floor_from_block_name(self):
