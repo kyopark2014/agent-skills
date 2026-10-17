@@ -19687,6 +19687,8 @@ def add_swing_closed_chords(msp) -> int:
     """스윙이 닫혀 벽과 나란한 현을 WALL로 추가한다.
 
     열리는 문짝은 그대로 둔다. 이미 벽인 선은 내리지 않는다.
+    부분 개방(호가 90° 미만, 한쪽만 축정렬) 스윙도 닫힌 문짝 BASE를
+    WALL로 올린다. 양개문 힌지 사이 짧은 틈도 이어서 막는다.
     """
     segments: list[tuple[float, float, float, float, str, object | None]] = []
     for entity in _entities(msp):
@@ -19785,7 +19787,44 @@ def add_swing_closed_chords(msp) -> int:
             return None
         return best[1], best[2]
 
+    def _leaf_from_hinge(
+        hx: float, hy: float, ux: float, uy: float, radius: float, *, aligned: bool,
+    ) -> bool:
+        """힌지에서 문짝 길이만큼 나간 BASE 선이 있으면 문이다."""
+        nx, ny = -uy, ux
+        for x0, y0, x1, y1, layer, _owner in segments:
+            if layer != BASE_LAYER:
+                continue
+            elen = math.hypot(x1 - x0, y1 - y0)
+            if not (0.55 * radius <= elen <= 1.45 * radius):
+                continue
+            dx, dy = (x1 - x0) / elen, (y1 - y0) / elen
+            if aligned:
+                if abs(dx * ux + dy * uy) < 0.98:
+                    continue
+                off0 = (x0 - hx) * nx + (y0 - hy) * ny
+                off1 = (x1 - hx) * nx + (y1 - hy) * ny
+                if abs(off1 - off0) > 15.0 or abs(off0) > 30.0:
+                    continue
+                along0 = (x0 - hx) * ux + (y0 - hy) * uy
+                along1 = (x1 - hx) * ux + (y1 - hy) * uy
+                overlap = min(max(along0, along1), radius) - max(min(along0, along1), 0.0)
+                if overlap >= 0.65 * radius:
+                    return True
+            else:
+                # 부분 개방 문짝은 대각이라 힌지 끝만 맞으면 된다.
+                if min(math.hypot(x0 - hx, y0 - hy), math.hypot(x1 - hx, y1 - hy)) > 40.0:
+                    continue
+                mid_x, mid_y = (x0 + x1) * 0.5, (y0 + y1) * 0.5
+                if (mid_x - hx) * ux + (mid_y - hy) * uy < 0.35 * radius:
+                    continue
+                if abs((mid_x - hx) * nx + (mid_y - hy) * ny) > 0.75 * radius:
+                    continue
+                return True
+        return False
+
     added = 0
+    closed_hinges: list[tuple[float, float, float, float]] = []
     for entity in _entities(msp):
         if _dxftype(entity) != "ARC":
             continue
@@ -19798,74 +19837,145 @@ def add_swing_closed_chords(msp) -> int:
         except Exception:  # noqa: BLE001
             continue
         sweep = (end_angle - start_angle) % 360.0
-        if not (400.0 <= radius <= 1400.0) or not (70.0 <= sweep <= 110.0):
+        # 부분 개방 스윙은 호가 45–70° 이고 한쪽만 축정렬이다.
+        if not (400.0 <= radius <= 1400.0) or not (45.0 <= sweep <= 110.0):
             continue
         ends: list[tuple[float, float, float, float]] = []
+        open_dirs: list[tuple[float, float]] = []
         for angle in (start_angle, end_angle):
             rad = math.radians(angle)
             ux, uy = math.cos(rad), math.sin(rad)
             if abs(ux) >= 0.98:
                 ux, uy = (1.0 if ux > 0.0 else -1.0), 0.0
+                ends.append((ux, uy, hx + radius * ux, hy + radius * uy))
             elif abs(uy) >= 0.98:
                 ux, uy = 0.0, (1.0 if uy > 0.0 else -1.0)
+                ends.append((ux, uy, hx + radius * ux, hy + radius * uy))
             else:
+                open_dirs.append((ux, uy))
+        partial = sweep < 70.0 or len(ends) == 1
+        if partial:
+            if len(ends) != 1 or not open_dirs:
                 continue
-            ends.append((ux, uy, hx + radius * ux, hy + radius * uy))
-        if len(ends) != 2:
-            continue
-
-        def _jamb_at(ux: float, uy: float) -> bool:
-            """호 끝이 짧은 문틀( jamb )에 닿으면 그 방향이 닫힌 쪽이다."""
-            ex, ey = hx + radius * ux, hy + radius * uy
-            for x0, y0, x1, y1, _layer, _owner in segments:
-                elen = math.hypot(x1 - x0, y1 - y0)
-                if not (80.0 <= elen <= 500.0):
-                    continue
-                if abs(((x1 - x0) / elen) * ux + ((y1 - y0) / elen) * uy) > 0.25:
-                    continue
-                if min(math.hypot(x0 - ex, y0 - ey), math.hypot(x1 - ex, y1 - ey)) <= 50.0:
-                    return True
-            return False
-
-        jamb_ends = [end for end in ends if _jamb_at(end[0], end[1])]
-        scored: list[tuple[float, float, float]] = []
-        for ux, uy, _ex, _ey in ends:
-            nx, ny = -uy, ux
-            total = 0.0
-            for x0, y0, x1, y1, _layer, _owner in segments:
-                elen = math.hypot(x1 - x0, y1 - y0)
-                if elen < 200.0:
-                    continue
-                if abs(((x1 - x0) / elen) * ux + ((y1 - y0) / elen) * uy) < 0.98:
-                    continue
-                off = abs((x0 - hx) * nx + (y0 - hy) * ny)
-                if off > 400.0:
-                    continue
-                along0 = (x0 - hx) * ux + (y0 - hy) * uy
-                along1 = (x1 - hx) * ux + (y1 - hy) * uy
-                if min(along0, along1) > radius + 400.0 or max(along0, along1) < -400.0:
-                    continue
-                # 힌지에 붙은 문짝은 아직 BASE라 벽 길이에 섞인다.
-                # 그대로 두면 열리는 쪽이 닫힌 쪽과 비슷해 현을 건너뛴다.
-                lo, hi = min(along0, along1), max(along0, along1)
-                if (
-                    off <= 90.0
-                    and 0.55 * radius <= elen <= 1.2 * radius
-                    and lo >= -80.0
-                    and hi <= radius + 180.0
-                ):
-                    continue
-                total += elen
-            scored.append((total, ux, uy))
-        scored.sort(reverse=True)
-        if len(jamb_ends) == 1:
-            ux, uy = jamb_ends[0][0], jamb_ends[0][1]
-        elif len(scored) < 2 or scored[0][0] < scored[1][0] + 800.0:
+            ux, uy = ends[0][0], ends[0][1]
+            # 가구 호와 구분: 닫힌 현·열린 문짝 BASE가 둘 다 있어야 한다.
+            if not _leaf_from_hinge(hx, hy, ux, uy, radius, aligned=True):
+                continue
+            if not any(
+                _leaf_from_hinge(hx, hy, ox, oy, radius, aligned=False) for ox, oy in open_dirs
+            ):
+                continue
+        elif len(ends) != 2:
             continue
         else:
-            ux, uy = scored[0][1], scored[0][2]
+            def _jamb_at(ux: float, uy: float) -> bool:
+                """호 끝이 문틀·스트라이크 벽에 닿으면 그 방향이 닫힌 쪽이다.
+
+                스트라이크 쪽 짧은 횡벽은 500 mm를 넘는 경우가 있어 800 mm까지 본다.
+                """
+                ex, ey = hx + radius * ux, hy + radius * uy
+                for x0, y0, x1, y1, _layer, _owner in segments:
+                    elen = math.hypot(x1 - x0, y1 - y0)
+                    if not (80.0 <= elen <= 800.0):
+                        continue
+                    if abs(((x1 - x0) / elen) * ux + ((y1 - y0) / elen) * uy) > 0.25:
+                        continue
+                    if min(math.hypot(x0 - ex, y0 - ey), math.hypot(x1 - ex, y1 - ey)) <= 50.0:
+                        return True
+                return False
+
+            def _leaf_at(ux: float, uy: float) -> bool:
+                """힌지에서 이 방향으로 뻗은 열린 문짝이 있으면 True."""
+                nx, ny = -uy, ux
+                for x0, y0, x1, y1, _layer, _owner in segments:
+                    elen = math.hypot(x1 - x0, y1 - y0)
+                    if not (0.55 * radius <= elen <= 1.2 * radius):
+                        continue
+                    if abs(((x1 - x0) / elen) * ux + ((y1 - y0) / elen) * uy) < 0.98:
+                        continue
+                    off0 = (x0 - hx) * nx + (y0 - hy) * ny
+                    off1 = (x1 - hx) * nx + (y1 - hy) * ny
+                    if abs(off1 - off0) > 15.0 or abs(off0) > 130.0:
+                        continue
+                    along0 = (x0 - hx) * ux + (y0 - hy) * uy
+                    along1 = (x1 - hx) * ux + (y1 - hy) * uy
+                    lo, hi = min(along0, along1), max(along0, along1)
+                    if lo >= -80.0 and hi <= radius + 180.0 and hi - lo >= 0.55 * radius:
+                        return True
+                return False
+
+            jamb_ends = [end for end in ends if _jamb_at(end[0], end[1])]
+            leaf_ends = [end for end in ends if _leaf_at(end[0], end[1])]
+            scored: list[tuple[float, float, float]] = []
+            for cand_ux, cand_uy, _ex, _ey in ends:
+                nx, ny = -cand_uy, cand_ux
+                total = 0.0
+                for x0, y0, x1, y1, _layer, _owner in segments:
+                    elen = math.hypot(x1 - x0, y1 - y0)
+                    if elen < 200.0:
+                        continue
+                    if abs(((x1 - x0) / elen) * cand_ux + ((y1 - y0) / elen) * cand_uy) < 0.98:
+                        continue
+                    off = abs((x0 - hx) * nx + (y0 - hy) * ny)
+                    if off > 400.0:
+                        continue
+                    along0 = (x0 - hx) * cand_ux + (y0 - hy) * cand_uy
+                    along1 = (x1 - hx) * cand_ux + (y1 - hy) * cand_uy
+                    if min(along0, along1) > radius + 400.0 or max(along0, along1) < -400.0:
+                        continue
+                    # 힌지에 붙은 문짝은 아직 BASE라 벽 길이에 섞인다.
+                    # 그대로 두면 열리는 쪽이 닫힌 쪽과 비슷해 현을 건너뛴다.
+                    lo, hi = min(along0, along1), max(along0, along1)
+                    if (
+                        off <= 130.0
+                        and 0.55 * radius <= elen <= 1.2 * radius
+                        and lo >= -80.0
+                        and hi <= radius + 180.0
+                    ):
+                        continue
+                    total += elen
+                scored.append((total, cand_ux, cand_uy))
+            scored.sort(reverse=True)
+            if len(jamb_ends) == 1:
+                ux, uy = jamb_ends[0][0], jamb_ends[0][1]
+            elif len(leaf_ends) == 1:
+                # 열린 문짝이 있는 쪽의 반대가 닫힌 방향이다.
+                open_u, open_v = leaf_ends[0][0], leaf_ends[0][1]
+                other = [end for end in ends if abs(end[0] - open_u) + abs(end[1] - open_v) > 0.5]
+                if len(other) != 1:
+                    continue
+                ux, uy = other[0][0], other[0][1]
+            elif len(scored) < 2 or scored[0][0] < scored[1][0] + 800.0:
+                continue
+            else:
+                ux, uy = scored[0][1], scored[0][2]
         nx, ny = -uy, ux
         sx, sy = hx + radius * ux, hy + radius * uy
+        # 이전에 열린 쪽으로 그은 잘못된 현은 BASE로 내린다.
+        if not partial:
+            for oux, ouy, _oex, _oey in ends:
+                if abs(oux - ux) + abs(ouy - uy) < 0.5:
+                    continue
+                onx, ony = -ouy, oux
+                for x0, y0, x1, y1, layer, owner in segments:
+                    if layer != WALL_LAYER or owner is None:
+                        continue
+                    elen = math.hypot(x1 - x0, y1 - y0)
+                    if not (0.75 * radius <= elen <= 1.25 * radius):
+                        continue
+                    if abs(((x1 - x0) / elen) * oux + ((y1 - y0) / elen) * ouy) < 0.98:
+                        continue
+                    off0 = (x0 - hx) * onx + (y0 - hy) * ony
+                    off1 = (x1 - hx) * onx + (y1 - hy) * ony
+                    if abs(off1 - off0) > 15.0 or abs(off0) > 30.0:
+                        continue
+                    along0 = (x0 - hx) * oux + (y0 - hy) * ouy
+                    along1 = (x1 - hx) * oux + (y1 - hy) * ouy
+                    overlap = min(max(along0, along1), radius) - max(min(along0, along1), 0.0)
+                    if overlap < 0.65 * radius:
+                        continue
+                    if _paint_layer(owner, BASE_LAYER, BASE_COLOR):
+                        added += 1
         # 개구를 가로지르는 한 줄은 문틀 두께만큼 비껴 있으면 닫힌 현이 아니다.
         for x0, y0, x1, y1, layer, owner in segments:
             if layer != WALL_LAYER or owner is None:
@@ -19912,6 +20022,9 @@ def add_swing_closed_chords(msp) -> int:
             painted = True
             break
         if not painted and not _covered(hx, hy, sx, sy):
+            if partial:
+                # 부분 개방은 도면에 닫힌 문짝이 있을 때만 올린다.
+                continue
             line = msp.add_line(
                 (hx, hy),
                 (sx, sy),
@@ -19919,8 +20032,11 @@ def add_swing_closed_chords(msp) -> int:
             )
             segments.append((hx, hy, sx, sy, WALL_LAYER, line))
             added += 1
+            painted = True
+        if painted or _covered(hx, hy, sx, sy):
+            closed_hinges.append((hx, hy, ux, uy))
         # 닫힌 방향만. 열리는 쪽으로는 현을 긋지 않는다.
-        if not _occupied(ux, uy, hx, hy, radius):
+        if not partial and not _occupied(ux, uy, hx, hy, radius):
             strike = _wall_end(ux, uy, sx, sy)
             if strike is not None and _near_wall(hx, hy) and not _covered(hx, hy, strike[0], strike[1]):
                 line = msp.add_line(
@@ -19930,6 +20046,36 @@ def add_swing_closed_chords(msp) -> int:
                 )
                 segments.append((hx, hy, strike[0], strike[1], WALL_LAYER, line))
                 added += 1
+
+    # 양개문: 닫힌 문짝이 바깥으로 뻗고 힌지만 가까이 있으면 사이 틈을 막는다.
+    used_gap: set[tuple[int, int]] = set()
+    for i, (hx0, hy0, ux0, uy0) in enumerate(closed_hinges):
+        for j in range(i + 1, len(closed_hinges)):
+            hx1, hy1, ux1, uy1 = closed_hinges[j]
+            if (i, j) in used_gap:
+                continue
+            dist = math.hypot(hx1 - hx0, hy1 - hy0)
+            if not (40.0 <= dist <= 400.0):
+                continue
+            # 힌지 선이 닫힌 방향과 나란하고, 서로 닫힌 쪽 반대(중앙)를 본다.
+            if abs((hx1 - hx0) * ux0 + (hy1 - hy0) * uy0) / dist < 0.98:
+                continue
+            if abs(ux0 + ux1) > 0.2 or abs(uy0 + uy1) > 0.2:
+                continue
+            along0 = (hx1 - hx0) * ux0 + (hy1 - hy0) * uy0
+            along1 = (hx0 - hx1) * ux1 + (hy0 - hy1) * uy1
+            if along0 > -20.0 or along1 > -20.0:
+                continue
+            if _covered(hx0, hy0, hx1, hy1):
+                continue
+            line = msp.add_line(
+                (hx0, hy0),
+                (hx1, hy1),
+                dxfattribs={"layer": WALL_LAYER, "color": WALL_COLOR},
+            )
+            segments.append((hx0, hy0, hx1, hy1, WALL_LAYER, line))
+            used_gap.add((i, j))
+            added += 1
     return added
 
 
