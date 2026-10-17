@@ -20,6 +20,7 @@ import json
 import os
 import re
 import shutil
+import unicodedata
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -123,12 +124,15 @@ def _extracted_at_from_paths(
 def sanitize_documents_filename(filename: str, *, default: str = "upload.bin") -> str:
     """Return a shell/path-safe basename (spaces → ``_``, strip unsafe chars).
 
+    Hangul is stored as NFC so macOS NFD uploads match Linux lookups.
     Preserves a single final extension (lowercased). Examples::
 
         ``s9540_3_2025 1.pdf`` → ``s9540_3_2025_1.pdf``
         ``Report (final).PDF`` → ``Report_final.pdf``
     """
-    name = os.path.basename((filename or "").strip()) or default
+    name = unicodedata.normalize(
+        "NFC", os.path.basename((filename or "").strip()) or default
+    )
     name = name.replace("\x00", "")
     if name in {".", ".."}:
         return default

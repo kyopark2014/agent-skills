@@ -201,7 +201,9 @@ def save_session_upload(
 
 def resolve_session_upload_path(user_id: str | None, filename: str) -> str | None:
     """Return absolute path if ``filename`` exists under the user's upload dir."""
-    safe_name = os.path.basename(filename or "").strip()
+    safe_name = unicodedata.normalize(
+        "NFC", os.path.basename(filename or "").strip()
+    )
     if not safe_name or safe_name in {".", ".."}:
         return None
     upload_dir = os.path.abspath(get_user_upload_dir(user_id))
@@ -1605,7 +1607,9 @@ MAX_DOCUMENTS_DOC_BYTES = 2 * 1024 * 1024 * 1024  # 2 GiB
 def documents_projects_s3_key(file_name: str, user_id: str | None = None) -> str:
     """Build ``session-uploads/{user}/documents/projects/{file}`` staging key."""
     segment = sanitize_user_path_segment(user_id) or "default"
-    safe_name = os.path.basename(file_name or "").strip() or "upload.bin"
+    safe_name = unicodedata.normalize(
+        "NFC", os.path.basename(file_name or "").strip()
+    ) or "upload.bin"
     return f"{DOCUMENTS_S3_PREFIX}/{segment}/documents/projects/{safe_name}"
 
 
@@ -1754,7 +1758,9 @@ def materialize_documents_projects_from_s3(
 
 def documents_drawings_s3_key(file_name: str, user_id: str | None = None) -> str:
     segment = sanitize_user_path_segment(user_id) or "default"
-    safe_name = os.path.basename(file_name or "").strip() or "upload.bin"
+    safe_name = unicodedata.normalize(
+        "NFC", os.path.basename(file_name or "").strip()
+    ) or "upload.bin"
     return f"{DOCUMENTS_S3_PREFIX}/{segment}/documents/drawings/{safe_name}"
 
 
