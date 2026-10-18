@@ -200,12 +200,14 @@ export interface DrawingLabelItem {
   faces: DrawingLabelFace[];
   polygons_px?: number[][][];
   tags?: DrawingLabelTag[];
+  source?: "detected" | "modified" | "pending" | string;
 }
 
 export interface DrawingFloorLabels {
   drawing_id: string;
   floor: string;
   label_count: number;
+  pending_count?: number;
   unique_face_area_m2: number;
   overlay?: { width: number; height: number } | null;
   labels: DrawingLabelItem[];
@@ -526,6 +528,34 @@ export const api = {
   getDrawingFloorLabels: (drawingId: string, floor: string) =>
     request<DrawingFloorLabels>(
       `/api/drawings/${encodeURIComponent(drawingId)}/floors/${encodeURIComponent(floor)}/labels`,
+    ),
+  addDrawingFloorLabelManual: (
+    drawingId: string,
+    floor: string,
+    body:
+      | { x_px: number; y_px: number; boundary?: "wall" | "entity" }
+      | { x0_px: number; y0_px: number; x1_px: number; y1_px: number },
+  ) =>
+    request<DrawingFloorLabels>(
+      `/api/drawings/${encodeURIComponent(drawingId)}/floors/${encodeURIComponent(floor)}/labels/manual`,
+      { method: "POST", body: JSON.stringify(body) },
+    ),
+  undoDrawingFloorLabelManual: (drawingId: string, floor: string, label?: string) => {
+    const query = label ? `?label=${encodeURIComponent(label)}` : "";
+    return request<DrawingFloorLabels>(
+      `/api/drawings/${encodeURIComponent(drawingId)}/floors/${encodeURIComponent(floor)}/labels/manual${query}`,
+      { method: "DELETE" },
+    );
+  },
+  commitDrawingFloorLabelManual: (drawingId: string, floor: string) =>
+    request<DrawingFloorLabels>(
+      `/api/drawings/${encodeURIComponent(drawingId)}/floors/${encodeURIComponent(floor)}/labels/manual/commit`,
+      { method: "POST", body: "{}" },
+    ),
+  cancelDrawingFloorLabelManual: (drawingId: string, floor: string) =>
+    request<DrawingFloorLabels>(
+      `/api/drawings/${encodeURIComponent(drawingId)}/floors/${encodeURIComponent(floor)}/labels/manual/cancel`,
+      { method: "POST", body: "{}" },
     ),
   setDrawingRating: (drawingId: string, rating: DrawingRating) =>
     request<{ ok: boolean; drawing_id: string; rating: DrawingRating }>(

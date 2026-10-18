@@ -12,6 +12,7 @@ import { MenuIcon } from "./SidebarIcons";
 const MIN_ZOOM = 0.25;
 const MAX_ZOOM = 16;
 const ZOOM_STEP = 1.25;
+const PAN_KEY_STEP = 64;
 
 const RATING_OPTIONS: Array<{ value: DrawingRating; label: string }> = [
   { value: "pending", label: "대기" },
@@ -55,12 +56,21 @@ interface Props {
   onBack: () => void;
 }
 
-function imageKind(kind: PreviewKind): "original" | "wall" | "validated" | "label" {
-  return kind === "summary" ? "original" : kind;
+function imageKind(
+  kind: PreviewKind,
+  summaryValidated = false,
+): "original" | "wall" | "validated" | "label" {
+  if (kind === "summary") return summaryValidated ? "validated" : "original";
+  return kind;
 }
 
-function imageSrc(drawingId: string, floor: string, kind: PreviewKind): string {
-  const fileKind = imageKind(kind);
+function imageSrc(
+  drawingId: string,
+  floor: string,
+  kind: PreviewKind,
+  summaryValidated = false,
+): string {
+  const fileKind = imageKind(kind, summaryValidated);
   return `/api/drawings/${encodeURIComponent(drawingId)}/floors/${encodeURIComponent(floor)}/${fileKind}`;
 }
 
@@ -75,6 +85,35 @@ function rgbaCss(color: number[], alpha: number): string {
 
 function polygonPoints(points: number[][]): string {
   return points.map(([x = 0, y = 0]) => `${x},${y}`).join(" ");
+}
+
+function pointInPolygon(x: number, y: number, poly: number[][]): boolean {
+  let inside = false;
+  for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+    const xi = poly[i]?.[0] ?? 0;
+    const yi = poly[i]?.[1] ?? 0;
+    const xj = poly[j]?.[0] ?? 0;
+    const yj = poly[j]?.[1] ?? 0;
+    if (yi > y !== yj > y && x < ((xj - xi) * (y - yi)) / (yj - yi || Number.EPSILON) + xi) {
+      inside = !inside;
+    }
+  }
+  return inside;
+}
+
+function findPendingLabelAtPx(
+  labels: DrawingLabelItem[],
+  x: number,
+  y: number,
+): string | null {
+  for (let i = labels.length - 1; i >= 0; i -= 1) {
+    const item = labels[i];
+    if (!item || item.source !== "pending") continue;
+    for (const poly of item.polygons_px ?? []) {
+      if (poly.length >= 3 && pointInPolygon(x, y, poly)) return item.label;
+    }
+  }
+  return null;
 }
 
 function clampZoom(value: number): number {
@@ -226,6 +265,15 @@ export function DrawingView({ drawingId, initialFloor, onMenuClick, onBack }: Pr
   const [legendDragging, setLegendDragging] = useState(false);
   const [rating, setRating] = useState<DrawingRating>("pending");
   const [ratingBusy, setRatingBusy] = useState(false);
+  const [addLabelMode, setAddLabelMode] = useState(false);
+  const [addLabelBusy, setAddLabelBusy] = useState(false);
+  const [rectDrawMode, setRectDrawMode] = useState(false);
+  const [rectDraft, setRectDraft] = useState<{
+    x0: number;
+    y0: number;
+    x1: number;
+    y1: number;
+  } | null>(null);
 
   const stageRef = useRef<HTMLDivElement>(null);
   const legendRef = useRef<HTMLDivElement>(null);
@@ -233,6 +281,11 @@ export function DrawingView({ drawingId, initialFloor, onMenuClick, onBack }: Pr
   const panRef = useRef(pan);
   const fitRef = useRef(fit);
   const naturalRef = useRef({ width: 0, height: 0 });
+  const addLabelBusyRef = useRef(false);
+  const pendingCountRef = useRef(0);
+  const rectDrawModeRef = useRef(false);
+  const spacePanRef = useRef(false);
+  const rectDragRef = useRef<{ x0: number; y0: number } | null>(null);
   const dragRef = useRef<{ x: number; y: number; panX: number; panY: number } | null>(null);
   const legendDragRef = useRef<{
     x: number;
@@ -244,6 +297,8 @@ export function DrawingView({ drawingId, initialFloor, onMenuClick, onBack }: Pr
   zoomRef.current = zoom;
   panRef.current = pan;
   fitRef.current = fit;
+  addLabelBusyRef.current = addLabelBusy;
+  rectDrawModeRef.current = rectDrawMode;
 
   const preview = PREVIEWS.find((item) => item.kind === kind) ?? PREVIEWS[0];
   const floors = catalog?.floors ?? [];
@@ -261,10 +316,9 @@ export function DrawingView({ drawingId, initialFloor, onMenuClick, onBack }: Pr
       )
     : floors;
   const selected = floors.find((item) => item.id === floor);
-  const available = selected ? Boolean(selected[imageKind(kind)]) : null;
-  const src = floor ? imageSrc(drawingId, floor, kind) : "";
   const headerTitle = catalog?.source_filename || catalog?.drawing_id || drawingId;
   const legendActive = showsLegend(kind);
+  const canAddLabel = kind === "summary";
 
   useEffect(() => {
     let cancelled = false;
@@ -275,6 +329,10 @@ export function DrawingView({ drawingId, initialFloor, onMenuClick, onBack }: Pr
     setLabelError(null);
     setRating("pending");
     setRatingBusy(false);
+    setAddLabelMode(false);
+    setAddLabelBusy(false);
+    setRectDrawMode(false);
+    setRectDraft(null);
     api
       .getDrawingFloors(drawingId)
       .then((data) => {
@@ -313,6 +371,8 @@ export function DrawingView({ drawingId, initialFloor, onMenuClick, onBack }: Pr
     setSelectedLabels(new Set());
     setLegendHidden(false);
     setLegendPos(null);
+    setRectDrawMode(false);
+    setRectDraft(null);
     api
       .getDrawingFloorLabels(drawingId, floor)
       .then((data) => {
@@ -330,10 +390,49 @@ export function DrawingView({ drawingId, initialFloor, onMenuClick, onBack }: Pr
     };
   }, [drawingId, floor, kind, legendActive]);
 
+  useEffect(() => {
+    if (!canAddLabel) {
+      setAddLabelMode(false);
+      setRectDrawMode(false);
+      setRectDraft(null);
+    }
+  }, [canAddLabel]);
+
   const selectedArea = useMemo(
     () => (labelData ? uniqueSelectedArea(labelData.labels, selectedLabels) : 0),
     [labelData, selectedLabels],
   );
+
+  const pendingCount = useMemo(() => {
+    if (!labelData) return 0;
+    if (typeof labelData.pending_count === "number") return labelData.pending_count;
+    return labelData.labels.filter((item) => item.source === "pending").length;
+  }, [labelData]);
+  pendingCountRef.current = pendingCount;
+
+  const showLabelEditBar = canAddLabel && (addLabelMode || rectDrawMode || pendingCount > 0);
+  /** While editing labels on summary, show validated walls instead of original. */
+  const summaryValidatedBg = showLabelEditBar;
+  const fileKind = imageKind(kind, summaryValidatedBg);
+  const available = selected ? Boolean(selected[fileKind]) : null;
+  const src = floor ? imageSrc(drawingId, floor, kind, summaryValidatedBg) : "";
+
+  const overlayLabels = useMemo(() => {
+    if (!labelData) return [];
+    if (kind === "label") {
+      return labelData.labels.filter(
+        (item) => item.source === "modified" || item.source === "pending",
+      );
+    }
+    if (kind === "summary") return labelData.labels;
+    return [];
+  }, [kind, labelData]);
+
+  function applyLabelPayload(data: DrawingFloorLabels) {
+    setLabelData(data);
+    setLabelError(null);
+    setSelectedLabels(new Set(data.labels.map((item) => item.label)));
+  }
 
   function toggleLabel(name: string) {
     setSelectedLabels((prev) => {
@@ -402,6 +501,11 @@ export function DrawingView({ drawingId, initialFloor, onMenuClick, onBack }: Pr
     setZoom(1);
     zoomRef.current = 1;
   }
+
+  useEffect(() => {
+    if (kind !== "summary") return;
+    beginImage();
+  }, [kind, summaryValidatedBg, floor]);
 
   function applyContain() {
     const stage = stageRef.current;
@@ -486,8 +590,211 @@ export function DrawingView({ drawingId, initialFloor, onMenuClick, onBack }: Pr
     }
   }
 
-  function onPointerDown(event: ReactPointerEvent<HTMLDivElement>) {
-    if (event.button !== 0 || imageState !== "ready") return;
+  function clientToImagePx(clientX: number, clientY: number): { x: number; y: number } | null {
+    const stage = stageRef.current;
+    const scale = fitRef.current * zoomRef.current;
+    if (!stage || scale <= 0) return null;
+    const rect = stage.getBoundingClientRect();
+    return {
+      x: (clientX - rect.left - panRef.current.x) / scale,
+      y: (clientY - rect.top - panRef.current.y) / scale,
+    };
+  }
+
+  async function addManualLabelAt(
+    clientX: number,
+    clientY: number,
+    boundary: "wall" | "entity" = "entity",
+  ) {
+    if (!floor || addLabelBusyRef.current || imageState !== "ready") return;
+    const pt = clientToImagePx(clientX, clientY);
+    if (!pt) return;
+    const width = naturalRef.current.width || labelData?.overlay?.width || 0;
+    const height = naturalRef.current.height || labelData?.overlay?.height || 0;
+    if (width > 0 && height > 0 && (pt.x < 0 || pt.y < 0 || pt.x > width || pt.y > height)) {
+      setError("도면 안을 클릭해 주세요.");
+      return;
+    }
+    setAddLabelBusy(true);
+    setError(null);
+    try {
+      const data = await api.addDrawingFloorLabelManual(drawingId, floor, {
+        x_px: pt.x,
+        y_px: pt.y,
+        boundary,
+      });
+      applyLabelPayload(data);
+      setLegendHidden(false);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "라벨을 추가하지 못했습니다.");
+    } finally {
+      setAddLabelBusy(false);
+    }
+  }
+
+  async function addManualRectLabel(x0: number, y0: number, x1: number, y1: number) {
+    if (!floor || addLabelBusyRef.current || imageState !== "ready") return;
+    if (Math.abs(x1 - x0) < 4 || Math.abs(y1 - y0) < 4) {
+      setError("사각형을 더 크게 그려 주세요.");
+      return;
+    }
+    setAddLabelBusy(true);
+    setError(null);
+    try {
+      const data = await api.addDrawingFloorLabelManual(drawingId, floor, {
+        x0_px: x0,
+        y0_px: y0,
+        x1_px: x1,
+        y1_px: y1,
+      });
+      applyLabelPayload(data);
+      setLegendHidden(false);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "사각형 라벨을 추가하지 못했습니다.");
+    } finally {
+      setAddLabelBusy(false);
+    }
+  }
+
+  async function undoManualLabel(label?: string) {
+    if (!floor || addLabelBusyRef.current || pendingCountRef.current <= 0) return;
+    setAddLabelBusy(true);
+    setError(null);
+    try {
+      const data = await api.undoDrawingFloorLabelManual(drawingId, floor, label);
+      applyLabelPayload(data);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "라벨을 되돌리지 못했습니다.");
+    } finally {
+      setAddLabelBusy(false);
+    }
+  }
+
+  async function undoLastManualLabel() {
+    await undoManualLabel();
+  }
+
+  async function savePendingLabels() {
+    if (!floor || addLabelBusyRef.current || pendingCountRef.current <= 0) return;
+    setAddLabelBusy(true);
+    setError(null);
+    try {
+      const data = await api.commitDrawingFloorLabelManual(drawingId, floor);
+      applyLabelPayload(data);
+      setAddLabelMode(false);
+      setRectDrawMode(false);
+      setRectDraft(null);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "라벨을 저장하지 못했습니다.");
+    } finally {
+      setAddLabelBusy(false);
+    }
+  }
+
+  async function cancelPendingLabels() {
+    if (!floor || addLabelBusyRef.current || pendingCountRef.current <= 0) return;
+    setAddLabelBusy(true);
+    setError(null);
+    try {
+      const data = await api.cancelDrawingFloorLabelManual(drawingId, floor);
+      applyLabelPayload(data);
+      setAddLabelMode(false);
+      setRectDrawMode(false);
+      setRectDraft(null);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "임시 라벨을 취소하지 못했습니다.");
+    } finally {
+      setAddLabelBusy(false);
+    }
+  }
+
+  useEffect(() => {
+    function isTypingTarget(target: EventTarget | null) {
+      if (!(target instanceof HTMLElement)) return false;
+      const tag = target.tagName;
+      return tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || target.isContentEditable;
+    }
+
+    function nudgePan(dx: number, dy: number) {
+      const next = { x: panRef.current.x + dx, y: panRef.current.y + dy };
+      panRef.current = next;
+      setPan(next);
+    }
+
+    function onKeyDown(event: KeyboardEvent) {
+      if (isTypingTarget(event.target)) return;
+
+      if (event.code === "Space" && !event.repeat) {
+        spacePanRef.current = true;
+        event.preventDefault();
+        return;
+      }
+
+      // 방향키: 도면 이동 (추가하기·라벨 추가 중 포함). 화살표 방향으로 시야 이동.
+      if (
+        event.code === "ArrowLeft" ||
+        event.code === "ArrowRight" ||
+        event.code === "ArrowUp" ||
+        event.code === "ArrowDown"
+      ) {
+        if (event.metaKey || event.ctrlKey || event.altKey) return;
+        event.preventDefault();
+        if (event.code === "ArrowLeft") nudgePan(PAN_KEY_STEP, 0);
+        else if (event.code === "ArrowRight") nudgePan(-PAN_KEY_STEP, 0);
+        else if (event.code === "ArrowUp") nudgePan(0, PAN_KEY_STEP);
+        else nudgePan(0, -PAN_KEY_STEP);
+        return;
+      }
+
+      if (!(event.metaKey || event.ctrlKey) || event.altKey) return;
+      if (event.key !== "z" && event.key !== "Z") return;
+      if (event.shiftKey) return;
+      if (!canAddLabel || pendingCountRef.current <= 0 || addLabelBusyRef.current) return;
+      event.preventDefault();
+      void undoLastManualLabel();
+    }
+
+    function onKeyUp(event: KeyboardEvent) {
+      if (event.code === "Space") spacePanRef.current = false;
+    }
+
+    function onBlur() {
+      spacePanRef.current = false;
+    }
+
+    function onVisibility() {
+      if (document.visibilityState !== "visible") spacePanRef.current = false;
+    }
+
+    window.addEventListener("keydown", onKeyDown);
+    window.addEventListener("keyup", onKeyUp);
+    window.addEventListener("blur", onBlur);
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => {
+      window.removeEventListener("keydown", onKeyDown);
+      window.removeEventListener("keyup", onKeyUp);
+      window.removeEventListener("blur", onBlur);
+      document.removeEventListener("visibilitychange", onVisibility);
+    };
+  }, [canAddLabel, drawingId, floor]);
+
+  function activateRectDrawMode() {
+    spacePanRef.current = false;
+    setRectDrawMode(true);
+    setAddLabelMode(false);
+    setRectDraft(null);
+    setError(null);
+  }
+
+  function activatePolygonDrawMode() {
+    spacePanRef.current = false;
+    setAddLabelMode(true);
+    setRectDrawMode(false);
+    setRectDraft(null);
+    setError(null);
+  }
+
+  function beginPanDrag(event: ReactPointerEvent<HTMLDivElement>) {
     event.currentTarget.setPointerCapture(event.pointerId);
     dragRef.current = {
       x: event.clientX,
@@ -498,7 +805,37 @@ export function DrawingView({ drawingId, initialFloor, onMenuClick, onBack }: Pr
     setPanning(true);
   }
 
+  function onPointerDown(event: ReactPointerEvent<HTMLDivElement>) {
+    if (imageState !== "ready" || addLabelBusy) return;
+    // Middle / right button always pans (라벨 추가·사각형 모드에서도 이동).
+    if (event.button === 1 || event.button === 2) {
+      event.preventDefault();
+      beginPanDrag(event);
+      return;
+    }
+    if (event.button !== 0) return;
+
+    // 추가하기: Shift+드래그 = 수동 사각형. 일반 클릭 = WALL 실 선택 (endPan).
+    if (rectDrawModeRef.current && event.shiftKey) {
+      const pt = clientToImagePx(event.clientX, event.clientY);
+      if (!pt) return;
+      event.currentTarget.setPointerCapture(event.pointerId);
+      rectDragRef.current = { x0: pt.x, y0: pt.y };
+      setRectDraft({ x0: pt.x, y0: pt.y, x1: pt.x, y1: pt.y });
+      return;
+    }
+
+    beginPanDrag(event);
+  }
+
   function onPointerMove(event: ReactPointerEvent<HTMLDivElement>) {
+    if (rectDragRef.current) {
+      const pt = clientToImagePx(event.clientX, event.clientY);
+      if (!pt) return;
+      const start = rectDragRef.current;
+      setRectDraft({ x0: start.x0, y0: start.y0, x1: pt.x, y1: pt.y });
+      return;
+    }
     const drag = dragRef.current;
     if (!drag) return;
     const next = {
@@ -510,18 +847,58 @@ export function DrawingView({ drawingId, initialFloor, onMenuClick, onBack }: Pr
   }
 
   function endPan(event: ReactPointerEvent<HTMLDivElement>) {
+    if (rectDragRef.current) {
+      const start = rectDragRef.current;
+      rectDragRef.current = null;
+      const pt = clientToImagePx(event.clientX, event.clientY);
+      setRectDraft(null);
+      if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+        event.currentTarget.releasePointerCapture(event.pointerId);
+      }
+      if (!pt || addLabelBusy) return;
+      void addManualRectLabel(start.x0, start.y0, pt.x, pt.y);
+      return;
+    }
     const drag = dragRef.current;
     if (!drag) return;
     const moved = Math.hypot(event.clientX - drag.x, event.clientY - drag.y) > 4;
+    const wasLeftButton = event.button === 0 || event.buttons === 0;
     dragRef.current = null;
     setPanning(false);
     if (event.currentTarget.hasPointerCapture(event.pointerId)) {
       event.currentTarget.releasePointerCapture(event.pointerId);
     }
+    if (moved) return;
+    if (addLabelBusy) return;
+    if (wasLeftButton && event.button === 0 && canAddLabel) {
+      const pt = clientToImagePx(event.clientX, event.clientY);
+      // 임시 영역을 다시 클릭하면 해당 pending 라벨 제거.
+      if (pt && pendingCountRef.current > 0 && labelData) {
+        const hit = findPendingLabelAtPx(labelData.labels, pt.x, pt.y);
+        if (hit) {
+          void undoManualLabel(hit);
+          return;
+        }
+      }
+      // 추가하기: 클릭 → WALL 기준 실. 다각형 추가: 클릭 → 엔티티 기준.
+      if (rectDrawModeRef.current) {
+        void addManualLabelAt(event.clientX, event.clientY, "wall");
+        return;
+      }
+      if (addLabelMode) {
+        void addManualLabelAt(event.clientX, event.clientY, "entity");
+        return;
+      }
+    }
     // Label/summary: click the canvas (not a drag) to toggle the legend, like graph.
-    if (!moved && legendActive && (labelData || labelError)) {
+    if (legendActive && (labelData || labelError) && !rectDrawModeRef.current) {
       setLegendHidden((value) => !value);
     }
+  }
+
+  function onContextMenu(event: React.MouseEvent<HTMLDivElement>) {
+    // Right-drag pans; suppress the browser menu on the stage.
+    event.preventDefault();
   }
 
   const displayScale = fit * zoom;
@@ -635,6 +1012,30 @@ export function DrawingView({ drawingId, initialFloor, onMenuClick, onBack }: Pr
                   {legendHidden ? "범례 보이기" : "범례 숨기기"}
                 </button>
               ) : null}
+              {canAddLabel ? (
+                <button
+                  type="button"
+                  className={`drawing-legend-toggle${addLabelMode || rectDrawMode || pendingCount > 0 ? " is-active" : ""}`}
+                  aria-pressed={addLabelMode || rectDrawMode || pendingCount > 0}
+                  disabled={imageState !== "ready" || addLabelBusy}
+                  title={
+                    addLabelMode || rectDrawMode || pendingCount > 0
+                      ? "라벨 편집 바 닫기 (임시 라벨이 있으면 유지)"
+                      : "라벨 편집: 기본은 추가하기(사각형)"
+                  }
+                  onClick={() => {
+                    if (addLabelMode || rectDrawMode) {
+                      setAddLabelMode(false);
+                      setRectDrawMode(false);
+                      setRectDraft(null);
+                    } else {
+                      activateRectDrawMode();
+                    }
+                  }}
+                >
+                  라벨 추가
+                </button>
+              ) : null}
               <button
                 type="button"
                 className="drawing-zoom-btn"
@@ -669,12 +1070,76 @@ export function DrawingView({ drawingId, initialFloor, onMenuClick, onBack }: Pr
           {error && <p className="drawing-error">{error}</p>}
           <div
             ref={stageRef}
-            className={`drawing-stage${panning ? " is-panning" : ""}`}
+            className={`drawing-stage${panning ? " is-panning" : ""}${addLabelMode ? " is-adding-label" : ""}${rectDrawMode ? " is-drawing-rect" : ""}${addLabelBusy ? " is-busy" : ""}`}
             onPointerDown={onPointerDown}
             onPointerMove={onPointerMove}
             onPointerUp={endPan}
             onPointerCancel={endPan}
+            onContextMenu={onContextMenu}
           >
+            {addLabelBusy ? (
+              <div className="drawing-label-busy" role="status" aria-live="polite">
+                <div className="sync-progress-spinner" aria-hidden="true" />
+                <p>라벨 처리 중…</p>
+              </div>
+            ) : null}
+            {showLabelEditBar ? (
+              <div
+                className="drawing-label-edit-bar"
+                role="toolbar"
+                aria-label="임시 라벨 편집"
+                onPointerDown={(event) => event.stopPropagation()}
+              >
+                <span className="drawing-label-edit-count">
+                  임시 {pendingCount}개
+                </span>
+                <button
+                  type="button"
+                  className="drawing-label-edit-btn is-primary"
+                  disabled={addLabelBusy || pendingCount <= 0}
+                  onClick={() => void savePendingLabels()}
+                >
+                  저장
+                </button>
+                <button
+                  type="button"
+                  className="drawing-label-edit-btn"
+                  disabled={addLabelBusy || pendingCount <= 0}
+                  onClick={() => void cancelPendingLabels()}
+                >
+                  취소
+                </button>
+                <button
+                  type="button"
+                  className="drawing-label-edit-btn"
+                  disabled={addLabelBusy || pendingCount <= 0}
+                  title="⌘Z / Ctrl+Z"
+                  onClick={() => void undoLastManualLabel()}
+                >
+                  되돌리기
+                </button>
+                <button
+                  type="button"
+                  className={`drawing-label-edit-btn${rectDrawMode ? " is-active" : ""}`}
+                  disabled={addLabelBusy}
+                  aria-pressed={rectDrawMode}
+                  title="클릭: WALL 실 선택 · Shift+드래그: 수동 사각형 · 드래그/방향키로 이동"
+                  onClick={activateRectDrawMode}
+                >
+                  추가하기
+                </button>
+                <button
+                  type="button"
+                  className={`drawing-label-edit-btn${addLabelMode ? " is-active" : ""}`}
+                  disabled={addLabelBusy}
+                  aria-pressed={addLabelMode}
+                  title="클릭한 지점을 둘러싼 엔티티(선) 경계로 다각형 추가 · 임시 영역 다시 클릭으로 제거"
+                  onClick={activatePolygonDrawMode}
+                >
+                  다각형 추가
+                </button>
+              </div>
+            ) : null}
             {!catalog && !error ? (
               <p className="drawing-card-status">불러오는 중…</p>
             ) : !floor || available === false || imageState === "missing" ? (
@@ -708,18 +1173,18 @@ export function DrawingView({ drawingId, initialFloor, onMenuClick, onBack }: Pr
                   }}
                   onError={() => setImageState("missing")}
                 />
-                {kind === "summary" && imageState === "ready" && labelData ? (
+                {(overlayLabels.length > 0 || rectDraft) && imageState === "ready" ? (
                   <svg
                     className="drawing-label-overlay"
-                    width={naturalRef.current.width || labelData.overlay?.width || 0}
-                    height={naturalRef.current.height || labelData.overlay?.height || 0}
-                    viewBox={`0 0 ${naturalRef.current.width || labelData.overlay?.width || 0} ${naturalRef.current.height || labelData.overlay?.height || 0}`}
+                    width={naturalRef.current.width || labelData?.overlay?.width || 0}
+                    height={naturalRef.current.height || labelData?.overlay?.height || 0}
+                    viewBox={`0 0 ${naturalRef.current.width || labelData?.overlay?.width || 0} ${naturalRef.current.height || labelData?.overlay?.height || 0}`}
                     style={{
                       transform: `translate(${pan.x}px, ${pan.y}px) scale(${displayScale})`,
                     }}
                     aria-hidden="true"
                   >
-                    {labelData.labels.map((item) => {
+                    {overlayLabels.map((item) => {
                       if (!selectedLabels.has(item.label)) return null;
                       return (item.polygons_px ?? []).map((poly, index) => (
                         <polygon
@@ -732,10 +1197,10 @@ export function DrawingView({ drawingId, initialFloor, onMenuClick, onBack }: Pr
                         />
                       ));
                     })}
-                    {labelData.labels.map((item) => {
+                    {overlayLabels.map((item) => {
                       if (!selectedLabels.has(item.label)) return null;
                       const fontSize = tagFontSize(
-                        naturalRef.current.width || labelData.overlay?.width || 2000,
+                        naturalRef.current.width || labelData?.overlay?.width || 2000,
                       );
                       return (item.tags ?? []).map((tag, index) => (
                         <SummaryLabelTag
@@ -746,6 +1211,19 @@ export function DrawingView({ drawingId, initialFloor, onMenuClick, onBack }: Pr
                         />
                       ));
                     })}
+                    {rectDraft ? (
+                      <rect
+                        x={Math.min(rectDraft.x0, rectDraft.x1)}
+                        y={Math.min(rectDraft.y0, rectDraft.y1)}
+                        width={Math.abs(rectDraft.x1 - rectDraft.x0)}
+                        height={Math.abs(rectDraft.y1 - rectDraft.y0)}
+                        fill="rgba(16, 163, 127, 0.22)"
+                        stroke="rgba(16, 163, 127, 0.95)"
+                        strokeWidth={2}
+                        strokeDasharray="6 4"
+                        vectorEffect="non-scaling-stroke"
+                      />
+                    ) : null}
                   </svg>
                 ) : null}
               </>

@@ -14,11 +14,15 @@ from unittest.mock import patch
 
 from application.api.routes_drawings import (
     _artifacts_dir,
+    add_manual_floor_label,
+    cancel_pending_floor_labels,
+    commit_pending_floor_labels,
     list_drawings,
     list_floor_catalog,
     list_floor_labels,
     remember_drawing_task,
     set_drawing_rating,
+    undo_manual_floor_label,
 )
 
 
@@ -498,6 +502,459 @@ class DrawingIdTests(unittest.TestCase):
             self.assertEqual(listed["drawings"][0]["status"], "done")
             floors = list_floor_catalog(artifacts, drawing_id)
             self.assertEqual(floors["status"], "done")
+
+    def test_list_floor_labels_merges_modified(self):
+        with tempfile.TemporaryDirectory() as raw:
+            artifacts = Path(raw)
+            drawing_id = "hotel"
+            floor_dir = artifacts / drawing_id / "floors" / "1F"
+            floor_dir.mkdir(parents=True)
+            (artifacts / "drawing_list.json").write_text(
+                json.dumps(
+                    {
+                        "drawings": [
+                            {
+                                "drawing_id": drawing_id,
+                                "folder": drawing_id,
+                                "source_filename": "hotel.dxf",
+                                "status": "ready",
+                                "floors": [{"floor": "1F", "title": "1F", "status": "ready"}],
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (floor_dir / "floor_original_meta.json").write_text(
+                json.dumps(
+                    {
+                        "bbox_mm": {
+                            "xmin": 0.0,
+                            "ymin": 0.0,
+                            "xmax": 10000.0,
+                            "ymax": 8000.0,
+                        },
+                        "png_size": {"width": 1400, "height": 1280},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (floor_dir / "floor_label_detected.json").write_text(
+                json.dumps(
+                    {
+                        "unique_face_area_m2": 10.0,
+                        "labels": [
+                            {
+                                "label": "회의실",
+                                "color": [229, 96, 96],
+                                "area_m2": 10.0,
+                                "instances": [
+                                    {
+                                        "text": "회의실",
+                                        "x": 100.0,
+                                        "y": 100.0,
+                                        "area_m2": 10.0,
+                                        "polygon_mm": [[0, 0], [1000, 0], [1000, 1000], [0, 1000]],
+                                    }
+                                ],
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (floor_dir / "floor_label_modified.json").write_text(
+                json.dumps(
+                    {
+                        "labels": [
+                            {
+                                "label": "무명-1",
+                                "color": [96, 160, 229],
+                                "area_m2": 5.5,
+                                "instances": [
+                                    {
+                                        "text": "무명-1",
+                                        "x": 2000.0,
+                                        "y": 2000.0,
+                                        "area_m2": 5.5,
+                                        "polygon_mm": [
+                                            [1500, 1500],
+                                            [2500, 1500],
+                                            [2500, 2500],
+                                            [1500, 2500],
+                                        ],
+                                    }
+                                ],
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            labels = list_floor_labels(artifacts, drawing_id, "1F")
+            self.assertEqual(labels["label_count"], 2)
+            by_name = {item["label"]: item for item in labels["labels"]}
+            self.assertEqual(by_name["회의실"]["source"], "detected")
+            self.assertEqual(by_name["무명-1"]["source"], "modified")
+            self.assertTrue(by_name["무명-1"]["polygons_px"])
+            self.assertTrue(by_name["무명-1"]["tags"])
+            floors = list_floor_catalog(artifacts, drawing_id)
+            self.assertEqual(floors["floors"][0]["label_count"], 2)
+
+    def test_list_floor_labels_modified_only(self):
+        with tempfile.TemporaryDirectory() as raw:
+            artifacts = Path(raw)
+            drawing_id = "hotel"
+            floor_dir = artifacts / drawing_id / "floors" / "1F"
+            floor_dir.mkdir(parents=True)
+            (artifacts / "drawing_list.json").write_text(
+                json.dumps(
+                    {
+                        "drawings": [
+                            {
+                                "drawing_id": drawing_id,
+                                "folder": drawing_id,
+                                "source_filename": "hotel.dxf",
+                                "status": "ready",
+                                "floors": [{"floor": "1F", "title": "1F", "status": "ready"}],
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (floor_dir / "floor_label_modified.json").write_text(
+                json.dumps(
+                    {
+                        "labels": [
+                            {
+                                "label": "무명-1",
+                                "color": [96, 160, 229],
+                                "area_m2": 3.0,
+                                "instances": [
+                                    {
+                                        "text": "무명-1",
+                                        "x": 10.0,
+                                        "y": 10.0,
+                                        "area_m2": 3.0,
+                                        "polygon_mm": [[0, 0], [100, 0], [100, 100], [0, 100]],
+                                    }
+                                ],
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            labels = list_floor_labels(artifacts, drawing_id, "1F")
+            self.assertEqual(labels["label_count"], 1)
+            self.assertEqual(labels["labels"][0]["source"], "modified")
+
+    def test_add_manual_floor_label_writes_unnamed_and_increments(self):
+        with tempfile.TemporaryDirectory() as raw:
+            artifacts = Path(raw)
+            drawing_id = "hotel"
+            floor_dir = artifacts / drawing_id / "floors" / "1F"
+            floor_dir.mkdir(parents=True)
+            (artifacts / "drawing_list.json").write_text(
+                json.dumps(
+                    {
+                        "drawings": [
+                            {
+                                "drawing_id": drawing_id,
+                                "folder": drawing_id,
+                                "source_filename": "hotel.dxf",
+                                "status": "ready",
+                                "floors": [{"floor": "1F", "title": "1F", "status": "ready"}],
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (floor_dir / "floor_original_meta.json").write_text(
+                json.dumps(
+                    {
+                        "bbox_mm": {
+                            "xmin": 0.0,
+                            "ymin": 0.0,
+                            "xmax": 10000.0,
+                            "ymax": 8000.0,
+                        },
+                        "png_size": {"width": 1400, "height": 1280},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (floor_dir / "floor_wall_validated.dxf").write_text("0\nEOF\n", encoding="utf-8")
+            (floor_dir / "floor_label_modified.json").write_text(
+                json.dumps(
+                    {
+                        "labels": [
+                            {
+                                "label": "무명-1",
+                                "color": [1, 2, 3],
+                                "area_m2": 4.0,
+                                "instances": [
+                                    {
+                                        "text": "무명-1",
+                                        "x": 10.0,
+                                        "y": 10.0,
+                                        "area_m2": 4.0,
+                                        "polygon_mm": [[0, 0], [100, 0], [100, 100], [0, 100]],
+                                    }
+                                ],
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            def fake_detect(_dxf, _x, _y):
+                return (
+                    {
+                        "pts": [[2000.0, 2000.0], [3000.0, 2000.0], [3000.0, 3000.0], [2000.0, 3000.0]],
+                        "area_m2": 1.0,
+                        "column_protrusion_m2": 0.0,
+                        "width_m": 1.0,
+                        "height_m": 1.0,
+                        "drawing_area_m2": None,
+                        "boundary_doors": [],
+                    },
+                    None,
+                    2500.0,
+                    2500.0,
+                )
+
+            with patch(
+                "application.api.routes_drawings._detect_face_at",
+                side_effect=fake_detect,
+            ):
+                result = add_manual_floor_label(
+                    artifacts,
+                    drawing_id,
+                    "1F",
+                    x_px=700.0,
+                    y_px=640.0,
+                )
+            names = [item["label"] for item in result["labels"]]
+            self.assertIn("무명-2", names)
+            self.assertEqual(
+                next(item for item in result["labels"] if item["label"] == "무명-2")["source"],
+                "pending",
+            )
+            self.assertEqual(result["pending_count"], 1)
+            pending = json.loads((floor_dir / "floor_label_pending.json").read_text(encoding="utf-8"))
+            self.assertEqual([item["label"] for item in pending["labels"]], ["무명-2"])
+            saved = json.loads((floor_dir / "floor_label_modified.json").read_text(encoding="utf-8"))
+            self.assertEqual([item["label"] for item in saved["labels"]], ["무명-1"])
+
+    def test_undo_manual_floor_label_removes_named(self):
+        with tempfile.TemporaryDirectory() as raw:
+            artifacts = Path(raw)
+            drawing_id = "hotel"
+            floor_dir = artifacts / drawing_id / "floors" / "1F"
+            floor_dir.mkdir(parents=True)
+            (artifacts / "drawing_list.json").write_text(
+                json.dumps(
+                    {
+                        "drawings": [
+                            {
+                                "drawing_id": drawing_id,
+                                "folder": drawing_id,
+                                "source_filename": "hotel.dxf",
+                                "status": "ready",
+                                "floors": [{"floor": "1F", "title": "1F", "status": "ready"}],
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (floor_dir / "floor_label_pending.json").write_text(
+                json.dumps(
+                    {
+                        "labels": [
+                            {
+                                "label": "무명-1",
+                                "color": [1, 2, 3],
+                                "area_m2": 4.0,
+                                "instances": [
+                                    {
+                                        "text": "무명-1",
+                                        "x": 10.0,
+                                        "y": 10.0,
+                                        "area_m2": 4.0,
+                                        "polygon_mm": [[0, 0], [100, 0], [100, 100], [0, 100]],
+                                    }
+                                ],
+                            },
+                            {
+                                "label": "무명-2",
+                                "color": [4, 5, 6],
+                                "area_m2": 5.0,
+                                "instances": [
+                                    {
+                                        "text": "무명-2",
+                                        "x": 20.0,
+                                        "y": 20.0,
+                                        "area_m2": 5.0,
+                                        "polygon_mm": [
+                                            [200, 200],
+                                            [300, 200],
+                                            [300, 300],
+                                            [200, 300],
+                                        ],
+                                    }
+                                ],
+                            },
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            result = undo_manual_floor_label(artifacts, drawing_id, "1F", label="무명-2")
+            self.assertEqual([item["label"] for item in result["labels"]], ["무명-1"])
+            self.assertEqual(result["pending_count"], 1)
+            empty = undo_manual_floor_label(artifacts, drawing_id, "1F", label="무명-1")
+            self.assertEqual(empty["label_count"], 0)
+            self.assertEqual(empty.get("pending_count", 0), 0)
+            self.assertFalse((floor_dir / "floor_label_pending.json").is_file())
+
+    def test_commit_and_cancel_pending_floor_labels(self):
+        with tempfile.TemporaryDirectory() as raw:
+            artifacts = Path(raw)
+            drawing_id = "hotel"
+            floor_dir = artifacts / drawing_id / "floors" / "1F"
+            floor_dir.mkdir(parents=True)
+            (artifacts / "drawing_list.json").write_text(
+                json.dumps(
+                    {
+                        "drawings": [
+                            {
+                                "drawing_id": drawing_id,
+                                "folder": drawing_id,
+                                "source_filename": "hotel.dxf",
+                                "status": "ready",
+                                "floors": [{"floor": "1F", "title": "1F", "status": "ready"}],
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            pending_row = {
+                "label": "무명-1",
+                "color": [1, 2, 3],
+                "area_m2": 4.0,
+                "instances": [
+                    {
+                        "text": "무명-1",
+                        "x": 10.0,
+                        "y": 10.0,
+                        "area_m2": 4.0,
+                        "polygon_mm": [[0, 0], [100, 0], [100, 100], [0, 100]],
+                    }
+                ],
+            }
+            (floor_dir / "floor_label_pending.json").write_text(
+                json.dumps({"labels": [pending_row]}),
+                encoding="utf-8",
+            )
+            committed = commit_pending_floor_labels(artifacts, drawing_id, "1F")
+            self.assertEqual(committed["pending_count"], 0)
+            self.assertEqual(
+                next(item for item in committed["labels"] if item["label"] == "무명-1")["source"],
+                "modified",
+            )
+            self.assertFalse((floor_dir / "floor_label_pending.json").is_file())
+            self.assertTrue((floor_dir / "floor_label_modified.json").is_file())
+
+            (floor_dir / "floor_label_pending.json").write_text(
+                json.dumps(
+                    {
+                        "labels": [
+                            {
+                                **pending_row,
+                                "label": "무명-2",
+                                "instances": [
+                                    {
+                                        **pending_row["instances"][0],
+                                        "text": "무명-2",
+                                        "polygon_mm": [
+                                            [200, 200],
+                                            [300, 200],
+                                            [300, 300],
+                                            [200, 300],
+                                        ],
+                                    }
+                                ],
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            cancelled = cancel_pending_floor_labels(artifacts, drawing_id, "1F")
+            self.assertEqual(cancelled["pending_count"], 0)
+            self.assertFalse((floor_dir / "floor_label_pending.json").is_file())
+            self.assertEqual(
+                [item["label"] for item in cancelled["labels"]],
+                ["무명-1"],
+            )
+
+    def test_add_manual_floor_label_rejects_open_face(self):
+        with tempfile.TemporaryDirectory() as raw:
+            artifacts = Path(raw)
+            drawing_id = "hotel"
+            floor_dir = artifacts / drawing_id / "floors" / "1F"
+            floor_dir.mkdir(parents=True)
+            (artifacts / "drawing_list.json").write_text(
+                json.dumps(
+                    {
+                        "drawings": [
+                            {
+                                "drawing_id": drawing_id,
+                                "folder": drawing_id,
+                                "source_filename": "hotel.dxf",
+                                "status": "ready",
+                                "floors": [{"floor": "1F", "title": "1F", "status": "ready"}],
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (floor_dir / "floor_original_meta.json").write_text(
+                json.dumps(
+                    {
+                        "bbox_mm": {
+                            "xmin": 0.0,
+                            "ymin": 0.0,
+                            "xmax": 10000.0,
+                            "ymax": 8000.0,
+                        },
+                        "png_size": {"width": 1400, "height": 1280},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (floor_dir / "floor_wall_validated.dxf").write_text("0\nEOF\n", encoding="utf-8")
+            with patch(
+                "application.api.routes_drawings._detect_face_at",
+                return_value=(None, "벽이 실을 닫지 않습니다", 1.0, 1.0),
+            ):
+                with self.assertRaises(HTTPException) as ctx:
+                    add_manual_floor_label(
+                        artifacts,
+                        drawing_id,
+                        "1F",
+                        x_px=100.0,
+                        y_px=100.0,
+                    )
+            self.assertEqual(ctx.exception.status_code, 422)
+            self.assertIn("닫지", str(ctx.exception.detail))
 
 
 if __name__ == "__main__":

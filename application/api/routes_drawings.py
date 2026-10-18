@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import colorsys
 import hashlib
 import json
 import os
 import re
 import shutil
+import sys
 import unicodedata
 from datetime import datetime
 from pathlib import Path
@@ -23,6 +25,7 @@ router = APIRouter(prefix="/api/drawings", tags=["drawings"])
 
 # Hangul syllables (NFC) plus the previous ASCII set. Path separators and dots stay out.
 _ID_RE = re.compile(r"^[A-Za-z0-9가-힣][A-Za-z0-9가-힣_-]{0,80}$")
+_UNNAMED_RE = re.compile(r"^무명-(\d+)$")
 _IMAGE_KINDS = {
     "original": "floor_original.png",
     "wall": "floor_wall_original.png",
@@ -30,28 +33,33 @@ _IMAGE_KINDS = {
     "label": "floor_label_detected.png",
 }
 _LABEL_JSON = "floor_label_detected.json"
+_MODIFIED_JSON = "floor_label_modified.json"
+_PENDING_JSON = "floor_label_pending.json"
 _ORIGINAL_META = "floor_original_meta.json"
+_VALIDATED_META = "floor_wall_validated_meta.json"
+_VALIDATED_DXF = "floor_wall_validated.dxf"
 
 
-def _floor_label_count(floor_dir: Path) -> int:
-    """How many named labels ``floor_label_detected.json`` still lists."""
-    path = floor_dir / _LABEL_JSON
-    if not path.is_file():
-        return 0
-    try:
-        loaded = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return 0
-    if not isinstance(loaded, dict):
+def _named_label_count(payload: dict | None) -> int:
+    if not isinstance(payload, dict):
         return 0
     count = 0
-    for item in loaded.get("labels") or []:
+    for item in payload.get("labels") or []:
         if not isinstance(item, dict):
             continue
         name = str(item.get("label") or item.get("layer") or "").strip()
         if name:
             count += 1
     return count
+
+
+def _floor_label_count(floor_dir: Path) -> int:
+    """Named labels in detected plus manually modified JSON."""
+    return _named_label_count(_load_label_file(floor_dir / _LABEL_JSON)) + _named_label_count(
+        _load_label_file(floor_dir / _MODIFIED_JSON)
+    )
+
+
 # Must match render_wall_dxf_png canvas padding (top, right, bottom).
 _PNG_PAD_TOP = 160
 _PNG_PAD_RIGHT = 200
@@ -132,6 +140,21 @@ class DrawingTaskLink(BaseModel):
 
 class DrawingRatingBody(BaseModel):
     rating: str
+
+
+class ManualLabelBody(BaseModel):
+    """Point click (x_px,y_px) or drag rectangle (x0/y0 → x1/y1) in PNG pixels.
+
+    Point mode ``boundary``: ``wall`` (WALL 레이어 실) or ``entity`` (모든 선 엔티티).
+    """
+
+    x_px: float | None = None
+    y_px: float | None = None
+    x0_px: float | None = None
+    y0_px: float | None = None
+    x1_px: float | None = None
+    y1_px: float | None = None
+    boundary: str | None = None
 
 
 _RATING_VALUES = frozenset({"pending", "good", "neutral", "bad", "review", "confirmed", "retest"})
@@ -516,13 +539,22 @@ def _png_size(meta: dict) -> tuple[int, int] | None:
     return None
 
 
-def _load_original_overlay(floor_dir: Path) -> dict | None:
-    """Pixel transform for drawing label polygons on ``floor_original.png``."""
-    path = (floor_dir / _ORIGINAL_META).resolve()
-    if not _contained(path, floor_dir) or not path.is_file():
+def _load_label_file(path: Path) -> dict | None:
+    if not path.is_file():
         return None
     try:
-        meta = json.loads(path.read_text(encoding="utf-8"))
+        loaded = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return loaded if isinstance(loaded, dict) else None
+
+
+def _overlay_from_meta(path: Path, floor_dir: Path) -> dict | None:
+    resolved = path.resolve()
+    if not _contained(resolved, floor_dir) or not resolved.is_file():
+        return None
+    try:
+        meta = json.loads(resolved.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return None
     if not isinstance(meta, dict):
@@ -558,10 +590,25 @@ def _load_original_overlay(floor_dir: Path) -> dict | None:
     }
 
 
+def _load_original_overlay(floor_dir: Path) -> dict | None:
+    """Pixel transform for label polygons on floor PNGs (validated meta preferred)."""
+    for name in (_VALIDATED_META, _ORIGINAL_META):
+        overlay = _overlay_from_meta(floor_dir / name, floor_dir)
+        if overlay is not None:
+            return overlay
+    return None
+
+
 def _mm_to_px(x: float, y: float, overlay: dict) -> list[float]:
     px = (x - overlay["xmin"]) / overlay["span_x"] * overlay["content_w"]
     py = _PNG_PAD_TOP + (overlay["ymax"] - y) / overlay["span_y"] * overlay["content_h"]
     return [round(px, 2), round(py, 2)]
+
+
+def _px_to_mm(px: float, py: float, overlay: dict) -> tuple[float, float]:
+    x = overlay["xmin"] + (float(px) / overlay["content_w"]) * overlay["span_x"]
+    y = overlay["ymax"] - ((float(py) - _PNG_PAD_TOP) / overlay["content_h"]) * overlay["span_y"]
+    return x, y
 
 
 def _polygon_px_points(raw: object, overlay: dict) -> list[list[float]] | None:
@@ -632,27 +679,14 @@ def _instance_tags_px(item: dict, overlay: dict | None, fallback_name: str) -> l
     return tags
 
 
-def list_floor_labels(artifacts: Path, drawing_id: str, floor: str) -> dict:
-    """Slim label legend from ``floor_label_detected.json`` (color · name · area)."""
-    catalog, floor_dir = _floor_dir(artifacts, drawing_id, floor)
-    path = (floor_dir / _LABEL_JSON).resolve()
-    if not _contained(path, floor_dir):
-        raise HTTPException(status_code=400, detail="Invalid label path")
-    if not path.is_file():
-        raise HTTPException(status_code=404, detail="Label data not found")
-    try:
-        loaded = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise HTTPException(
-            status_code=500,
-            detail="floor_label_detected.json을 읽지 못했습니다.",
-        ) from exc
-    if not isinstance(loaded, dict):
-        raise HTTPException(status_code=500, detail="floor_label_detected.json 형식이 올바르지 않습니다.")
-
-    overlay_tf = _load_original_overlay(floor_dir)
-    labels = []
-    for item in loaded.get("labels") or []:
+def _slim_label_rows(
+    items: list,
+    overlay_tf: dict | None,
+    *,
+    source: str,
+) -> list[dict]:
+    labels: list[dict] = []
+    for item in items:
         if not isinstance(item, dict):
             continue
         name = str(item.get("label") or item.get("layer") or "").strip()
@@ -676,8 +710,59 @@ def list_floor_labels(artifacts: Path, drawing_id: str, floor: str) -> dict:
                 "faces": faces,
                 "polygons_px": _polygons_px(item, overlay_tf),
                 "tags": _instance_tags_px(item, overlay_tf, name),
+                "source": source,
             }
         )
+    return labels
+
+
+def _pending_path(floor_dir: Path) -> Path:
+    return (floor_dir / _PENDING_JSON).resolve()
+
+
+def _modified_labels_payload(validated: Path, labels: list) -> dict:
+    return {
+        "source_dxf": str(validated) if validated.is_file() else "",
+        "label_count": len(labels),
+        "instance_count": len(labels),
+        "unique_face_area_m2": round(
+            sum(float(item.get("area_m2") or 0) for item in labels if isinstance(item, dict)),
+            4,
+        ),
+        "labels": labels,
+    }
+
+
+def list_floor_labels(artifacts: Path, drawing_id: str, floor: str) -> dict:
+    """Slim label legend from detected + modified + pending JSON."""
+    catalog, floor_dir = _floor_dir(artifacts, drawing_id, floor)
+    detected_path = (floor_dir / _LABEL_JSON).resolve()
+    modified_path = (floor_dir / _MODIFIED_JSON).resolve()
+    pending_path = _pending_path(floor_dir)
+    if (
+        not _contained(detected_path, floor_dir)
+        or not _contained(modified_path, floor_dir)
+        or not _contained(pending_path, floor_dir)
+    ):
+        raise HTTPException(status_code=400, detail="Invalid label path")
+
+    detected = _load_label_file(detected_path)
+    modified = _load_label_file(modified_path)
+    pending = _load_label_file(pending_path)
+    if detected is None and modified is None and pending is None:
+        if detected_path.is_file() or modified_path.is_file() or pending_path.is_file():
+            raise HTTPException(status_code=500, detail="라벨 JSON을 읽지 못했습니다.")
+        raise HTTPException(status_code=404, detail="Label data not found")
+
+    overlay_tf = _load_original_overlay(floor_dir)
+    labels = _slim_label_rows((detected or {}).get("labels") or [], overlay_tf, source="detected")
+    labels.extend(
+        _slim_label_rows((modified or {}).get("labels") or [], overlay_tf, source="modified")
+    )
+    pending_rows = _slim_label_rows(
+        (pending or {}).get("labels") or [], overlay_tf, source="pending"
+    )
+    labels.extend(pending_rows)
     labels.sort(key=lambda row: (-float(row["area_m2"]), str(row["label"])))
 
     unique_faces: dict[str, float] = {}
@@ -685,15 +770,18 @@ def list_floor_labels(artifacts: Path, drawing_id: str, floor: str) -> dict:
         for face in row["faces"]:
             unique_faces.setdefault(face["id"], float(face["area_m2"]))
     unique_area = round(sum(unique_faces.values()), 4)
-    try:
-        reported = float(loaded.get("unique_face_area_m2"))
-    except (TypeError, ValueError):
-        reported = unique_area
+    reported = unique_area
+    if detected is not None and modified is None and pending is None:
+        try:
+            reported = float(detected.get("unique_face_area_m2"))
+        except (TypeError, ValueError):
+            reported = unique_area
 
     payload: dict = {
         "drawing_id": catalog["drawing_id"],
         "floor": _safe_id(floor),
         "label_count": len(labels),
+        "pending_count": len(pending_rows),
         "unique_face_area_m2": reported if reported > 0 else unique_area,
         "labels": labels,
     }
@@ -703,6 +791,400 @@ def list_floor_labels(artifacts: Path, drawing_id: str, floor: str) -> dict:
             "height": overlay_tf["height"],
         }
     return payload
+
+
+def _next_unnamed_label(existing: list) -> str:
+    max_n = 0
+    for item in existing:
+        if not isinstance(item, dict):
+            continue
+        match = _UNNAMED_RE.match(str(item.get("label") or "").strip())
+        if match:
+            max_n = max(max_n, int(match.group(1)))
+    return f"무명-{max_n + 1}"
+
+
+def _rgb_for_index(index: int) -> list[int]:
+    hue = (index * 0.618033988749895) % 1.0
+    red, green, blue = colorsys.hsv_to_rgb(hue, 0.58, 0.90)
+    return [int(red * 255), int(green * 255), int(blue * 255)]
+
+
+def _collect_face_ids(*payloads: dict | None) -> set[str]:
+    ids: set[str] = set()
+    for payload in payloads:
+        if not isinstance(payload, dict):
+            continue
+        for item in payload.get("labels") or []:
+            if not isinstance(item, dict):
+                continue
+            for face in _label_faces(item):
+                ids.add(face["id"])
+    return ids
+
+
+def _write_modified_labels(path: Path, payload: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(".json.tmp")
+    temporary.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    temporary.replace(path)
+
+
+def _import_detect_labels():
+    scripts = Path(__file__).resolve().parents[1] / "skills" / "drawing-totalroom" / "scripts"
+    scripts_str = str(scripts)
+    if scripts_str not in sys.path:
+        sys.path.insert(0, scripts_str)
+    import detect_labels as labels  # noqa: WPS433
+    import evaluate_room as room  # noqa: WPS433
+
+    return labels, room
+
+
+def _detect_face_at(
+    validated_dxf: Path,
+    x: float,
+    y: float,
+    *,
+    boundary: str = "entity",
+) -> tuple[dict | None, str | None, float, float]:
+    """Face at the click seed.
+
+    ``boundary=wall``: WALL/WINDOW/COLUMN/DOOR segments (기존 라벨과 동일).
+    ``boundary=entity``: 모든 LINE/LWPOLYLINE 엔티티.
+    No nudge — manual clicks must stay on the pointed region.
+    """
+    try:
+        import ezdxf
+    except ImportError as exc:
+        raise HTTPException(status_code=500, detail="ezdxf가 설치되어 있지 않습니다.") from exc
+    labels, room = _import_detect_labels()
+    use_wall = str(boundary or "").strip().lower() == "wall"
+    try:
+        doc = ezdxf.readfile(str(validated_dxf))
+        msp = doc.modelspace()
+        boxes = room.column_boxes(msp)
+        segs = room.wall_segments(msp, boxes) if use_wall else room.entity_segments(msp, boxes)
+        # Automatic totalroom uses detect_one_with_nudge for OCR seeds that fall in
+        # tiny pockets. Manual UI clicks must not jump into a neighbor room.
+        found, reason = labels.detect_one(msp, boxes, segs, x, y, door="close")
+        if found is None and not use_wall and reason == "벽이 실을 닫지 않습니다":
+            reason = "엔티티가 영역을 닫지 않습니다"
+    except Exception as exc:  # noqa: BLE001
+        return None, str(exc) or exc.__class__.__name__, x, y
+    return found, reason, x, y
+
+
+def _shoelace_m2(pts: list[list[float]]) -> float:
+    if len(pts) < 3:
+        return 0.0
+    total = 0.0
+    for index, point in enumerate(pts):
+        nxt = pts[(index + 1) % len(pts)]
+        total += float(point[0]) * float(nxt[1]) - float(nxt[0]) * float(point[1])
+    return abs(total) * 0.5 / 1_000_000.0
+
+
+def add_manual_floor_label(
+    artifacts: Path,
+    drawing_id: str,
+    floor: str,
+    *,
+    x_px: float | None = None,
+    y_px: float | None = None,
+    x0_px: float | None = None,
+    y0_px: float | None = None,
+    x1_px: float | None = None,
+    y1_px: float | None = None,
+    boundary: str | None = None,
+) -> dict:
+    """Append ``무명-N`` to pending.
+
+    Point click: wall- or entity-bounded face. Rect drag: free-form rectangle.
+    """
+    catalog, floor_dir = _floor_dir(artifacts, drawing_id, floor)
+    overlay_tf = _load_original_overlay(floor_dir)
+    if overlay_tf is None:
+        raise HTTPException(status_code=400, detail="좌표 변환용 메타를 찾지 못했습니다.")
+
+    validated = (floor_dir / _VALIDATED_DXF).resolve()
+    # validated DXF is only required for click-to-face; rect mode needs meta only.
+    rect_mode = None not in (x0_px, y0_px, x1_px, y1_px)
+    point_mode = x_px is not None and y_px is not None
+    if not rect_mode and not point_mode:
+        raise HTTPException(status_code=400, detail="클릭 좌표 또는 사각형 좌표가 필요합니다.")
+
+    if rect_mode:
+        assert x0_px is not None and y0_px is not None and x1_px is not None and y1_px is not None
+        left, right = sorted((float(x0_px), float(x1_px)))
+        top, bottom = sorted((float(y0_px), float(y1_px)))
+        if right - left < 4 or bottom - top < 4:
+            raise HTTPException(status_code=400, detail="사각형이 너무 작습니다.")
+        width = float(overlay_tf["width"])
+        height = float(overlay_tf["height"])
+        for px, py in ((left, top), (right, bottom)):
+            if not (0 <= px <= width and 0 <= py <= height):
+                raise HTTPException(status_code=400, detail="사각형이 도면 범위를 벗어났습니다.")
+        corners_px = [(left, top), (right, top), (right, bottom), (left, bottom)]
+        polygon_mm = [
+            [round(xy[0], 1), round(xy[1], 1)]
+            for xy in (_px_to_mm(px, py, overlay_tf) for px, py in corners_px)
+        ]
+        # PNG y grows down; mm y grows up — keep CCW-ish by using mm corners in order.
+        xs = [p[0] for p in polygon_mm]
+        ys = [p[1] for p in polygon_mm]
+        x_lo, x_hi = min(xs), max(xs)
+        y_lo, y_hi = min(ys), max(ys)
+        polygon_mm = [
+            [x_lo, y_lo],
+            [x_hi, y_lo],
+            [x_hi, y_hi],
+            [x_lo, y_hi],
+        ]
+        area = _shoelace_m2(polygon_mm)
+        if area <= 0:
+            raise HTTPException(status_code=400, detail="사각형 면적이 0입니다.")
+        seed_x = (x_lo + x_hi) / 2.0
+        seed_y = (y_lo + y_hi) / 2.0
+        print(
+            f"[manual-label] {drawing_id}/{floor} rect "
+            f"px=({left:.1f},{top:.1f})-({right:.1f},{bottom:.1f}) "
+            f"area={area:.2f} m2",
+            flush=True,
+        )
+        return _append_pending_unnamed(
+            artifacts,
+            catalog,
+            floor_dir,
+            floor,
+            polygon_mm=polygon_mm,
+            seed_x=seed_x,
+            seed_y=seed_y,
+            area=area,
+            width_m=(x_hi - x_lo) / 1000.0,
+            height_m=(y_hi - y_lo) / 1000.0,
+        )
+
+    assert x_px is not None and y_px is not None
+    if not (0 <= x_px <= overlay_tf["width"] and 0 <= y_px <= overlay_tf["height"]):
+        raise HTTPException(status_code=400, detail="클릭 좌표가 도면 범위를 벗어났습니다.")
+    if not _contained(validated, floor_dir) or not validated.is_file():
+        raise HTTPException(status_code=404, detail="floor_wall_validated.dxf를 찾지 못했습니다.")
+
+    x_mm, y_mm = _px_to_mm(x_px, y_px, overlay_tf)
+    face_boundary = str(boundary or "entity").strip().lower()
+    if face_boundary not in ("wall", "entity"):
+        face_boundary = "entity"
+    print(
+        f"[manual-label] {drawing_id}/{floor} boundary={face_boundary} "
+        f"px=({x_px:.1f},{y_px:.1f}) mm=({x_mm:.1f},{y_mm:.1f})",
+        flush=True,
+    )
+    found, reason, seed_x, seed_y = _detect_face_at(
+        validated, x_mm, y_mm, boundary=face_boundary
+    )
+    if found is None:
+        print(f"[manual-label] miss: {reason}", flush=True)
+        fallback = (
+            "벽이 실을 닫지 않아 라벨을 추가할 수 없습니다."
+            if face_boundary == "wall"
+            else "엔티티가 영역을 닫지 않아 라벨을 추가할 수 없습니다."
+        )
+        raise HTTPException(status_code=422, detail=reason or fallback)
+    print(
+        f"[manual-label] hit area={float(found['area_m2']):.2f} m2 "
+        f"seed=({seed_x:.1f},{seed_y:.1f})",
+        flush=True,
+    )
+    polygon_mm = [[round(float(px), 1), round(float(py), 1)] for px, py in found["pts"]]
+    return _append_pending_unnamed(
+        artifacts,
+        catalog,
+        floor_dir,
+        floor,
+        polygon_mm=polygon_mm,
+        seed_x=seed_x,
+        seed_y=seed_y,
+        area=float(found["area_m2"]),
+        width_m=float(found.get("width_m") or 0),
+        height_m=float(found.get("height_m") or 0),
+        column_protrusion_m2=float(found.get("column_protrusion_m2") or 0),
+        drawing_area_m2=found.get("drawing_area_m2"),
+        boundary_doors=found.get("boundary_doors") or [],
+    )
+
+
+def _append_pending_unnamed(
+    artifacts: Path,
+    catalog: dict,
+    floor_dir: Path,
+    floor: str,
+    *,
+    polygon_mm: list[list[float]],
+    seed_x: float,
+    seed_y: float,
+    area: float,
+    width_m: float,
+    height_m: float,
+    column_protrusion_m2: float = 0.0,
+    drawing_area_m2: object = None,
+    boundary_doors: list | None = None,
+) -> dict:
+    validated = floor_dir / _VALIDATED_DXF
+    pending_path = _pending_path(floor_dir)
+    if not _contained(pending_path, floor_dir):
+        raise HTTPException(status_code=400, detail="Invalid label path")
+    detected = _load_label_file(floor_dir / _LABEL_JSON)
+    modified = _load_label_file(floor_dir / _MODIFIED_JSON)
+    pending = _load_label_file(pending_path) or {"labels": []}
+    face_id = _face_id(polygon_mm)
+    existing_faces = _collect_face_ids(detected, modified, pending)
+    if face_id and face_id in existing_faces:
+        raise HTTPException(status_code=409, detail="이미 라벨이 있는 실입니다.")
+
+    modified_labels = [
+        item for item in (modified or {}).get("labels") or [] if isinstance(item, dict)
+    ]
+    pending_labels = [item for item in pending.get("labels") or [] if isinstance(item, dict)]
+    name = _next_unnamed_label(modified_labels + pending_labels)
+    color = _rgb_for_index(len(modified_labels) + len(pending_labels))
+    area = round(float(area), 4)
+    instance = {
+        "text": name,
+        "x": round(float(seed_x), 1),
+        "y": round(float(seed_y), 1),
+        "area_m2": area,
+        "column_protrusion_m2": round(float(column_protrusion_m2), 4),
+        "width_m": round(float(width_m), 4),
+        "height_m": round(float(height_m), 4),
+        "drawing_area_m2": drawing_area_m2,
+        "boundary_doors": boundary_doors or [],
+        "polygon_mm": polygon_mm,
+    }
+    pending_labels.append(
+        {
+            "label": name,
+            "layer": name,
+            "color": color,
+            "count": 1,
+            "area_m2": area,
+            "instances": [instance],
+        }
+    )
+    _write_modified_labels(pending_path, _modified_labels_payload(validated, pending_labels))
+    return list_floor_labels(artifacts, catalog["drawing_id"], floor)
+
+
+def _empty_floor_labels(catalog: dict, floor: str, floor_dir: Path) -> dict:
+    payload: dict = {
+        "drawing_id": catalog["drawing_id"],
+        "floor": _safe_id(floor),
+        "label_count": 0,
+        "pending_count": 0,
+        "unique_face_area_m2": 0.0,
+        "labels": [],
+    }
+    overlay_tf = _load_original_overlay(floor_dir)
+    if overlay_tf is not None:
+        payload["overlay"] = {
+            "width": overlay_tf["width"],
+            "height": overlay_tf["height"],
+        }
+    return payload
+
+
+def undo_manual_floor_label(
+    artifacts: Path,
+    drawing_id: str,
+    floor: str,
+    *,
+    label: str | None = None,
+) -> dict:
+    """Remove one pending manual label (by name, or the last pending one)."""
+    catalog, floor_dir = _floor_dir(artifacts, drawing_id, floor)
+    pending_path = _pending_path(floor_dir)
+    if not _contained(pending_path, floor_dir):
+        raise HTTPException(status_code=400, detail="Invalid label path")
+    pending = _load_label_file(pending_path)
+    existing = [item for item in (pending or {}).get("labels") or [] if isinstance(item, dict)]
+    if not existing:
+        raise HTTPException(status_code=404, detail="되돌릴 임시 라벨이 없습니다.")
+
+    target = str(label or "").strip()
+    if target:
+        index = next(
+            (i for i, item in enumerate(existing) if str(item.get("label") or "").strip() == target),
+            None,
+        )
+        if index is None:
+            raise HTTPException(status_code=404, detail=f"'{target}' 임시 라벨을 찾지 못했습니다.")
+        existing.pop(index)
+    else:
+        existing.pop()
+
+    if not existing:
+        if pending_path.is_file():
+            pending_path.unlink()
+    else:
+        validated = floor_dir / _VALIDATED_DXF
+        _write_modified_labels(pending_path, _modified_labels_payload(validated, existing))
+
+    if (
+        _load_label_file(floor_dir / _LABEL_JSON) is None
+        and _load_label_file(floor_dir / _MODIFIED_JSON) is None
+        and _load_label_file(pending_path) is None
+    ):
+        return _empty_floor_labels(catalog, floor, floor_dir)
+    return list_floor_labels(artifacts, catalog["drawing_id"], floor)
+
+
+def cancel_pending_floor_labels(artifacts: Path, drawing_id: str, floor: str) -> dict:
+    """Discard all pending manual labels without saving."""
+    catalog, floor_dir = _floor_dir(artifacts, drawing_id, floor)
+    pending_path = _pending_path(floor_dir)
+    if not _contained(pending_path, floor_dir):
+        raise HTTPException(status_code=400, detail="Invalid label path")
+    if pending_path.is_file():
+        pending_path.unlink()
+    if (
+        _load_label_file(floor_dir / _LABEL_JSON) is None
+        and _load_label_file(floor_dir / _MODIFIED_JSON) is None
+    ):
+        return _empty_floor_labels(catalog, floor, floor_dir)
+    return list_floor_labels(artifacts, catalog["drawing_id"], floor)
+
+
+def commit_pending_floor_labels(artifacts: Path, drawing_id: str, floor: str) -> dict:
+    """Merge pending labels into ``floor_label_modified.json`` and clear pending."""
+    catalog, floor_dir = _floor_dir(artifacts, drawing_id, floor)
+    pending_path = _pending_path(floor_dir)
+    modified_path = (floor_dir / _MODIFIED_JSON).resolve()
+    if not _contained(pending_path, floor_dir) or not _contained(modified_path, floor_dir):
+        raise HTTPException(status_code=400, detail="Invalid label path")
+    pending = _load_label_file(pending_path)
+    pending_labels = [
+        item for item in (pending or {}).get("labels") or [] if isinstance(item, dict)
+    ]
+    if not pending_labels:
+        raise HTTPException(status_code=404, detail="저장할 임시 라벨이 없습니다.")
+
+    modified = _load_label_file(modified_path) or {"labels": []}
+    merged = [item for item in modified.get("labels") or [] if isinstance(item, dict)]
+    pending_faces = _collect_face_ids(pending)
+    merged = [
+        item
+        for item in merged
+        if not ({face["id"] for face in _label_faces(item)} & pending_faces)
+    ]
+    merged.extend(pending_labels)
+    validated = floor_dir / _VALIDATED_DXF
+    _write_modified_labels(modified_path, _modified_labels_payload(validated, merged))
+    if pending_path.is_file():
+        pending_path.unlink()
+    return list_floor_labels(artifacts, catalog["drawing_id"], floor)
 
 
 def _forget_drawing_tasks(artifacts: Path, drawing_id: str) -> None:
@@ -807,6 +1289,64 @@ def get_drawing_floors(drawing_id: str, request: Request) -> dict:
 def get_drawing_floor_labels(drawing_id: str, floor: str, request: Request) -> dict:
     user_id = require_user_id(request)
     return list_floor_labels(_artifacts_dir(user_id), drawing_id, floor)
+
+
+@router.post("/{drawing_id}/floors/{floor}/labels/manual")
+def post_drawing_floor_label_manual(
+    drawing_id: str,
+    floor: str,
+    body: ManualLabelBody,
+    request: Request,
+) -> dict:
+    user_id = require_user_id(request)
+    return add_manual_floor_label(
+        _artifacts_dir(user_id),
+        drawing_id,
+        floor,
+        x_px=body.x_px,
+        y_px=body.y_px,
+        x0_px=body.x0_px,
+        y0_px=body.y0_px,
+        x1_px=body.x1_px,
+        y1_px=body.y1_px,
+        boundary=body.boundary,
+    )
+
+
+@router.delete("/{drawing_id}/floors/{floor}/labels/manual")
+def delete_drawing_floor_label_manual(
+    drawing_id: str,
+    floor: str,
+    request: Request,
+    label: str | None = None,
+) -> dict:
+    user_id = require_user_id(request)
+    return undo_manual_floor_label(
+        _artifacts_dir(user_id),
+        drawing_id,
+        floor,
+        label=label,
+    )
+
+
+@router.post("/{drawing_id}/floors/{floor}/labels/manual/commit")
+def post_drawing_floor_label_manual_commit(
+    drawing_id: str,
+    floor: str,
+    request: Request,
+) -> dict:
+    user_id = require_user_id(request)
+    return commit_pending_floor_labels(_artifacts_dir(user_id), drawing_id, floor)
+
+
+@router.post("/{drawing_id}/floors/{floor}/labels/manual/cancel")
+def post_drawing_floor_label_manual_cancel(
+    drawing_id: str,
+    floor: str,
+    request: Request,
+) -> dict:
+    user_id = require_user_id(request)
+    return cancel_pending_floor_labels(_artifacts_dir(user_id), drawing_id, floor)
 
 
 @router.get("/{drawing_id}/floors/{floor}/{kind}")

@@ -568,6 +568,26 @@ def wall_segments(msp, boxes, *, include_door: bool = True, open_doors=None) -> 
     return segs
 
 
+def entity_segments(msp, boxes, *, open_doors=None) -> list[tuple[float, float, float, float]]:
+    """모든 LINE/LWPOLYLINE 엔티티를 경계로 쓴다 (WALL 레이어만이 아님).
+
+    수동 다각형 추가용. 문짝 사각형·기둥 안 선은 wall_segments 와 같이 뺀다.
+    """
+    segs: list[tuple[float, float, float, float]] = []
+    for e in msp:
+        if e.dxftype() not in ("LINE", "LWPOLYLINE"):
+            continue
+        if e.dxf.layer == DOOR_LAYER and _door_leaf_rectangle(e):
+            continue
+        for x0, y0, x1, y1 in _straight_parts(e):
+            if _inside_box((x0 + x1) * 0.5, (y0 + y1) * 0.5, boxes):
+                continue
+            if e.dxf.layer == DOOR_LAYER and _segment_on_open_door(x0, y0, x1, y1, open_doors):
+                continue
+            segs.append((x0, y0, x1, y1))
+    return segs
+
+
 def _axis_snapper(values: list[float], tol: float):
     ordered = sorted(values)
     groups: list[list[float]] = []
