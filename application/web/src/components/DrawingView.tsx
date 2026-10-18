@@ -1,4 +1,11 @@
-import { useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
+import {
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type PointerEvent as ReactPointerEvent,
+} from "react";
 import {
   api,
   type DrawingCatalog,
@@ -7,6 +14,7 @@ import {
   type DrawingLabelTag,
   type DrawingRating,
 } from "../api";
+import { loadLegendSelection, saveLegendSelection } from "../drawingLegendSettings";
 import { MenuIcon } from "./SidebarIcons";
 
 const MIN_ZOOM = 0.25;
@@ -44,10 +52,12 @@ const PREVIEWS = [
   { kind: "wall", label: "Wall", file: "floor_wall_original.png" },
   { kind: "validated", label: "검증", file: "floor_wall_validated.png" },
   { kind: "label", label: "라벨", file: "floor_label_detected.png" },
-  { kind: "summary", label: "요약", file: "floor_original.png" },
+  // Wall/validated share the label overlay mm→px space; floor_original.png is often stale.
+  { kind: "summary", label: "요약", file: "floor_wall_original.png" },
 ] as const;
 
 type PreviewKind = (typeof PREVIEWS)[number]["kind"];
+type ImageFileKind = "original" | "wall" | "validated" | "label";
 
 interface Props {
   drawingId: string;
@@ -59,18 +69,31 @@ interface Props {
 function imageKind(
   kind: PreviewKind,
   summaryValidated = false,
-): "original" | "wall" | "validated" | "label" {
-  if (kind === "summary") return summaryValidated ? "validated" : "original";
+): ImageFileKind {
+  // Summary overlays use validated-meta coordinates; wall PNG matches that framing.
+  if (kind === "summary") return summaryValidated ? "validated" : "wall";
   return kind;
+}
+
+function summaryFileKind(
+  summaryValidated: boolean,
+  files: { wall?: boolean; validated?: boolean; original?: boolean } | undefined,
+): ImageFileKind {
+  if (summaryValidated) {
+    if (files?.validated) return "validated";
+    if (files?.wall) return "wall";
+    return "original";
+  }
+  if (files?.wall) return "wall";
+  if (files?.validated) return "validated";
+  return "original";
 }
 
 function imageSrc(
   drawingId: string,
   floor: string,
-  kind: PreviewKind,
-  summaryValidated = false,
+  fileKind: ImageFileKind,
 ): string {
-  const fileKind = imageKind(kind, summaryValidated);
   return `/api/drawings/${encodeURIComponent(drawingId)}/floors/${encodeURIComponent(floor)}/${fileKind}`;
 }
 
@@ -116,6 +139,23 @@ function findPendingLabelAtPx(
   return null;
 }
 
+/** Topmost visible (checked) label polygon under the click — same hit order as pending. */
+function findSelectedLabelAtPx(
+  labels: DrawingLabelItem[],
+  selected: Set<string>,
+  x: number,
+  y: number,
+): string | null {
+  for (let i = labels.length - 1; i >= 0; i -= 1) {
+    const item = labels[i];
+    if (!item || !selected.has(item.label)) continue;
+    for (const poly of item.polygons_px ?? []) {
+      if (poly.length >= 3 && pointInPolygon(x, y, poly)) return item.label;
+    }
+  }
+  return null;
+}
+
 function clampZoom(value: number): number {
   return Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, value));
 }
@@ -153,14 +193,16 @@ function SummaryLabelTag({
   color: number[];
   fontSize: number;
 }) {
+  // Match drawing-totalroom `_add_label_tag`: seed is the TEXT insert (left edge),
+  // not the badge center. Centering here shifts every tag left of the label PNG.
   const areaText = formatArea(tag.area_m2);
   const textW = Math.max(inkWidth(tag.text, fontSize), inkWidth(areaText, fontSize));
-  const padX = fontSize * 0.45;
+  const padX = fontSize * 0.4;
   const padY = fontSize * 0.28;
   const gap = fontSize * 0.22;
   const boxW = textW + padX * 2;
   const boxH = padY * 2 + fontSize * 2 + gap;
-  const x0 = tag.x - boxW / 2;
+  const x0 = tag.x - padX;
   const y0 = tag.y - boxH / 2;
   const stroke = Math.max(1.5, fontSize / 16);
   return (
@@ -179,7 +221,7 @@ function SummaryLabelTag({
       <text
         x={tag.x}
         y={y0 + padY + fontSize * 0.82}
-        textAnchor="middle"
+        textAnchor="start"
         fontSize={fontSize}
         fill="#141414"
         fontFamily="Apple SD Gothic Neo, Malgun Gothic, sans-serif"
@@ -189,7 +231,7 @@ function SummaryLabelTag({
       <text
         x={tag.x}
         y={y0 + padY + fontSize + gap + fontSize * 0.82}
-        textAnchor="middle"
+        textAnchor="start"
         fontSize={fontSize}
         fill="#141414"
         fontFamily="Apple SD Gothic Neo, Malgun Gothic, sans-serif"
@@ -249,7 +291,7 @@ function ZoomInIcon() {
 export function DrawingView({ drawingId, initialFloor, onMenuClick, onBack }: Props) {
   const [floor, setFloor] = useState("");
   const [floorQuery, setFloorQuery] = useState("");
-  const [kind, setKind] = useState<PreviewKind>("label");
+  const [kind, setKind] = useState<PreviewKind>("summary");
   const [catalog, setCatalog] = useState<DrawingCatalog | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [imageState, setImageState] = useState<"loading" | "ready" | "missing">("loading");
@@ -277,6 +319,7 @@ export function DrawingView({ drawingId, initialFloor, onMenuClick, onBack }: Pr
 
   const stageRef = useRef<HTMLDivElement>(null);
   const legendRef = useRef<HTMLDivElement>(null);
+  const imgRef = useRef<HTMLImageElement | null>(null);
   const zoomRef = useRef(zoom);
   const panRef = useRef(pan);
   const fitRef = useRef(fit);
@@ -377,8 +420,9 @@ export function DrawingView({ drawingId, initialFloor, onMenuClick, onBack }: Pr
       .getDrawingFloorLabels(drawingId, floor)
       .then((data) => {
         if (cancelled) return;
+        const names = data.labels.map((item) => item.label);
         setLabelData(data);
-        setSelectedLabels(new Set(data.labels.map((item) => item.label)));
+        setSelectedLabels(loadLegendSelection(drawingId, floor, names));
       })
       .catch((err: unknown) => {
         if (!cancelled) {
@@ -413,15 +457,19 @@ export function DrawingView({ drawingId, initialFloor, onMenuClick, onBack }: Pr
   const showLabelEditBar = canAddLabel && (addLabelMode || rectDrawMode || pendingCount > 0);
   /** While editing labels on summary, show validated walls instead of original. */
   const summaryValidatedBg = showLabelEditBar;
-  const fileKind = imageKind(kind, summaryValidatedBg);
+  const fileKind =
+    kind === "summary"
+      ? summaryFileKind(summaryValidatedBg, selected)
+      : imageKind(kind, summaryValidatedBg);
   const available = selected ? Boolean(selected[fileKind]) : null;
-  const src = floor ? imageSrc(drawingId, floor, kind, summaryValidatedBg) : "";
+  const src = floor ? imageSrc(drawingId, floor, fileKind) : "";
 
   const overlayLabels = useMemo(() => {
     if (!labelData) return [];
     if (kind === "label") {
+      // Label PNG already paints detected rooms; overlay only pending + manual adds.
       return labelData.labels.filter(
-        (item) => item.source === "modified" || item.source === "pending",
+        (item) => item.source === "pending" || (item.source === "modified" && !item.from_detected),
       );
     }
     if (kind === "summary") return labelData.labels;
@@ -429,9 +477,18 @@ export function DrawingView({ drawingId, initialFloor, onMenuClick, onBack }: Pr
   }, [kind, labelData]);
 
   function applyLabelPayload(data: DrawingFloorLabels) {
+    const prevNames = new Set((labelData?.labels ?? []).map((item) => item.label));
+    const names = data.labels.map((item) => item.label);
     setLabelData(data);
     setLabelError(null);
-    setSelectedLabels(new Set(data.labels.map((item) => item.label)));
+    setSelectedLabels((prev) => {
+      const next = new Set<string>();
+      for (const name of names) {
+        if (!prevNames.has(name) || prev.has(name)) next.add(name);
+      }
+      saveLegendSelection(drawingId, floor, next, names);
+      return next;
+    });
   }
 
   function toggleLabel(name: string) {
@@ -439,6 +496,10 @@ export function DrawingView({ drawingId, initialFloor, onMenuClick, onBack }: Pr
       const next = new Set(prev);
       if (next.has(name)) next.delete(name);
       else next.add(name);
+      const known = (labelData?.labels ?? []).map((item) => item.label);
+      if (floor && known.length > 0) {
+        saveLegendSelection(drawingId, floor, next, known);
+      }
       return next;
     });
   }
@@ -520,6 +581,26 @@ export function DrawingView({ drawingId, initialFloor, onMenuClick, onBack }: Pr
     setZoom(1);
   }
 
+  function markImageReady(img: HTMLImageElement) {
+    if (img.naturalWidth <= 0 || img.naturalHeight <= 0) return;
+    naturalRef.current = {
+      width: img.naturalWidth,
+      height: img.naturalHeight,
+    };
+    setImageState("ready");
+    applyContain();
+  }
+
+  // Cached images (e.g. original after leaving label-edit validated bg) may skip onLoad.
+  useLayoutEffect(() => {
+    const img = imgRef.current;
+    if (!img) return;
+    if (img.complete) {
+      if (img.naturalWidth > 0) markImageReady(img);
+      else setImageState("missing");
+    }
+  }, [src]);
+
   function applyZoom(nextZoom: number, originX: number, originY: number) {
     const currentFit = fitRef.current;
     const currentZoom = zoomRef.current;
@@ -598,6 +679,20 @@ export function DrawingView({ drawingId, initialFloor, onMenuClick, onBack }: Pr
     return {
       x: (clientX - rect.left - panRef.current.x) / scale,
       y: (clientY - rect.top - panRef.current.y) / scale,
+    };
+  }
+
+  /** Map image pixels onto overlay/label JSON space (validated PNG may differ from original). */
+  function imagePxToOverlayPx(pt: { x: number; y: number }): { x: number; y: number } {
+    const imageW = naturalRef.current.width || labelData?.overlay?.width || 0;
+    const imageH = naturalRef.current.height || labelData?.overlay?.height || 0;
+    const overlayW = labelData?.overlay?.width || imageW;
+    const overlayH = labelData?.overlay?.height || imageH;
+    if (imageW <= 0 || imageH <= 0 || overlayW <= 0 || overlayH <= 0) return pt;
+    if (imageW === overlayW && imageH === overlayH) return pt;
+    return {
+      x: (pt.x / imageW) * overlayW,
+      y: (pt.y / imageH) * overlayH,
     };
   }
 
@@ -870,24 +965,41 @@ export function DrawingView({ drawingId, initialFloor, onMenuClick, onBack }: Pr
     }
     if (moved) return;
     if (addLabelBusy) return;
-    if (wasLeftButton && event.button === 0 && canAddLabel) {
+    if (wasLeftButton && event.button === 0) {
       const pt = clientToImagePx(event.clientX, event.clientY);
-      // 임시 영역을 다시 클릭하면 해당 pending 라벨 제거.
-      if (pt && pendingCountRef.current > 0 && labelData) {
-        const hit = findPendingLabelAtPx(labelData.labels, pt.x, pt.y);
-        if (hit) {
-          void undoManualLabel(hit);
+      const overlayPt = pt ? imagePxToOverlayPx(pt) : null;
+      if (canAddLabel && overlayPt && pendingCountRef.current > 0 && labelData) {
+        // 임시 영역을 다시 클릭하면 해당 pending 라벨 제거.
+        const pendingHit = findPendingLabelAtPx(labelData.labels, overlayPt.x, overlayPt.y);
+        if (pendingHit) {
+          void undoManualLabel(pendingHit);
           return;
         }
       }
-      // 추가하기: 클릭 → WALL 기준 실. 다각형 추가: 클릭 → 엔티티 기준.
-      if (rectDrawModeRef.current) {
-        void addManualLabelAt(event.clientX, event.clientY, "wall");
-        return;
+      // 보이는(체크된) 라벨 영역 클릭 → 범례 체크 토글 (기존·추가 라벨 공통).
+      // 추가하기 모드에서도 이미 라벨이 있는 실은 새로 넣지 않고 표시만 끈다.
+      if (overlayPt && labelData && legendActive && !rectDrawModeRef.current) {
+        const hit = findSelectedLabelAtPx(
+          labelData.labels,
+          selectedLabels,
+          overlayPt.x,
+          overlayPt.y,
+        );
+        if (hit) {
+          toggleLabel(hit);
+          return;
+        }
       }
-      if (addLabelMode) {
-        void addManualLabelAt(event.clientX, event.clientY, "entity");
-        return;
+      if (canAddLabel) {
+        // 추가하기: 클릭 → WALL 기준 실. 다각형 추가: 클릭 → 엔티티 기준.
+        if (rectDrawModeRef.current) {
+          void addManualLabelAt(event.clientX, event.clientY, "wall");
+          return;
+        }
+        if (addLabelMode) {
+          void addManualLabelAt(event.clientX, event.clientY, "entity");
+          return;
+        }
       }
     }
     // Label/summary: click the canvas (not a drag) to toggle the legend, like graph.
@@ -1153,6 +1265,7 @@ export function DrawingView({ drawingId, initialFloor, onMenuClick, onBack }: Pr
                 )}
                 <img
                   key={`${kind}:${src}`}
+                  ref={imgRef}
                   src={src}
                   alt={`${floor} ${preview.label}`}
                   draggable={false}
@@ -1162,15 +1275,7 @@ export function DrawingView({ drawingId, initialFloor, onMenuClick, onBack }: Pr
                     transform: `translate(${pan.x}px, ${pan.y}px) scale(${displayScale})`,
                     visibility: imageState === "ready" ? "visible" : "hidden",
                   }}
-                  onLoad={(event) => {
-                    const img = event.currentTarget;
-                    naturalRef.current = {
-                      width: img.naturalWidth,
-                      height: img.naturalHeight,
-                    };
-                    setImageState("ready");
-                    applyContain();
-                  }}
+                  onLoad={(event) => markImageReady(event.currentTarget)}
                   onError={() => setImageState("missing")}
                 />
                 {(overlayLabels.length > 0 || rectDraft) && imageState === "ready" ? (
@@ -1178,7 +1283,7 @@ export function DrawingView({ drawingId, initialFloor, onMenuClick, onBack }: Pr
                     className="drawing-label-overlay"
                     width={naturalRef.current.width || labelData?.overlay?.width || 0}
                     height={naturalRef.current.height || labelData?.overlay?.height || 0}
-                    viewBox={`0 0 ${naturalRef.current.width || labelData?.overlay?.width || 0} ${naturalRef.current.height || labelData?.overlay?.height || 0}`}
+                    viewBox={`0 0 ${labelData?.overlay?.width || naturalRef.current.width || 0} ${labelData?.overlay?.height || naturalRef.current.height || 0}`}
                     style={{
                       transform: `translate(${pan.x}px, ${pan.y}px) scale(${displayScale})`,
                     }}
@@ -1200,7 +1305,7 @@ export function DrawingView({ drawingId, initialFloor, onMenuClick, onBack }: Pr
                     {overlayLabels.map((item) => {
                       if (!selectedLabels.has(item.label)) return null;
                       const fontSize = tagFontSize(
-                        naturalRef.current.width || labelData?.overlay?.width || 2000,
+                        labelData?.overlay?.width || naturalRef.current.width || 2000,
                       );
                       return (item.tags ?? []).map((tag, index) => (
                         <SummaryLabelTag

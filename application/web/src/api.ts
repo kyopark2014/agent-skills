@@ -201,6 +201,8 @@ export interface DrawingLabelItem {
   polygons_px?: number[][][];
   tags?: DrawingLabelTag[];
   source?: "detected" | "modified" | "pending" | string;
+  /** True when the face also exists in floor_label_detected.json (baked into label PNG). */
+  from_detected?: boolean;
 }
 
 export interface DrawingFloorLabels {

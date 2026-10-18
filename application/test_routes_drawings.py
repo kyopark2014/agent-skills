@@ -594,10 +594,19 @@ class DrawingIdTests(unittest.TestCase):
             labels = list_floor_labels(artifacts, drawing_id, "1F")
             self.assertEqual(labels["label_count"], 2)
             by_name = {item["label"]: item for item in labels["labels"]}
-            self.assertEqual(by_name["회의실"]["source"], "detected")
+            # Modified is the working set (seeded from detected); detected file stays on disk.
+            self.assertEqual(by_name["회의실"]["source"], "modified")
+            self.assertTrue(by_name["회의실"]["from_detected"])
             self.assertEqual(by_name["무명-1"]["source"], "modified")
+            self.assertFalse(by_name["무명-1"]["from_detected"])
             self.assertTrue(by_name["무명-1"]["polygons_px"])
             self.assertTrue(by_name["무명-1"]["tags"])
+            saved = json.loads((floor_dir / "floor_label_modified.json").read_text(encoding="utf-8"))
+            self.assertEqual(
+                {item["label"] for item in saved["labels"]},
+                {"회의실", "무명-1"},
+            )
+            self.assertTrue((floor_dir / "floor_label_detected.json").is_file())
             floors = list_floor_catalog(artifacts, drawing_id)
             self.assertEqual(floors["floors"][0]["label_count"], 2)
 
@@ -711,7 +720,7 @@ class DrawingIdTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            def fake_detect(_dxf, _x, _y):
+            def fake_detect(_dxf, _x, _y, boundary="entity"):
                 return (
                     {
                         "pts": [[2000.0, 2000.0], [3000.0, 2000.0], [3000.0, 3000.0], [2000.0, 3000.0]],
@@ -862,14 +871,49 @@ class DrawingIdTests(unittest.TestCase):
                 json.dumps({"labels": [pending_row]}),
                 encoding="utf-8",
             )
+            (floor_dir / "floor_label_detected.json").write_text(
+                json.dumps(
+                    {
+                        "labels": [
+                            {
+                                "label": "회의실",
+                                "color": [229, 96, 96],
+                                "area_m2": 10.0,
+                                "instances": [
+                                    {
+                                        "text": "회의실",
+                                        "x": 100.0,
+                                        "y": 100.0,
+                                        "area_m2": 10.0,
+                                        "polygon_mm": [
+                                            [0, 0],
+                                            [1000, 0],
+                                            [1000, 1000],
+                                            [0, 1000],
+                                        ],
+                                    }
+                                ],
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
             committed = commit_pending_floor_labels(artifacts, drawing_id, "1F")
             self.assertEqual(committed["pending_count"], 0)
-            self.assertEqual(
-                next(item for item in committed["labels"] if item["label"] == "무명-1")["source"],
-                "modified",
-            )
+            by_name = {item["label"]: item for item in committed["labels"]}
+            self.assertEqual(by_name["무명-1"]["source"], "modified")
+            self.assertFalse(by_name["무명-1"]["from_detected"])
+            self.assertEqual(by_name["회의실"]["source"], "modified")
+            self.assertTrue(by_name["회의실"]["from_detected"])
             self.assertFalse((floor_dir / "floor_label_pending.json").is_file())
             self.assertTrue((floor_dir / "floor_label_modified.json").is_file())
+            self.assertTrue((floor_dir / "floor_label_detected.json").is_file())
+            saved = json.loads((floor_dir / "floor_label_modified.json").read_text(encoding="utf-8"))
+            self.assertEqual(
+                {item["label"] for item in saved["labels"]},
+                {"회의실", "무명-1"},
+            )
 
             (floor_dir / "floor_label_pending.json").write_text(
                 json.dumps(
@@ -900,8 +944,8 @@ class DrawingIdTests(unittest.TestCase):
             self.assertEqual(cancelled["pending_count"], 0)
             self.assertFalse((floor_dir / "floor_label_pending.json").is_file())
             self.assertEqual(
-                [item["label"] for item in cancelled["labels"]],
-                ["무명-1"],
+                {item["label"] for item in cancelled["labels"]},
+                {"회의실", "무명-1"},
             )
 
     def test_add_manual_floor_label_rejects_open_face(self):

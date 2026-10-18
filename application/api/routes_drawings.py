@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import colorsys
+import copy
 import hashlib
 import json
 import os
@@ -54,10 +55,11 @@ def _named_label_count(payload: dict | None) -> int:
 
 
 def _floor_label_count(floor_dir: Path) -> int:
-    """Named labels in detected plus manually modified JSON."""
-    return _named_label_count(_load_label_file(floor_dir / _LABEL_JSON)) + _named_label_count(
-        _load_label_file(floor_dir / _MODIFIED_JSON)
-    )
+    """Working-set size: modified if present, otherwise detected. Detected file is kept for logging."""
+    modified = _load_label_file(floor_dir / _MODIFIED_JSON)
+    if modified is not None:
+        return _named_label_count(modified)
+    return _named_label_count(_load_label_file(floor_dir / _LABEL_JSON))
 
 
 # Must match render_wall_dxf_png canvas padding (top, right, bottom).
@@ -684,6 +686,7 @@ def _slim_label_rows(
     overlay_tf: dict | None,
     *,
     source: str,
+    detected_faces: set[str] | None = None,
 ) -> list[dict]:
     labels: list[dict] = []
     for item in items:
@@ -702,6 +705,15 @@ def _slim_label_rows(
             area = sum(face["area_m2"] for face in faces) if faces else None
         if area is None:
             continue
+        face_ids = {face["id"] for face in faces}
+        if source == "detected":
+            from_detected = True
+        elif source == "pending":
+            from_detected = False
+        elif detected_faces is not None:
+            from_detected = bool(face_ids & detected_faces)
+        else:
+            from_detected = False
         labels.append(
             {
                 "label": name,
@@ -711,6 +723,7 @@ def _slim_label_rows(
                 "polygons_px": _polygons_px(item, overlay_tf),
                 "tags": _instance_tags_px(item, overlay_tf, name),
                 "source": source,
+                "from_detected": from_detected,
             }
         )
     return labels
@@ -733,8 +746,51 @@ def _modified_labels_payload(validated: Path, labels: list) -> dict:
     }
 
 
+def _clone_label_items(payload: dict | None) -> list[dict]:
+    items: list[dict] = []
+    for item in (payload or {}).get("labels") or []:
+        if isinstance(item, dict):
+            items.append(copy.deepcopy(item))
+    return items
+
+
+def _modified_is_additions_only(modified: dict, detected: dict | None) -> bool:
+    """Legacy modified files stored only manual adds (no overlap with detected faces)."""
+    det_faces = _collect_face_ids(detected)
+    if not det_faces:
+        return False
+    mod_faces = _collect_face_ids(modified)
+    if not mod_faces:
+        return True
+    return len(mod_faces & det_faces) == 0
+
+
+def _ensure_modified_working_set(floor_dir: Path) -> dict | None:
+    """If modified is additions-only, seed detected labels into it. Never deletes detected."""
+    modified_path = (floor_dir / _MODIFIED_JSON).resolve()
+    if not _contained(modified_path, floor_dir):
+        return None
+    modified = _load_label_file(modified_path)
+    if modified is None:
+        return None
+    detected = _load_label_file(floor_dir / _LABEL_JSON)
+    if not _modified_is_additions_only(modified, detected):
+        return modified
+    merged = _clone_label_items(detected)
+    merged.extend(
+        item for item in (modified.get("labels") or []) if isinstance(item, dict)
+    )
+    validated = floor_dir / _VALIDATED_DXF
+    payload = _modified_labels_payload(validated, merged)
+    _write_modified_labels(modified_path, payload)
+    return payload
+
+
 def list_floor_labels(artifacts: Path, drawing_id: str, floor: str) -> dict:
-    """Slim label legend from detected + modified + pending JSON."""
+    """Slim label legend from the working set (modified, else detected) plus pending.
+
+    ``floor_label_detected.json`` is kept on disk for logging even when modified exists.
+    """
     catalog, floor_dir = _floor_dir(artifacts, drawing_id, floor)
     detected_path = (floor_dir / _LABEL_JSON).resolve()
     modified_path = (floor_dir / _MODIFIED_JSON).resolve()
@@ -754,13 +810,30 @@ def list_floor_labels(artifacts: Path, drawing_id: str, floor: str) -> dict:
             raise HTTPException(status_code=500, detail="라벨 JSON을 읽지 못했습니다.")
         raise HTTPException(status_code=404, detail="Label data not found")
 
+    if modified is not None:
+        modified = _ensure_modified_working_set(floor_dir) or modified
+
     overlay_tf = _load_original_overlay(floor_dir)
-    labels = _slim_label_rows((detected or {}).get("labels") or [], overlay_tf, source="detected")
-    labels.extend(
-        _slim_label_rows((modified or {}).get("labels") or [], overlay_tf, source="modified")
-    )
+    detected_faces = _collect_face_ids(detected)
+    if modified is not None:
+        labels = _slim_label_rows(
+            (modified or {}).get("labels") or [],
+            overlay_tf,
+            source="modified",
+            detected_faces=detected_faces,
+        )
+    else:
+        labels = _slim_label_rows(
+            (detected or {}).get("labels") or [],
+            overlay_tf,
+            source="detected",
+            detected_faces=detected_faces,
+        )
     pending_rows = _slim_label_rows(
-        (pending or {}).get("labels") or [], overlay_tf, source="pending"
+        (pending or {}).get("labels") or [],
+        overlay_tf,
+        source="pending",
+        detected_faces=detected_faces,
     )
     labels.extend(pending_rows)
     labels.sort(key=lambda row: (-float(row["area_m2"]), str(row["label"])))
@@ -1039,9 +1112,16 @@ def _append_pending_unnamed(
         raise HTTPException(status_code=400, detail="Invalid label path")
     detected = _load_label_file(floor_dir / _LABEL_JSON)
     modified = _load_label_file(floor_dir / _MODIFIED_JSON)
+    if modified is not None:
+        modified = _ensure_modified_working_set(floor_dir) or modified
     pending = _load_label_file(pending_path) or {"labels": []}
     face_id = _face_id(polygon_mm)
-    existing_faces = _collect_face_ids(detected, modified, pending)
+    # Working set is modified when present; otherwise detected. Detected file stays on disk.
+    existing_faces = (
+        _collect_face_ids(modified, pending)
+        if modified is not None
+        else _collect_face_ids(detected, pending)
+    )
     if face_id and face_id in existing_faces:
         raise HTTPException(status_code=409, detail="이미 라벨이 있는 실입니다.")
 
@@ -1158,11 +1238,19 @@ def cancel_pending_floor_labels(artifacts: Path, drawing_id: str, floor: str) ->
 
 
 def commit_pending_floor_labels(artifacts: Path, drawing_id: str, floor: str) -> dict:
-    """Merge pending labels into ``floor_label_modified.json`` and clear pending."""
+    """Merge pending into ``floor_label_modified.json`` (seeded from detected) and clear pending.
+
+    ``floor_label_detected.json`` is left untouched for logging / baseline.
+    """
     catalog, floor_dir = _floor_dir(artifacts, drawing_id, floor)
     pending_path = _pending_path(floor_dir)
     modified_path = (floor_dir / _MODIFIED_JSON).resolve()
-    if not _contained(pending_path, floor_dir) or not _contained(modified_path, floor_dir):
+    detected_path = (floor_dir / _LABEL_JSON).resolve()
+    if (
+        not _contained(pending_path, floor_dir)
+        or not _contained(modified_path, floor_dir)
+        or not _contained(detected_path, floor_dir)
+    ):
         raise HTTPException(status_code=400, detail="Invalid label path")
     pending = _load_label_file(pending_path)
     pending_labels = [
@@ -1171,8 +1259,15 @@ def commit_pending_floor_labels(artifacts: Path, drawing_id: str, floor: str) ->
     if not pending_labels:
         raise HTTPException(status_code=404, detail="저장할 임시 라벨이 없습니다.")
 
-    modified = _load_label_file(modified_path) or {"labels": []}
-    merged = [item for item in modified.get("labels") or [] if isinstance(item, dict)]
+    detected = _load_label_file(detected_path)
+    modified = _load_label_file(modified_path)
+    if modified is None:
+        merged = _clone_label_items(detected)
+    else:
+        modified = _ensure_modified_working_set(floor_dir) or modified
+        merged = [
+            item for item in (modified.get("labels") or []) if isinstance(item, dict)
+        ]
     pending_faces = _collect_face_ids(pending)
     merged = [
         item
