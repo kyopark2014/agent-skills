@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 import re
+import secrets
 import shutil
 import sys
 import unicodedata
@@ -142,6 +143,10 @@ class DrawingTaskLink(BaseModel):
 
 class DrawingRatingBody(BaseModel):
     rating: str
+
+
+class DrawingMemoBody(BaseModel):
+    text: str
 
 
 class ManualLabelBody(BaseModel):
@@ -1347,6 +1352,116 @@ def set_drawing_rating(artifacts: Path, drawing_id: str, rating: str) -> dict:
     return {"ok": True, "drawing_id": drawing_id, "rating": summary["rating"]}
 
 
+_MEMO_FILE = "drawing_memos.json"
+_MEMO_TEXT_MAX = 2000
+
+
+def _memo_path(artifacts: Path, folder: str) -> Path:
+    return _folder_dir(artifacts, folder) / _MEMO_FILE
+
+
+def _load_memos(path: Path) -> list[dict]:
+    if not path.is_file():
+        return []
+    try:
+        loaded = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+    if isinstance(loaded, list):
+        items = loaded
+    elif isinstance(loaded, dict) and isinstance(loaded.get("memos"), list):
+        items = loaded["memos"]
+    else:
+        return []
+    out: list[dict] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        text = str(item.get("text") or "").strip()
+        created = str(item.get("created_at") or "").strip()
+        memo_id = str(item.get("id") or "").strip()
+        if not text or not created:
+            continue
+        out.append(
+            {
+                "id": memo_id or secrets.token_hex(8),
+                "text": text,
+                "created_at": created,
+            }
+        )
+    out.sort(key=lambda item: item["created_at"], reverse=True)
+    return out
+
+
+def _write_memos(path: Path, memos: list[dict]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {"memos": memos}
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    temporary.replace(path)
+
+
+def list_drawing_memos(artifacts: Path, drawing_id: str) -> dict:
+    """Return memo comments for a drawing, newest first."""
+    drawing_id = _safe_id(drawing_id) or ""
+    if not drawing_id:
+        raise HTTPException(status_code=400, detail="Invalid drawing id")
+    catalog = load_drawing_catalog(artifacts)
+    entry = _find_entry(catalog, drawing_id)
+    if entry is None:
+        raise HTTPException(status_code=404, detail="Drawing not found")
+    summary = _summary(entry, artifacts)
+    if summary is None:
+        raise HTTPException(status_code=400, detail="Invalid drawing id")
+    memos = _load_memos(_memo_path(artifacts, summary["folder"]))
+    return {
+        "drawing_id": drawing_id,
+        "folder": summary["folder"],
+        "memos": memos,
+    }
+
+
+def add_drawing_memo(artifacts: Path, drawing_id: str, text: str) -> dict:
+    """Append a short comment. Does not bump drawing list order."""
+    drawing_id = _safe_id(drawing_id) or ""
+    if not drawing_id:
+        raise HTTPException(status_code=400, detail="Invalid drawing id")
+    cleaned = unicodedata.normalize("NFC", str(text or "")).strip()
+    if not cleaned:
+        raise HTTPException(status_code=400, detail="메모 내용을 입력하세요.")
+    if len(cleaned) > _MEMO_TEXT_MAX:
+        raise HTTPException(
+            status_code=400,
+            detail=f"메모는 {_MEMO_TEXT_MAX}자 이하여야 합니다.",
+        )
+    catalog = load_drawing_catalog(artifacts)
+    entry = _find_entry(catalog, drawing_id)
+    if entry is None:
+        raise HTTPException(status_code=404, detail="Drawing not found")
+    summary = _summary(entry, artifacts)
+    if summary is None:
+        raise HTTPException(status_code=400, detail="Invalid drawing id")
+    path = _memo_path(artifacts, summary["folder"])
+    memos = _load_memos(path)
+    memo = {
+        "id": secrets.token_hex(8),
+        "text": cleaned,
+        "created_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+    }
+    memos.insert(0, memo)
+    _write_memos(path, memos)
+    return {
+        "ok": True,
+        "drawing_id": drawing_id,
+        "folder": summary["folder"],
+        "memo": memo,
+        "memos": memos,
+    }
+
+
 @router.post("/task-link")
 def link_drawing_task(body: DrawingTaskLink, request: Request) -> dict:
     """Map the task created by 시작 to the uploaded drawing. A later start wins."""
@@ -1467,6 +1582,18 @@ def get_drawing_floor_image(
 def patch_drawing_rating(drawing_id: str, body: DrawingRatingBody, request: Request) -> dict:
     user_id = require_user_id(request)
     return set_drawing_rating(_artifacts_dir(user_id), drawing_id, body.rating)
+
+
+@router.get("/{drawing_id}/memos")
+def get_drawing_memos(drawing_id: str, request: Request) -> dict:
+    user_id = require_user_id(request)
+    return list_drawing_memos(_artifacts_dir(user_id), drawing_id)
+
+
+@router.post("/{drawing_id}/memos")
+def post_drawing_memo(drawing_id: str, body: DrawingMemoBody, request: Request) -> dict:
+    user_id = require_user_id(request)
+    return add_drawing_memo(_artifacts_dir(user_id), drawing_id, body.text)
 
 
 @router.delete("/{drawing_id}")

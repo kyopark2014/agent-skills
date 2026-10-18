@@ -29,6 +29,11 @@ class ParseFloorLabelTests(unittest.TestCase):
             "B1F": "B1F",
             "12F PLAN": "12F",
             "27F FLOOR PLAN": "27F",
+            "4~5층 평면도": "4F",
+            "4 ~5 층 평 면 도": "4F",
+            "옥탑지붕 평면도": "PH",
+            "옥 탑 지 붕 평 면 도": "PH",
+            "옥탑지붕 평 면 도": "PH",
             "2층 참조": None,
             "복도-1": None,
             "피트니스센터, 에듀센터, 관리사무소 평면도": None,
@@ -222,6 +227,84 @@ class FacilityPlanSheetTests(unittest.TestCase):
 
         self.assertEqual(found.floors, ["5F", "13F"])
         self.assertTrue(any("다시 나눴" in note for note in found.warnings))
+
+    def test_title_above_frame_and_empty_title_cell_dropped(self):
+        """제목이 도곽 바로 위에 있고, 빈 복제 제목 칸만 제목을 품은 경우.
+
+        경기도소방학교처럼 DEFPOINTS 시트 위에 제목이 있고, 어긋난 3층 제목이
+        빈 작은 칸에만 들어갈 때를 막는다.
+        """
+        import ezdxf
+
+        doc = ezdxf.new()
+        msp = doc.modelspace()
+
+        def sheet(x0, y0, w, h, layer="Defpoints"):
+            msp.add_lwpolyline(
+                [(x0, y0), (x0 + w, y0), (x0 + w, y0 + h), (x0, y0 + h)],
+                close=True,
+                dxfattribs={"layer": layer},
+            )
+
+        def fill_geom(x0, y0, w, h, n=80):
+            for index in range(n):
+                x = x0 + 5_000 + (index % 10) * (w / 12)
+                y = y0 + 5_000 + (index // 10) * (h / 12)
+                msp.add_line((x, y), (x + 800, y + 200))
+
+        # 실제 3층·4~5층 시트 (제목은 테두리 밖 위쪽)
+        sheet(0, 0, 120_000, 83_000)
+        fill_geom(0, 0, 120_000, 83_000)
+        msp.add_text("3 층  평 면 도", dxfattribs={"insert": (60_000, 98_000), "height": 3000})
+
+        sheet(0, 200_000, 120_000, 83_000)
+        fill_geom(0, 200_000, 120_000, 83_000, n=90)
+        msp.add_text("4 ~5 층  평 면 도", dxfattribs={"insert": (55_000, 295_000), "height": 3000})
+
+        # 어긋난 3층 제목 + 기하 없는 작은 칸
+        sheet(50_000, 300_000, 27_000, 40_000, layer="0")
+        msp.add_text("3 층  평 면 도", dxfattribs={"insert": (60_000, 310_000), "height": 3000})
+
+        found = lib_sheet.discover_layout(doc, mode="sheet")
+
+        self.assertIn("3F", found.floors)
+        self.assertIn("4F", found.floors)
+        three = next(s for s in found.sheets if s.floor == "3F")
+        four = next(s for s in found.sheets if s.floor == "4F")
+        self.assertLess(three.bbox[3] - three.bbox[1], 100_000)
+        self.assertAlmostEqual(three.bbox[1], 0, delta=1)
+        self.assertAlmostEqual(four.bbox[1], 200_000, delta=1)
+        self.assertTrue(
+            any("기하가 없어" in note for note in found.warnings)
+            or "3F_2" not in found.floors
+        )
+
+    def test_grid_parent_yields_to_sheet_child(self):
+        """같은 층 제목이 격자 부모·실제 시트에 겹치면 시트를 남긴다."""
+        import ezdxf
+
+        doc = ezdxf.new()
+        msp = doc.modelspace()
+        # 부모 격자
+        msp.add_lwpolyline(
+            [(0, 0), (333_000, 0), (333_000, 430_000), (0, 430_000)],
+            close=True,
+            dxfattribs={"layer": "Defpoints"},
+        )
+        # 실제 시트
+        msp.add_lwpolyline(
+            [(20_000, 50_000), (140_000, 50_000), (140_000, 133_000), (20_000, 133_000)],
+            close=True,
+            dxfattribs={"layer": "Defpoints"},
+        )
+        for index in range(60):
+            msp.add_line((30_000 + index * 1_000, 70_000), (30_500 + index * 1_000, 70_200))
+        msp.add_text("2층 평면도", dxfattribs={"insert": (70_000, 145_000), "height": 3000})
+
+        found = lib_sheet.discover_layout(doc, mode="sheet")
+
+        self.assertEqual(found.floors, ["2F"])
+        self.assertLess(found.sheets[0].bbox[2] - found.sheets[0].bbox[0], 200_000)
 
 
 class BlockNameAndSheetInsertTests(unittest.TestCase):

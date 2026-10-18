@@ -1,6 +1,12 @@
 import { useEffect, useState } from "react";
 import { createPortal } from "react-dom";
-import { api, type DrawingFloorRef, type DrawingRating, type DrawingSummary } from "../api";
+import {
+  api,
+  type DrawingFloorRef,
+  type DrawingMemo,
+  type DrawingRating,
+  type DrawingSummary,
+} from "../api";
 import { MenuIcon } from "./SidebarIcons";
 
 const RATING_OPTIONS: Array<{ value: DrawingRating; label: string }> = [
@@ -110,6 +116,13 @@ export function DrawingListView({
   const [restartingId, setRestartingId] = useState<string | null>(null);
   const [ratingBusyId, setRatingBusyId] = useState<string | null>(null);
   const [pendingDelete, setPendingDelete] = useState<DrawingSummary | null>(null);
+  const [memoDrawing, setMemoDrawing] = useState<DrawingSummary | null>(null);
+  const [memos, setMemos] = useState<DrawingMemo[]>([]);
+  const [memoText, setMemoText] = useState("");
+  const [memoLoading, setMemoLoading] = useState(false);
+  const [memoSaving, setMemoSaving] = useState(false);
+  const [memoComposing, setMemoComposing] = useState(false);
+  const [memoError, setMemoError] = useState<string | null>(null);
   const [query, setQuery] = useState("");
 
   useEffect(() => {
@@ -136,13 +149,73 @@ export function DrawingListView({
   }, []);
 
   useEffect(() => {
-    if (!pendingDelete) return;
+    if (!pendingDelete && !memoDrawing) return;
     function onKey(event: KeyboardEvent) {
-      if (event.key === "Escape") setPendingDelete(null);
+      if (event.key !== "Escape") return;
+      if (memoDrawing) {
+        closeMemo();
+        return;
+      }
+      setPendingDelete(null);
     }
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [pendingDelete]);
+  }, [pendingDelete, memoDrawing]);
+
+  function closeMemo() {
+    setMemoDrawing(null);
+    setMemos([]);
+    setMemoText("");
+    setMemoError(null);
+    setMemoLoading(false);
+    setMemoSaving(false);
+    setMemoComposing(false);
+  }
+
+  function cancelMemoCompose() {
+    setMemoComposing(false);
+    setMemoText("");
+    setMemoError(null);
+  }
+
+  async function openMemo(drawing: DrawingSummary) {
+    setMemoDrawing(drawing);
+    setMemos([]);
+    setMemoText("");
+    setMemoError(null);
+    setMemoComposing(false);
+    setMemoLoading(true);
+    try {
+      const data = await api.listDrawingMemos(drawing.drawing_id);
+      setMemos(data.memos ?? []);
+    } catch (err) {
+      setMemoError(err instanceof Error ? err.message : "메모를 불러오지 못했습니다.");
+    } finally {
+      setMemoLoading(false);
+    }
+  }
+
+  async function saveMemo() {
+    const drawing = memoDrawing;
+    if (!drawing) return;
+    const text = memoText.trim();
+    if (!text) {
+      setMemoError("메모 내용을 입력하세요.");
+      return;
+    }
+    setMemoSaving(true);
+    setMemoError(null);
+    try {
+      const data = await api.addDrawingMemo(drawing.drawing_id, text);
+      setMemos(data.memos ?? []);
+      setMemoText("");
+      setMemoComposing(false);
+    } catch (err) {
+      setMemoError(err instanceof Error ? err.message : "메모를 저장하지 못했습니다.");
+    } finally {
+      setMemoSaving(false);
+    }
+  }
 
   async function confirmDelete() {
     const drawing = pendingDelete;
@@ -336,6 +409,14 @@ export function DrawingListView({
                           </option>
                         ))}
                       </select>
+                      <button
+                        type="button"
+                        className="drawing-list-btn"
+                        disabled={busy}
+                        onClick={() => void openMemo(drawing)}
+                      >
+                        메모
+                      </button>
                     </div>
                     </div>
                     {floors.length > 0 ? (
@@ -402,6 +483,112 @@ export function DrawingListView({
                     삭제
                   </button>
                 </div>
+              </div>
+            </div>,
+            document.body,
+          )
+        : null}
+      {memoDrawing
+        ? createPortal(
+            <div className="modal-overlay" role="presentation" onMouseDown={closeMemo}>
+              <div
+                className="modal drawing-memo-modal"
+                role="dialog"
+                aria-modal="true"
+                aria-labelledby="drawing-memo-title"
+                onMouseDown={(event) => event.stopPropagation()}
+              >
+                <div className="drawing-memo-header">
+                  <div>
+                    <h2 id="drawing-memo-title">메모</h2>
+                    <p className="drawing-memo-target">
+                      {memoDrawing.source_filename ||
+                        memoDrawing.folder ||
+                        memoDrawing.drawing_id}
+                    </p>
+                  </div>
+                  {!memoComposing ? (
+                    <button
+                      type="button"
+                      className="send-btn drawing-memo-add-btn"
+                      disabled={memoLoading}
+                      onClick={() => {
+                        setMemoError(null);
+                        setMemoComposing(true);
+                      }}
+                    >
+                      추가
+                    </button>
+                  ) : null}
+                </div>
+                {memoComposing ? (
+                  <div className="drawing-memo-compose">
+                    <label className="drawing-memo-label" htmlFor="drawing-memo-input">
+                      새 메모
+                    </label>
+                    <textarea
+                      id="drawing-memo-input"
+                      className="drawing-memo-input"
+                      rows={3}
+                      maxLength={2000}
+                      value={memoText}
+                      placeholder="이 도면에 대한 간단한 코멘트를 남기세요."
+                      disabled={memoSaving}
+                      autoFocus
+                      onChange={(event) => setMemoText(event.target.value)}
+                    />
+                    <div className="modal-actions">
+                      <button
+                        type="button"
+                        className="drawing-list-btn"
+                        disabled={memoSaving}
+                        onClick={cancelMemoCompose}
+                      >
+                        취소
+                      </button>
+                      <button
+                        type="button"
+                        className="send-btn"
+                        disabled={memoSaving || !memoText.trim()}
+                        onClick={() => void saveMemo()}
+                      >
+                        {memoSaving ? "저장 중…" : "저장"}
+                      </button>
+                    </div>
+                  </div>
+                ) : null}
+                {memoError ? (
+                  <p className="drawing-error" role="alert">
+                    {memoError}
+                  </p>
+                ) : null}
+                <div className="drawing-memo-history">
+                  {memoLoading ? (
+                    <p className="drawing-list-muted">불러오는 중…</p>
+                  ) : memos.length === 0 ? (
+                    <p className="drawing-list-muted">저장된 메모가 없습니다.</p>
+                  ) : (
+                    <ul className="drawing-memo-list">
+                      {memos.map((memo) => (
+                        <li key={memo.id} className="drawing-memo-entry">
+                          <time className="drawing-memo-stamp" dateTime={memo.created_at}>
+                            {formatListStamp(memo.created_at)}
+                          </time>
+                          <div className="drawing-memo-item">
+                            <p className="drawing-memo-text">{memo.text}</p>
+                          </div>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+                {!memoComposing ? (
+                  <div className="modal-actions">
+                    <button type="button" className="drawing-list-btn" onClick={closeMemo}>
+                      닫기
+                    </button>
+                  </div>
+                ) : null}
               </div>
             </div>,
             document.body,

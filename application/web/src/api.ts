@@ -138,6 +138,12 @@ export interface DrawingFloorRef {
 
 export type DrawingRating = "pending" | "good" | "neutral" | "bad" | "review" | "confirmed" | "retest";
 
+export interface DrawingMemo {
+  id: string;
+  text: string;
+  created_at: string;
+}
+
 export interface DrawingSummary {
   drawing_id: string;
   folder: string;
@@ -564,6 +570,21 @@ export const api = {
       `/api/drawings/${encodeURIComponent(drawingId)}/rating`,
       { method: "PATCH", body: JSON.stringify({ rating }) },
     ),
+  listDrawingMemos: (drawingId: string) =>
+    request<{ drawing_id: string; folder: string; memos: DrawingMemo[] }>(
+      `/api/drawings/${encodeURIComponent(drawingId)}/memos`,
+    ),
+  addDrawingMemo: (drawingId: string, text: string) =>
+    request<{
+      ok: boolean;
+      drawing_id: string;
+      folder: string;
+      memo: DrawingMemo;
+      memos: DrawingMemo[];
+    }>(`/api/drawings/${encodeURIComponent(drawingId)}/memos`, {
+      method: "POST",
+      body: JSON.stringify({ text }),
+    }),
   deleteDrawing: (drawingId: string) =>
     request<{ ok: boolean; drawing_id: string }>(
       `/api/drawings/${encodeURIComponent(drawingId)}`,

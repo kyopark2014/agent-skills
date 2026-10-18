@@ -22405,6 +22405,8 @@ def promote_door_side_corner_runs(msp) -> int:
     """문 옆에서 이어진 이중선과, 그 끝이 닿는 직각 이중선은 벽이다.
 
     레이저실(7) 왼쪽 문 옆 세로면이 피부관리실(1) 상단까지 이어진 경우가 그 예다.
+    양쪽 끝이 같은 높이로 맞춰진 채 끝나면, 문 쪽으로 벽두께만큼 들어간
+    가로(또는 세로) 이중면도 올린다. 레이저실(7) 하단 2100 mm가 그 예다.
     문 두께와 같은 간격만 올리고, 120 mm 이하의 끊김은 같은 줄로 잇는다.
     """
     doors: list[tuple[bool, float, float, float, float]] = []
@@ -22497,29 +22499,47 @@ def promote_door_side_corner_runs(msp) -> int:
             r0, r1 = _bounds(right)
             overlap = min(l1, r1) - max(l0, r0)
             short = min(l1 - l0, r1 - r0)
-            if overlap < 400.0 or overlap < 0.7 * short:
+            # 문 바로 옆 stub는 300 mm 부근인 경우가 있다(레이저실(7) 하단).
+            if overlap < 250.0 or overlap < 0.7 * short:
                 continue
             _paint(left)
             _paint(right)
             far_left = _far(left, sign)
             far_right = _far(right, sign)
-            if abs(abs(far_right - far_left) - thick) > 50.0:
+            far_gap = abs(far_right - far_left)
+            corner_pairs: list[tuple[float, float]] = []
+            if abs(far_gap - thick) <= 50.0:
+                corner_pairs.append((far_left, far_right))
+            if far_gap <= 50.0:
+                # 양쪽이 같은 높이로 끝나면 직각 이중면은 문 쪽 벽두께 띠에 있다.
+                base = (far_left + far_right) * 0.5
+                toward_door = -float(sign)
+                outer = base + toward_door * thick
+                inner = base + toward_door * 2.0 * thick
+                corner_pairs.append((outer, inner))
+                corner_pairs.append((inner, outer))
+            if not corner_pairs:
                 continue
             turn_sign = 1 if face1 >= face0 else -1
-            for corner_sign in (turn_sign, -turn_sign):
-                corner_left = _chain(cross, far_left, face0, corner_sign)
-                corner_right = _chain(cross, far_right, face1, corner_sign)
-                if not corner_left or not corner_right:
-                    continue
-                c0, c1 = _bounds(corner_left)
-                d0, d1 = _bounds(corner_right)
-                cover = min(c1, d1) - max(c0, d0)
-                shorter = min(c1 - c0, d1 - d0)
-                if cover < 800.0 or cover < 0.7 * shorter:
-                    continue
-                _paint(corner_left)
-                _paint(corner_right)
-                break
+            painted_corner = False
+            for coord0, coord1 in corner_pairs:
+                for corner_sign in (turn_sign, -turn_sign):
+                    corner_left = _chain(cross, coord0, face0, corner_sign)
+                    corner_right = _chain(cross, coord1, face1, corner_sign)
+                    if not corner_left or not corner_right:
+                        continue
+                    c0, c1 = _bounds(corner_left)
+                    d0, d1 = _bounds(corner_right)
+                    cover = min(c1, d1) - max(c0, d0)
+                    shorter = min(c1 - c0, d1 - d0)
+                    if cover < 800.0 or cover < 0.7 * shorter:
+                        continue
+                    _paint(corner_left)
+                    _paint(corner_right)
+                    painted_corner = True
+                    break
+                if painted_corner:
+                    break
     return n
 
 

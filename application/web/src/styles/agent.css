@@ -3036,6 +3036,126 @@ button.config-popover-choice.is-selected {
   background: #f85149;
 }
 
+.drawing-memo-modal {
+  width: min(960px, calc(100vw - 32px));
+  max-height: min(90vh, 900px);
+  overflow: auto;
+}
+
+.drawing-memo-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 4px;
+}
+
+.drawing-memo-header h2 {
+  margin: 0 0 6px;
+}
+
+.drawing-memo-add-btn {
+  flex-shrink: 0;
+  padding: 6px 14px;
+  font-size: 13px;
+}
+
+.drawing-memo-target {
+  margin: 0 0 12px;
+  font-size: 13px;
+  color: var(--text-muted);
+  word-break: break-all;
+}
+
+.drawing-memo-compose {
+  margin-bottom: 4px;
+}
+
+.drawing-memo-label {
+  display: block;
+  margin-bottom: 6px;
+  font-size: 12px;
+  color: var(--text-secondary, #8b93a3);
+}
+
+.drawing-memo-input {
+  width: 100%;
+  box-sizing: border-box;
+  margin-bottom: 12px;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-secondary, transparent);
+  color: var(--text-primary);
+  font: inherit;
+  font-size: 14px;
+  line-height: 1.5;
+  resize: vertical;
+  min-height: 120px;
+}
+
+.drawing-memo-input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.drawing-memo-history {
+  margin-top: 8px;
+  padding-top: 0;
+  border-top: none;
+}
+
+.drawing-memo-compose + .drawing-error,
+.drawing-memo-header + .drawing-error {
+  margin-top: 8px;
+}
+
+.drawing-memo-compose ~ .drawing-memo-history,
+.drawing-error ~ .drawing-memo-history {
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border);
+}
+
+.drawing-memo-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.drawing-memo-entry {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.drawing-memo-stamp {
+  display: block;
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.drawing-memo-item {
+  padding: 14px 16px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-secondary, transparent);
+}
+
+.drawing-memo-text {
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--text-primary);
+}
+
 .drawing-header-actions {
   margin-left: auto;
   display: flex;

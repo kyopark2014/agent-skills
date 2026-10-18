@@ -4,6 +4,8 @@
 XA-S-{N}F 평면 블록이 없는 도면용 폴백.
 modelspace와 얕은 INSERT에서 큰 축정렬 사각형과
 '1층 평면도', 'B1F', '지하1층' 같은 제목을 짝짓는다.
+제목이 도곽 바로 위(바깥)에 있어도 붙인다.
+'4~5층'은 시작 층, '옥탑지붕'은 PH로 읽는다.
 시트 블록(ooa-sheet 등) INSERT의 전역 bbox도 도곽으로 쓴다.
 건물 평면이 최상위 INSERT에만 있을 때는 그 INSERT의 기하 bbox로 층을 둔다.
 층 표기가 없고 시설 평면도 제목과 도면번호만 있으면 도면번호로 나눈다.
@@ -185,6 +187,13 @@ _MIN_INSERT_GEOM = 200
 _MIN_FRAME_GEOM = 30
 _INSERT_BBOX_SAMPLE = 40_000
 _INSERT_BBOX_TRIM = 0.02
+# 층 제목이 도곽 테두리 바로 위(약 12–20 m)에 있는 도면용.
+_TITLE_ABOVE_GAP_MM = 25_000.0
+_TITLE_ABOVE_BAND_MM = 5_000.0
+# 부모 격자 도곽 대비 이 비율 이상이면 실제 시트, 미만이면 복제 제목 칸.
+_SHEET_CHILD_AREA_RATIO = 0.15
+# 짧은 변 50 m 이상이면 면적 비율과 무관하게 실제 시트로 본다.
+_SHEET_MIN_EDGE_MM = 50_000.0
 
 
 def _is_construction_layer(name: str) -> bool:
@@ -243,15 +252,36 @@ def parse_floor_label(value: str) -> str | None:
     '1층 평면도'뿐 아니라 '1층 냉난방 평면도', 'EHP 1층 냉난방 제어 평면도',
     'EHP 지붕층 냉난방 철거 평면도'처럼 앞에 설비 코드가 있고
     층과 평면도 사이에 용도가 있는 제목도 인정한다.
+    '4~5층 평면도'처럼 한 시트에 묶인 층 구간은 시작 층(4F)으로 둔다.
+    '옥탑지붕 평면도'는 옥탑(PH)으로 둔다.
     """
     raw = _collapse_spaced_glyphs(plain_text(value))
     if not raw or len(raw) > 48:
         return None
     if re.fullmatch(r"[\d.,\s]+", raw):
         return None
-    if len(set(re.findall(r"(\d+)\s*층", raw))) > 1:
-        return None
     body = _strip_equipment_prefix(raw)
+    body = re.sub(r"(\d+)\s*[~\-～〜]\s*(\d+)", r"\1~\2", body)
+    range_hit = re.fullmatch(
+        rf"(?P<a>\d+)~(?P<b>\d+)\s*(?:층|F)(?:\s*{_PLAN_TAIL})?{_TRAIL_PAREN}$",
+        body,
+        re.I,
+    )
+    if range_hit:
+        return f"{int(range_hit.group('a'))}F"
+    range_titled = re.fullmatch(
+        rf"(?P<a>\d+)~(?P<b>\d+)\s*(?:층|F)(?:\s+\S+){{1,4}}\s*{_PLAN_TAIL}{_TRAIL_PAREN}$",
+        body,
+        re.I,
+    )
+    if range_titled:
+        return f"{int(range_titled.group('a'))}F"
+    if len(set(re.findall(r"(\d+)\s*층", body))) > 1:
+        return None
+    if re.fullmatch(rf"옥탑지붕(?:층)?(?:\s*{_PLAN_TAIL})?", body, re.I):
+        return "PH"
+    if re.fullmatch(rf"옥탑지붕(?:층)?(?:\s+\S+){{0,3}}\s*{_PLAN_TAIL}", body, re.I):
+        return "PH"
     if re.fullmatch(rf"(?:옥상|지붕층|지붕|ROOF|RF)(?:\s*{_PLAN_TAIL})?", body, re.I):
         return "RF"
     if re.fullmatch(rf"(?:옥상|지붕층|지붕|ROOF|RF)(?:\s+\S+){{1,4}}\s+{_PLAN_TAIL}", body, re.I):
@@ -568,6 +598,88 @@ def _inside(rect, x: float, y: float, pad: float = 0.0) -> bool:
     return rect[0] - pad <= x <= rect[2] + pad and rect[1] - pad <= y <= rect[3] + pad
 
 
+def _title_overhead(rect, x: float, y: float, max_gap: float) -> bool:
+    """제목이 도곽 바로 위(바깥)에 있고 x 구간이 겹치면 True."""
+    x0, _y0, x1, y1 = rect
+    if y < y1 or y > y1 + max_gap:
+        return False
+    slack = (x1 - x0) * 0.05
+    return x0 - slack <= x <= x1 + slack
+
+
+def _title_claimed_by_other(rect, x: float, y: float, rects) -> bool:
+    """제목이 다른 도곽에 더 잘 속하면 True.
+
+    복제 제목 칸(같거나 더 작은 도곽)이 제목을 품으면 가로채지 않는다.
+    격자 부모·세로로 긴 조각처럼 더 큰 도곽만 제목을 포함하면
+    아래쪽 실제 시트가 위쪽 매칭으로 가져갈 수 있다.
+    """
+    for other in rects:
+        if other == rect:
+            continue
+        if not _inside(other, x, y):
+            continue
+        if _contains(other, rect):
+            continue
+        if _area(other) > _area(rect) * 1.25:
+            continue
+        return True
+    return False
+
+
+def _hit_is_header_of_better_sheet(rect, hit: _TextHit, rects) -> bool:
+    """이 도곽 안의 제목이 더 작은 실제 시트의 머리글이면 True."""
+    for other in rects:
+        if other == rect:
+            continue
+        if _area(other) >= _area(rect):
+            continue
+        other_edge = min(other[2] - other[0], other[3] - other[1])
+        if other_edge < _SHEET_MIN_EDGE_MM:
+            continue
+        gap = min(_TITLE_ABOVE_GAP_MM, max(12_000.0, (other[3] - other[1]) * 0.3))
+        if _title_overhead(other, hit.x, hit.y, gap):
+            return True
+    return False
+
+
+def _hits_for_rect(rect, texts: list[_TextHit], rects) -> list[_TextHit]:
+    """도곽 안·가장자리·바로 위 제목을 모은다.
+
+    제목이 다른 비부모 도곽 안에 있으면 그 도곽에만 맡긴다.
+    세로로 긴 조각 안의 제목이 아래 시트의 머리글이면 그 시트에 맡긴다.
+    위쪽 제목이 여러 줄이면 가장 가까운 줄만 쓴다.
+    """
+    found = [
+        hit
+        for hit in texts
+        if _inside(rect, hit.x, hit.y) and not _hit_is_header_of_better_sheet(rect, hit, rects)
+    ]
+    if found:
+        return found
+    pad = min(rect[2] - rect[0], rect[3] - rect[1]) * 0.08
+    found = [
+        hit
+        for hit in texts
+        if _inside(rect, hit.x, hit.y, pad)
+        and not _title_claimed_by_other(rect, hit.x, hit.y, rects)
+        and not _hit_is_header_of_better_sheet(rect, hit, rects)
+    ]
+    if found:
+        return found
+    gap = min(_TITLE_ABOVE_GAP_MM, max(12_000.0, (rect[3] - rect[1]) * 0.3))
+    overhead = [
+        hit
+        for hit in texts
+        if _title_overhead(rect, hit.x, hit.y, gap)
+        and not _title_claimed_by_other(rect, hit.x, hit.y, rects)
+    ]
+    if not overhead:
+        return []
+    nearest_y = min(hit.y for hit in overhead)
+    return [hit for hit in overhead if hit.y <= nearest_y + _TITLE_ABOVE_BAND_MM]
+
+
 def _title_score(hit: _TextHit) -> float:
     bonus = 3.0 if re.search(r"평면|단면|입면|PLAN|FLOOR|SECTION|배치", hit.text, re.I) else 1.0
     return max(hit.height, 1.0) * bonus
@@ -624,12 +736,7 @@ def _frames_from(rects, texts: list[_TextHit], warnings: list[str]) -> list[Shee
     frames: list[SheetFrame] = []
     pending: list[tuple[tuple[float, float, float, float], list[str]]] = []
     for rect in rects:
-        hits = [t for t in texts if _inside(rect, t.x, t.y)]
-        if not hits:
-            pad = min(rect[2] - rect[0], rect[3] - rect[1]) * 0.08
-            hits = [t for t in texts if _inside(rect, t.x, t.y, pad) and not any(
-                _inside(other, t.x, t.y) for other in rects if other != rect
-            )]
+        hits = _hits_for_rect(rect, texts, rects)
         if not hits:
             continue
         ranked = sorted(hits, key=_title_score, reverse=True)
@@ -713,8 +820,12 @@ def _assign_sheet_ids(frames: list[SheetFrame], warnings: list[str]) -> list[She
 
     picked: list[SheetFrame] = []
     for group in clusters:
+        # 격자 부모·실제 시트가 한 클러스터면 시트를 남긴다(면적 최대가 아님).
+        resolved = _prefer_largest_same_floor(group)
+        if not resolved:
+            continue
         best = max(
-            group,
+            resolved,
             key=lambda frame: (
                 _title_score(_TextHit(frame.title, frame.floor, 0, 0, frame.title_height)),
                 _area(frame.bbox),
@@ -746,16 +857,7 @@ def _assign_sheet_ids(frames: list[SheetFrame], warnings: list[str]) -> list[She
 
 
 def _hits_inside(rect, hits: list[_TextHit], rects) -> list[_TextHit]:
-    found = [hit for hit in hits if _inside(rect, hit.x, hit.y)]
-    if found:
-        return found
-    pad = min(rect[2] - rect[0], rect[3] - rect[1]) * 0.08
-    return [
-        hit
-        for hit in hits
-        if _inside(rect, hit.x, hit.y, pad)
-        and not any(_inside(other, hit.x, hit.y) for other in rects if other != rect)
-    ]
+    return _hits_for_rect(rect, hits, rects)
 
 
 def _frames_from_plan_sheets(
@@ -1371,7 +1473,11 @@ def _frame_geometry_count(doc, bbox: tuple[float, float, float, float]) -> int:
 def _drop_empty_frames(
     doc, frames: list[SheetFrame], warnings: list[str]
 ) -> list[SheetFrame]:
-    """기하·INSERT가 거의 없는 도곽(복제 제목 칸 등)을 뺀다."""
+    """기하·INSERT가 거의 없는 도곽(복제 제목 칸 등)을 뺀다.
+
+    기하가 있는 도곽이 하나라도 있으면 빈 칸만 제외한다.
+    전부 비어 있으면(시설 평면도·PDF 임포트 등) 도곽은 그대로 둔다.
+    """
     if not frames:
         return frames
     kept: list[SheetFrame] = []
@@ -1404,10 +1510,21 @@ def _base_floor_token(floor: str) -> str:
     return base
 
 
-def _prefer_largest_same_floor(frames: list[SheetFrame]) -> list[SheetFrame]:
-    """같은 층이 큰 시트와 작은 칸에 동시에 있으면 큰 도곽만 남긴다.
+def _is_substantial_sheet_child(
+    child: tuple[float, float, float, float],
+    parent: tuple[float, float, float, float],
+) -> bool:
+    """부모 격자 안의 자식이 실제 시트인지(복제 제목 칸이 아닌지) 본다."""
+    if _area(child) >= _area(parent) * _SHEET_CHILD_AREA_RATIO:
+        return True
+    return min(child[2] - child[0], child[3] - child[1]) >= _SHEET_MIN_EDGE_MM
 
-    빈 복제 제목 칸이 1F_2 로 승격되지 않게 한다.
+
+def _prefer_largest_same_floor(frames: list[SheetFrame]) -> list[SheetFrame]:
+    """같은 층이 겹치면 실제 시트 도곽을 남긴다.
+
+    복제 제목용 작은 칸은 버리고 시트를 쓴다.
+    격자 부모 도곽 안의 실제 층 시트는 부모 대신 자식을 남긴다.
     겹치지 않는 같은 층(서로 다른 동)은 그대로 둔다.
     """
     if len(frames) < 2:
@@ -1416,12 +1533,39 @@ def _prefer_largest_same_floor(frames: list[SheetFrame]) -> list[SheetFrame]:
     kept: list[SheetFrame] = []
     for frame in ordered:
         base = _base_floor_token(frame.floor)
-        if any(
-            _base_floor_token(prev.floor) == base
-            and (_contains(prev.bbox, frame.bbox) or _iou(prev.bbox, frame.bbox) >= 0.15)
-            for prev in kept
-        ):
+        dominated = False
+        replace: list[int] = []
+        for index, prev in enumerate(kept):
+            if _base_floor_token(prev.floor) != base:
+                continue
+            nested = _contains(prev.bbox, frame.bbox) or _contains(frame.bbox, prev.bbox)
+            if not nested and _iou(prev.bbox, frame.bbox) < 0.15:
+                continue
+            if _contains(prev.bbox, frame.bbox):
+                if _is_substantial_sheet_child(frame.bbox, prev.bbox):
+                    replace.append(index)
+                else:
+                    dominated = True
+                continue
+            if _contains(frame.bbox, prev.bbox):
+                if _is_substantial_sheet_child(prev.bbox, frame.bbox):
+                    dominated = True
+                else:
+                    replace.append(index)
+                continue
+            # 겹치기만 하는 경우: 짧은 변이 50 m 이상인 쪽(실제 시트)을 남긴다.
+            frame_edge = min(frame.bbox[2] - frame.bbox[0], frame.bbox[3] - frame.bbox[1])
+            prev_edge = min(prev.bbox[2] - prev.bbox[0], prev.bbox[3] - prev.bbox[1])
+            if frame_edge >= _SHEET_MIN_EDGE_MM and (
+                prev_edge < _SHEET_MIN_EDGE_MM or _area(frame.bbox) < _area(prev.bbox)
+            ):
+                replace.append(index)
+                continue
+            dominated = True
+        if dominated:
             continue
+        for index in sorted(replace, reverse=True):
+            kept.pop(index)
         kept.append(frame)
     return kept
 

@@ -22,6 +22,8 @@ from application.api.routes_drawings import (
     list_floor_labels,
     remember_drawing_task,
     set_drawing_rating,
+    list_drawing_memos,
+    add_drawing_memo,
     undo_manual_floor_label,
 )
 
@@ -438,6 +440,41 @@ class DrawingIdTests(unittest.TestCase):
                 after["drawings"][1]["updated_at"],
                 "2026-10-15T02:00:00+09:00",
             )
+
+    def test_drawing_memos_append_newest_first(self):
+        with tempfile.TemporaryDirectory() as raw:
+            artifacts = Path(raw)
+            drawing_id = "hotel"
+            (artifacts / drawing_id).mkdir(parents=True)
+            (artifacts / "drawing_list.json").write_text(
+                json.dumps(
+                    {
+                        "drawings": [
+                            {
+                                "drawing_id": drawing_id,
+                                "folder": drawing_id,
+                                "source_filename": "hotel.dxf",
+                                "status": "ready",
+                                "updated_at": "2026-10-15T02:00:00+09:00",
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            empty = list_drawing_memos(artifacts, drawing_id)
+            self.assertEqual(empty["memos"], [])
+            first = add_drawing_memo(artifacts, drawing_id, "첫 메모")
+            self.assertEqual(first["memo"]["text"], "첫 메모")
+            second = add_drawing_memo(artifacts, drawing_id, "두번째 메모")
+            self.assertEqual(second["memos"][0]["text"], "두번째 메모")
+            self.assertEqual(second["memos"][1]["text"], "첫 메모")
+            listed = list_drawing_memos(artifacts, drawing_id)
+            self.assertEqual([item["text"] for item in listed["memos"]], ["두번째 메모", "첫 메모"])
+            after = list_drawings(artifacts)
+            self.assertEqual(after["drawings"][0]["updated_at"], "2026-10-15T02:00:00+09:00")
+            with self.assertRaises(HTTPException):
+                add_drawing_memo(artifacts, drawing_id, "   ")
 
     def test_drawing_list_includes_source_size_bytes(self):
         with tempfile.TemporaryDirectory() as raw:
