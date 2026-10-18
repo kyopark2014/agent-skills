@@ -66,6 +66,33 @@ def drop_off_layer_hidden(doc: Drawing, entities: list) -> tuple[list, int]:
     return kept, skipped
 
 
+# 구조 축선·버블·축치수. 'A-ST-AXIS-CEN', 'A-ST-AXIS-BUB', 'AXIS-DIM' 등.
+_AXIS_LAYER = re.compile(
+    r"(?:^|[^A-Za-z0-9])(?:A[_-]?)?ST[_-]?AXIS|"
+    r"AXIS[_-]?(?:CEN|CENTER|BUB|BUBBLE|DIM)(?:$|[^A-Za-z0-9])|"
+    r"축선|축버블|구조축",
+    re.IGNORECASE,
+)
+
+
+def is_axis_layer(name: str) -> bool:
+    """구조 그리드 축선·버블·축치수 레이어. 벽·중심선(G-CEN)과는 별개."""
+    return bool(_AXIS_LAYER.search(name or ""))
+
+
+def drop_axis_layers(entities: list) -> tuple[list, int]:
+    """floor_original에서 구조 축 레이어 엔티티를 뺀다."""
+    kept = []
+    skipped = 0
+    for entity in entities:
+        layer = str(getattr(entity.dxf, "layer", "") or "")
+        if is_axis_layer(layer):
+            skipped += 1
+            continue
+        kept.append(entity)
+    return kept, skipped
+
+
 def is_arch_layer(name: str) -> bool:
     """벽·실명에 쓰는 건축 레이어. 등고(BG)·중심선(CEN)은 제외."""
     upper = name.upper()

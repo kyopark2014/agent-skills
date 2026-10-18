@@ -41,7 +41,7 @@ LLM은 **UI에서 사용자가 선택한 모델**이다. 에이전트가 모델�
 4. **스크립트 절대경로** — `$WORKING_DIR/skills/drawing-llmextractor/scripts/` 또는 이 SKILL.md 옆 `scripts/` 절대경로. cwd 상대 `skills/...` 금지.
 5. **Python** — 비대화형 bash의 `python3`는 Xcode 3.9인 경우가 있다. 그 환경에는 `langchain_community`가 없어 `import chat`이 실패한다. **`python3.13`으로 실행**한다. 스크립트도 패키지가 없으면 python3.13으로 다시 실행한다.
 6. **한 장씩** — 이미지 여러 장이면 파일당 bash 1회. 한 명령에 루프로 몰지 않는다.
-7. **bash 300초** — `bash` 도구는 300초가 지나면 `TimeoutExpired`로 자식 프로세스를 죽인다. 층 도면은 조각마다 Vision 호출이라 5분을 넘긴다. **포그라운드로 기다리지 말고** `nohup`으로 로그 파일에 남긴 뒤, 짧은 `tail`로 진행만 확인한다. `2>&1 | tail`은 프로세스가 끝나야 출력이 나오므로 쓰지 않는다.
+7. **bash 3600초** — `bash` 도구는 3600초가 지나면 `TimeoutExpired`로 자식 프로세스를 죽인다. 층 도면 Vision이 한 시간을 넘기면 **포그라운드로 기다리지 말고** `nohup`으로 로그 파일에 남긴 뒤, 짧은 `tail`로 진행만 확인한다. `2>&1 | tail`은 프로세스가 끝나야 출력이 나오므로 쓰지 않는다.
 8. 응답은 **한국어**. 경로·JSON 키는 영문 유지.
 
 ## Script Location
@@ -61,7 +61,7 @@ nohup "$PY" "$SCRIPTS/extract_objects.py" \
   --image "/absolute/path/to/drawing.png" \
   --topic "기둥" > "$LOG" 2>&1 &
 echo "started $!"
-# 진행 확인은 짧게. sleep 240 처럼 300초에 가까운 대기는 TimeoutExpired가 난다.
+# 진행 확인은 짧게. sleep으로 bash 한도를 채우지 않는다.
 tail -n 20 "$LOG"
 ```
 

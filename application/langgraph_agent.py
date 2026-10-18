@@ -1004,7 +1004,7 @@ def upload_file_to_s3(filepath: str) -> str:
     except Exception as e:
         return f"Upload failed: {str(e)}"
 
-_BASH_TIMEOUT_SECONDS = 300
+_BASH_TIMEOUT_SECONDS = 3600
 
 
 def _bash_cancel_key() -> str | None:
@@ -1035,7 +1035,7 @@ def bash(command: str) -> str:
     """Execute a bash command and return the result.
 
     The command runs in the foreground in its own process group. Stop and the
-    300s limit kill that group, including children. Do not use nohup, `&`, or
+    3600s limit kill that group, including children. Do not use nohup, `&`, or
     `find /`.
     """
     logger.info(f"###### bash: {command} ######")

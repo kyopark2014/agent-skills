@@ -25,7 +25,7 @@ router = APIRouter(prefix="/api/tasks", tags=["chat"])
 SSE_HEARTBEAT_INTERVAL_SECONDS = 15
 # Idle timeout: no agent queue output for this long → treat as stuck.
 # (Previously this was a wall-clock limit from stream start.)
-AGENT_STREAM_TIMEOUT_SECONDS = 1200
+AGENT_STREAM_TIMEOUT_SECONDS = 3600
 # Absolute safety cap for a single chat turn (4 hours).
 AGENT_STREAM_MAX_SECONDS = 14400
 # After SSE times out / client disconnects, wait this long for the agent
