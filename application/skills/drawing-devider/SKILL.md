@@ -155,7 +155,7 @@ echo "PID=$! LOG=$LOG"
 성공 시 `floors/12F/floor_original.dxf` / `.png` / `_meta.json`이 생긴다. 같은 파일이 있으면 덮어쓴다.  
 도곽 안에 건축 레이어(`ARCH`, `*_BG`·`*_CEN` 제외)가 있으면 그 선·실명과 문 스윙만 남긴다. 그 레이어의 창선은 벽과 같이 남긴다. 가구·카세트 배관·등고선은 넣지 않는다. 다만 제목에 `냉난방`·`배관`·`전열` 등이 있거나 INSERT 접미로만 보완한 설비 시트는 ARCH 필터를 쓰지 않고 도곽 안 전체 기하를 남긴다. 이 결과도 파일명은 `floor_original.png` 이다. 제목 TEXT가 없는 큰 Defpoints 도곽은 `BASEMENT FLOOR PLAN` 등 INSERT 접미로 `B1F` 등을 보완한다. 전 층 재추출 시 이번 목록에 없는 옛 `sheet_XX` 폴더는 지운다.  
 꺼진 레이어 위의 숨은선(`HIDDEN`, `HID2`, `HID` 등)은 뺀다. 켜진 레이어의 점선과 실선은 남긴다.  
-구조 축 레이어(`A-ST-AXIS-CEN`, `A-ST-AXIS-BUB`, `A-ST-AXIS-DIM`, `축선` 등)는 `floor_original`에서 뺀다 (`lib_structure.is_axis_layer` / `drop_axis_layers`).  
+구조 축 레이어(`A-ST-AXIS-CEN`, `A-ST-AXIS-BUB`, `A-ST-AXIS-DIM`, `축선`, 단독 `CEN` 등)는 `floor_original`에서 뺀다 (`lib_structure.is_axis_layer` / `drop_axis_layers`).  
 이름 패턴에 안 걸려도 **축선이 PNG에 남으면** 원본 DXF 레이어를 **특성으로 검토**한 뒤, 후보를 `is_axis_layer`에 반영하고 해당 층을 재추출한다. 이름만 보고 추측해 벽을 지우지 않는다.  
 다층이면 **멈추지 말고** 다음 층을 바로 추출한다. 사용자 허락을 받지 않는다.  
 포그라운드로 `python3 …extract_2d.py`를 붙잡고 기다리지 않는다(에이전트 bash ~3600초 timeout이어도 대용량은 백그라운드).
@@ -166,7 +166,7 @@ echo "PID=$! LOG=$LOG"
 
 | 신호 | 축선(제거 후보) | 벽·중심선(유지) |
 |------|-----------------|-----------------|
-| 레이어 이름 | `*AXIS*`, `축선`, `축버블`, `구조축`, 단독 `CEN` | `G-CEN`, `ARCH_*_CEN`, `*_CEN`이지만 짧은 벽 중심선 |
+| 레이어 이름 | `*AXIS*`, `축선`, `축버블`, `구조축`, 단독 `CEN`(이미 `is_axis_layer` 매칭) | `G-CEN`, `ARCH_*_CEN`, `*_CEN`이지만 짧은 벽 중심선 |
 | linetype | `CENTER` / `CENTER2` / `CENTER5` 등 | `Continuous`, `HIDDEN*` |
 | 기하 | 층 span에 가까운 **긴 직교 LINE**, x/y가 **규칙 간격**(예: 6000·6300 mm) | 짧은 선분·닫힌 폴리·벽 두께 쌍 |
 | 레이어 상태 | frozen·잠금인 경우 많음(필수는 아님) | 보통 켜짐 |

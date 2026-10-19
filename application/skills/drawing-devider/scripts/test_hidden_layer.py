@@ -43,8 +43,11 @@ class AxisLayerTests(unittest.TestCase):
         self.assertTrue(lib_structure.is_axis_layer("A-ST-AXIS-DIM"))
         self.assertTrue(lib_structure.is_axis_layer("AXIS-BUB"))
         self.assertTrue(lib_structure.is_axis_layer("축선"))
+        self.assertTrue(lib_structure.is_axis_layer("CEN"))
+        self.assertTrue(lib_structure.is_axis_layer("cen"))
         self.assertFalse(lib_structure.is_axis_layer("A-ST-CONC"))
         self.assertFalse(lib_structure.is_axis_layer("G-CEN"))
+        self.assertFalse(lib_structure.is_axis_layer("ARCH_CEN"))
         self.assertFalse(lib_structure.is_axis_layer("A-WALL"))
 
     def test_drop_axis_layers(self):
@@ -52,9 +55,10 @@ class AxisLayerTests(unittest.TestCase):
         msp = doc.modelspace()
         axis = msp.add_line((0, 0), (0, 1000), dxfattribs={"layer": "A-ST-AXIS-CEN"})
         bub = msp.add_text("X7", dxfattribs={"layer": "A-ST-AXIS-BUB", "insert": (0, 0), "height": 100})
+        cen = msp.add_line((5, 0), (5, 1000), dxfattribs={"layer": "CEN"})
         wall = msp.add_line((10, 0), (10, 1000), dxfattribs={"layer": "A-WALL"})
-        kept, skipped = lib_structure.drop_axis_layers([axis, bub, wall])
-        self.assertEqual(skipped, 2)
+        kept, skipped = lib_structure.drop_axis_layers([axis, bub, cen, wall])
+        self.assertEqual(skipped, 3)
         self.assertEqual(kept, [wall])
 
 

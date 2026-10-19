@@ -66,17 +66,19 @@ def drop_off_layer_hidden(doc: Drawing, entities: list) -> tuple[list, int]:
     return kept, skipped
 
 
-# 구조 축선·버블·축치수. 'A-ST-AXIS-CEN', 'A-ST-AXIS-BUB', 'AXIS-DIM' 등.
+# 구조 축선·버블·축치수. 'A-ST-AXIS-CEN', 'A-ST-AXIS-BUB', 'AXIS-DIM', 단독 'CEN' 등.
+# 단독 CEN은 CENTER* 격자 축선(예: 전남대 예술대). G-CEN·*_CEN 벽 중심선은 제외.
 _AXIS_LAYER = re.compile(
     r"(?:^|[^A-Za-z0-9])(?:A[_-]?)?ST[_-]?AXIS|"
     r"AXIS[_-]?(?:CEN|CENTER|BUB|BUBBLE|DIM)(?:$|[^A-Za-z0-9])|"
-    r"축선|축버블|구조축",
+    r"축선|축버블|구조축|"
+    r"^CEN$",
     re.IGNORECASE,
 )
 
 
 def is_axis_layer(name: str) -> bool:
-    """구조 그리드 축선·버블·축치수 레이어. 벽·중심선(G-CEN)과는 별개."""
+    """구조 그리드 축선·버블·축치수 레이어. 벽·중심선(G-CEN·*_CEN)과는 별개."""
     return bool(_AXIS_LAYER.search(name or ""))
 
 
