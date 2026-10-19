@@ -121,6 +121,8 @@ export function DrawingListView({
   const [memoText, setMemoText] = useState("");
   const [memoLoading, setMemoLoading] = useState(false);
   const [memoSaving, setMemoSaving] = useState(false);
+  const [memoDeletingId, setMemoDeletingId] = useState<string | null>(null);
+  const [memoEditingId, setMemoEditingId] = useState<string | null>(null);
   const [memoComposing, setMemoComposing] = useState(false);
   const [memoError, setMemoError] = useState<string | null>(null);
   const [query, setQuery] = useState("");
@@ -169,13 +171,27 @@ export function DrawingListView({
     setMemoError(null);
     setMemoLoading(false);
     setMemoSaving(false);
+    setMemoDeletingId(null);
+    setMemoEditingId(null);
     setMemoComposing(false);
   }
 
   function cancelMemoCompose() {
+    if (memos.length === 0) {
+      closeMemo();
+      return;
+    }
     setMemoComposing(false);
+    setMemoEditingId(null);
     setMemoText("");
     setMemoError(null);
+  }
+
+  function startMemoEdit(memo: DrawingMemo) {
+    setMemoError(null);
+    setMemoEditingId(memo.id);
+    setMemoText(memo.text);
+    setMemoComposing(true);
   }
 
   async function openMemo(drawing: DrawingSummary) {
@@ -183,11 +199,15 @@ export function DrawingListView({
     setMemos([]);
     setMemoText("");
     setMemoError(null);
-    setMemoComposing(false);
+    setMemoEditingId(null);
+    // Empty drawings open straight into compose; list says so via memo_count.
+    setMemoComposing((drawing.memo_count ?? 0) === 0);
     setMemoLoading(true);
     try {
       const data = await api.listDrawingMemos(drawing.drawing_id);
-      setMemos(data.memos ?? []);
+      const next = data.memos ?? [];
+      setMemos(next);
+      setMemoComposing(next.length === 0);
     } catch (err) {
       setMemoError(err instanceof Error ? err.message : "메모를 불러오지 못했습니다.");
     } finally {
@@ -206,14 +226,55 @@ export function DrawingListView({
     setMemoSaving(true);
     setMemoError(null);
     try {
-      const data = await api.addDrawingMemo(drawing.drawing_id, text);
-      setMemos(data.memos ?? []);
+      const data = memoEditingId
+        ? await api.updateDrawingMemo(drawing.drawing_id, memoEditingId, text)
+        : await api.addDrawingMemo(drawing.drawing_id, text);
+      const next = data.memos ?? [];
+      setMemos(next);
       setMemoText("");
+      setMemoEditingId(null);
       setMemoComposing(false);
+      setDrawings((prev) =>
+        prev.map((item) =>
+          item.drawing_id === drawing.drawing_id
+            ? { ...item, memo_count: next.length }
+            : item,
+        ),
+      );
     } catch (err) {
       setMemoError(err instanceof Error ? err.message : "메모를 저장하지 못했습니다.");
     } finally {
       setMemoSaving(false);
+    }
+  }
+
+  async function deleteMemo(memoId: string) {
+    const drawing = memoDrawing;
+    if (!drawing || !memoId) return;
+    setMemoDeletingId(memoId);
+    setMemoError(null);
+    try {
+      const data = await api.deleteDrawingMemo(drawing.drawing_id, memoId);
+      const next = data.memos ?? [];
+      setMemos(next);
+      setDrawings((prev) =>
+        prev.map((item) =>
+          item.drawing_id === drawing.drawing_id
+            ? { ...item, memo_count: next.length }
+            : item,
+        ),
+      );
+      if (memoEditingId === memoId) {
+        setMemoEditingId(null);
+        setMemoText("");
+      }
+      if (next.length === 0) {
+        setMemoComposing(true);
+      }
+    } catch (err) {
+      setMemoError(err instanceof Error ? err.message : "메모를 삭제하지 못했습니다.");
+    } finally {
+      setMemoDeletingId(null);
     }
   }
 
@@ -411,7 +472,9 @@ export function DrawingListView({
                       </select>
                       <button
                         type="button"
-                        className="drawing-list-btn"
+                        className={`drawing-list-btn${
+                          (drawing.memo_count ?? 0) > 0 ? " is-memo-present" : ""
+                        }`}
                         disabled={busy}
                         onClick={() => void openMemo(drawing)}
                       >
@@ -514,6 +577,8 @@ export function DrawingListView({
                       disabled={memoLoading}
                       onClick={() => {
                         setMemoError(null);
+                        setMemoEditingId(null);
+                        setMemoText("");
                         setMemoComposing(true);
                       }}
                     >
@@ -524,7 +589,7 @@ export function DrawingListView({
                 {memoComposing ? (
                   <div className="drawing-memo-compose">
                     <label className="drawing-memo-label" htmlFor="drawing-memo-input">
-                      새 메모
+                      {memoEditingId ? "메모 수정" : "새 메모"}
                     </label>
                     <textarea
                       id="drawing-memo-input"
@@ -571,9 +636,29 @@ export function DrawingListView({
                     <ul className="drawing-memo-list">
                       {memos.map((memo) => (
                         <li key={memo.id} className="drawing-memo-entry">
-                          <time className="drawing-memo-stamp" dateTime={memo.created_at}>
-                            {formatListStamp(memo.created_at)}
-                          </time>
+                          <div className="drawing-memo-entry-header">
+                            <time className="drawing-memo-stamp" dateTime={memo.created_at}>
+                              {formatListStamp(memo.created_at)}
+                            </time>
+                            <div className="drawing-memo-entry-actions">
+                              <button
+                                type="button"
+                                className="drawing-list-btn drawing-memo-delete-btn"
+                                disabled={memoSaving || memoDeletingId !== null}
+                                onClick={() => startMemoEdit(memo)}
+                              >
+                                수정
+                              </button>
+                              <button
+                                type="button"
+                                className="drawing-list-btn drawing-memo-delete-btn"
+                                disabled={memoSaving || memoDeletingId !== null}
+                                onClick={() => void deleteMemo(memo.id)}
+                              >
+                                {memoDeletingId === memo.id ? "삭제 중…" : "삭제"}
+                              </button>
+                            </div>
+                          </div>
                           <div className="drawing-memo-item">
                             <p className="drawing-memo-text">{memo.text}</p>
                           </div>

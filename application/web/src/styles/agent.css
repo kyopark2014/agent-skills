@@ -3016,6 +3016,16 @@ button.config-popover-choice.is-selected {
   color: var(--accent);
 }
 
+.drawing-list-btn.is-memo-present {
+  color: #4a90c8;
+  border-color: #4a90c8;
+}
+
+.drawing-list-btn.is-memo-present:hover:not(:disabled) {
+  color: #6aaee0;
+  border-color: #6aaee0;
+}
+
 .drawing-list-btn:disabled {
   opacity: 0.45;
   cursor: not-allowed;
@@ -3130,6 +3140,26 @@ button.config-popover-choice.is-selected {
   display: flex;
   flex-direction: column;
   gap: 6px;
+}
+
+.drawing-memo-entry-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.drawing-memo-entry-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.drawing-memo-delete-btn {
+  flex-shrink: 0;
+  padding: 4px 8px;
+  font-size: 11px;
 }
 
 .drawing-memo-stamp {
@@ -3691,6 +3721,10 @@ button.config-popover-choice.is-selected {
   color: #8b93a3;
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
+}
+
+.drawing-legend-item.is-exclude .drawing-legend-count {
+  color: #c44848;
 }
 
 .drawing-legend-empty {

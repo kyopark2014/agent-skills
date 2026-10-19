@@ -28,6 +28,7 @@ router = APIRouter(prefix="/api/drawings", tags=["drawings"])
 # Hangul syllables (NFC) plus the previous ASCII set. Path separators and dots stay out.
 _ID_RE = re.compile(r"^[A-Za-z0-9가-힣][A-Za-z0-9가-힣_-]{0,80}$")
 _UNNAMED_RE = re.compile(r"^무명-(\d+)$")
+_EXCLUDE_RE = re.compile(r"^제외-(\d+)$")
 _IMAGE_KINDS = {
     "original": "floor_original.png",
     "wall": "floor_wall_original.png",
@@ -153,6 +154,7 @@ class ManualLabelBody(BaseModel):
     """Point click (x_px,y_px) or drag rectangle (x0/y0 → x1/y1) in PNG pixels.
 
     Point mode ``boundary``: ``wall`` (WALL 레이어 실) or ``entity`` (모든 선 엔티티).
+    ``kind``: ``unnamed`` (무명-N) or ``exclude`` (제외-N, 면적합계에서 제외).
     """
 
     x_px: float | None = None
@@ -162,6 +164,7 @@ class ManualLabelBody(BaseModel):
     x1_px: float | None = None
     y1_px: float | None = None
     boundary: str | None = None
+    kind: str | None = None
 
 
 _RATING_VALUES = frozenset({"pending", "good", "neutral", "bad", "review", "confirmed", "retest"})
@@ -361,6 +364,7 @@ def list_drawings(artifacts: Path) -> dict:
                 drawing_id=item["drawing_id"],
                 source_filename=item["source_filename"],
             )
+            item["memo_count"] = _memo_count(artifacts, item["folder"])
             drawings.append(item)
     drawings.sort(key=_list_stamp, reverse=True)
     return {"drawings": drawings}
@@ -844,10 +848,16 @@ def list_floor_labels(artifacts: Path, drawing_id: str, floor: str) -> dict:
     labels.sort(key=lambda row: (-float(row["area_m2"]), str(row["label"])))
 
     unique_faces: dict[str, float] = {}
+    exclude_faces: dict[str, float] = {}
     for row in labels:
+        target = (
+            exclude_faces
+            if _is_exclude_area_label(str(row.get("label") or ""))
+            else unique_faces
+        )
         for face in row["faces"]:
-            unique_faces.setdefault(face["id"], float(face["area_m2"]))
-    unique_area = round(sum(unique_faces.values()), 4)
+            target.setdefault(face["id"], float(face["area_m2"]))
+    unique_area = round(sum(unique_faces.values()) - sum(exclude_faces.values()), 4)
     reported = unique_area
     if detected is not None and modified is None and pending is None:
         try:
@@ -871,15 +881,32 @@ def list_floor_labels(artifacts: Path, drawing_id: str, floor: str) -> dict:
     return payload
 
 
-def _next_unnamed_label(existing: list) -> str:
+def _next_numbered_label(existing: list, pattern: re.Pattern[str], prefix: str) -> str:
     max_n = 0
     for item in existing:
         if not isinstance(item, dict):
             continue
-        match = _UNNAMED_RE.match(str(item.get("label") or "").strip())
+        match = pattern.match(str(item.get("label") or "").strip())
         if match:
             max_n = max(max_n, int(match.group(1)))
-    return f"무명-{max_n + 1}"
+    return f"{prefix}-{max_n + 1}"
+
+
+def _next_unnamed_label(existing: list) -> str:
+    return _next_numbered_label(existing, _UNNAMED_RE, "무명")
+
+
+def _next_exclude_label(existing: list) -> str:
+    return _next_numbered_label(existing, _EXCLUDE_RE, "제외")
+
+
+def _is_exclude_area_label(label: str) -> bool:
+    return bool(_EXCLUDE_RE.match(str(label or "").strip()))
+
+
+def _normalize_manual_label_kind(kind: str | None) -> str:
+    text = str(kind or "unnamed").strip().lower()
+    return text if text in ("unnamed", "exclude") else "unnamed"
 
 
 def _rgb_for_index(index: int) -> list[int]:
@@ -993,16 +1020,19 @@ def add_manual_floor_label(
     x1_px: float | None = None,
     y1_px: float | None = None,
     boundary: str | None = None,
+    kind: str | None = None,
 ) -> dict:
-    """Append ``무명-N`` to pending.
+    """Append ``무명-N`` or ``제외-N`` to pending.
 
     Point click: wall- or entity-bounded face. Rect drag: free-form rectangle.
+    ``kind=exclude`` names the label ``제외-N`` (omitted from area totals).
     """
     catalog, floor_dir = _floor_dir(artifacts, drawing_id, floor)
     overlay_tf = _load_original_overlay(floor_dir)
     if overlay_tf is None:
         raise HTTPException(status_code=400, detail="좌표 변환용 메타를 찾지 못했습니다.")
 
+    label_kind = _normalize_manual_label_kind(kind)
     validated = (floor_dir / _VALIDATED_DXF).resolve()
     # validated DXF is only required for click-to-face; rect mode needs meta only.
     rect_mode = None not in (x0_px, y0_px, x1_px, y1_px)
@@ -1059,6 +1089,7 @@ def add_manual_floor_label(
             area=area,
             width_m=(x_hi - x_lo) / 1000.0,
             height_m=(y_hi - y_lo) / 1000.0,
+            kind=label_kind,
         )
 
     assert x_px is not None and y_px is not None
@@ -1072,7 +1103,7 @@ def add_manual_floor_label(
     if face_boundary not in ("wall", "entity"):
         face_boundary = "entity"
     print(
-        f"[manual-label] {drawing_id}/{floor} boundary={face_boundary} "
+        f"[manual-label] {drawing_id}/{floor} kind={label_kind} boundary={face_boundary} "
         f"px=({x_px:.1f},{y_px:.1f}) mm=({x_mm:.1f},{y_mm:.1f})",
         flush=True,
     )
@@ -1107,6 +1138,7 @@ def add_manual_floor_label(
         column_protrusion_m2=float(found.get("column_protrusion_m2") or 0),
         drawing_area_m2=found.get("drawing_area_m2"),
         boundary_doors=found.get("boundary_doors") or [],
+        kind=label_kind,
     )
 
 
@@ -1125,6 +1157,7 @@ def _append_pending_unnamed(
     column_protrusion_m2: float = 0.0,
     drawing_area_m2: object = None,
     boundary_doors: list | None = None,
+    kind: str | None = None,
 ) -> dict:
     validated = floor_dir / _VALIDATED_DXF
     pending_path = _pending_path(floor_dir)
@@ -1149,7 +1182,13 @@ def _append_pending_unnamed(
         item for item in (modified or {}).get("labels") or [] if isinstance(item, dict)
     ]
     pending_labels = [item for item in pending.get("labels") or [] if isinstance(item, dict)]
-    name = _next_unnamed_label(modified_labels + pending_labels)
+    label_kind = _normalize_manual_label_kind(kind)
+    existing_named = modified_labels + pending_labels
+    name = (
+        _next_exclude_label(existing_named)
+        if label_kind == "exclude"
+        else _next_unnamed_label(existing_named)
+    )
     color = _rgb_for_index(len(modified_labels) + len(pending_labels))
     area = round(float(area), 4)
     instance = {
@@ -1408,6 +1447,13 @@ def _load_memos(path: Path) -> list[dict]:
     return out
 
 
+def _memo_count(artifacts: Path, folder: str) -> int:
+    try:
+        return len(_load_memos(_memo_path(artifacts, folder)))
+    except HTTPException:
+        return 0
+
+
 def _write_memos(path: Path, memos: list[dict]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = {"memos": memos}
@@ -1477,6 +1523,78 @@ def add_drawing_memo(artifacts: Path, drawing_id: str, text: str) -> dict:
     }
 
 
+def update_drawing_memo(artifacts: Path, drawing_id: str, memo_id: str, text: str) -> dict:
+    """Update one memo's text. Does not bump drawing list order or reorder memos."""
+    drawing_id = _safe_id(drawing_id) or ""
+    memo_id = str(memo_id or "").strip()
+    if not drawing_id:
+        raise HTTPException(status_code=400, detail="Invalid drawing id")
+    if not memo_id or not re.fullmatch(r"[0-9a-fA-F]{8,64}", memo_id):
+        raise HTTPException(status_code=400, detail="Invalid memo id")
+    cleaned = unicodedata.normalize("NFC", str(text or "")).strip()
+    if not cleaned:
+        raise HTTPException(status_code=400, detail="메모 내용을 입력하세요.")
+    if len(cleaned) > _MEMO_TEXT_MAX:
+        raise HTTPException(
+            status_code=400,
+            detail=f"메모는 {_MEMO_TEXT_MAX}자 이하여야 합니다.",
+        )
+    catalog = load_drawing_catalog(artifacts)
+    entry = _find_entry(catalog, drawing_id)
+    if entry is None:
+        raise HTTPException(status_code=404, detail="Drawing not found")
+    summary = _summary(entry, artifacts)
+    if summary is None:
+        raise HTTPException(status_code=400, detail="Invalid drawing id")
+    path = _memo_path(artifacts, summary["folder"])
+    memos = _load_memos(path)
+    updated = None
+    for item in memos:
+        if item["id"] == memo_id:
+            item["text"] = cleaned
+            updated = item
+            break
+    if updated is None:
+        raise HTTPException(status_code=404, detail="Memo not found")
+    _write_memos(path, memos)
+    return {
+        "ok": True,
+        "drawing_id": drawing_id,
+        "folder": summary["folder"],
+        "memo": updated,
+        "memos": memos,
+    }
+
+
+def delete_drawing_memo(artifacts: Path, drawing_id: str, memo_id: str) -> dict:
+    """Remove one memo by id. Does not bump drawing list order."""
+    drawing_id = _safe_id(drawing_id) or ""
+    memo_id = str(memo_id or "").strip()
+    if not drawing_id:
+        raise HTTPException(status_code=400, detail="Invalid drawing id")
+    if not memo_id or not re.fullmatch(r"[0-9a-fA-F]{8,64}", memo_id):
+        raise HTTPException(status_code=400, detail="Invalid memo id")
+    catalog = load_drawing_catalog(artifacts)
+    entry = _find_entry(catalog, drawing_id)
+    if entry is None:
+        raise HTTPException(status_code=404, detail="Drawing not found")
+    summary = _summary(entry, artifacts)
+    if summary is None:
+        raise HTTPException(status_code=400, detail="Invalid drawing id")
+    path = _memo_path(artifacts, summary["folder"])
+    memos = _load_memos(path)
+    kept = [item for item in memos if item["id"] != memo_id]
+    if len(kept) == len(memos):
+        raise HTTPException(status_code=404, detail="Memo not found")
+    _write_memos(path, kept)
+    return {
+        "ok": True,
+        "drawing_id": drawing_id,
+        "folder": summary["folder"],
+        "memos": kept,
+    }
+
+
 @router.post("/task-link")
 def link_drawing_task(body: DrawingTaskLink, request: Request) -> dict:
     """Map the task created by 시작 to the uploaded drawing. A later start wins."""
@@ -1535,6 +1653,7 @@ def post_drawing_floor_label_manual(
         x1_px=body.x1_px,
         y1_px=body.y1_px,
         boundary=body.boundary,
+        kind=body.kind,
     )
 
 
@@ -1609,6 +1728,20 @@ def get_drawing_memos(drawing_id: str, request: Request) -> dict:
 def post_drawing_memo(drawing_id: str, body: DrawingMemoBody, request: Request) -> dict:
     user_id = require_user_id(request)
     return add_drawing_memo(_artifacts_dir(user_id), drawing_id, body.text)
+
+
+@router.patch("/{drawing_id}/memos/{memo_id}")
+def patch_drawing_memo(
+    drawing_id: str, memo_id: str, body: DrawingMemoBody, request: Request
+) -> dict:
+    user_id = require_user_id(request)
+    return update_drawing_memo(_artifacts_dir(user_id), drawing_id, memo_id, body.text)
+
+
+@router.delete("/{drawing_id}/memos/{memo_id}")
+def delete_drawing_memo_route(drawing_id: str, memo_id: str, request: Request) -> dict:
+    user_id = require_user_id(request)
+    return delete_drawing_memo(_artifacts_dir(user_id), drawing_id, memo_id)
 
 
 @router.delete("/{drawing_id}")

@@ -154,6 +154,8 @@ export interface DrawingSummary {
   size?: number | null;
   rating?: DrawingRating | string;
   task_id?: string | null;
+  /** Saved memo comments for this drawing. */
+  memo_count?: number;
   floors?: DrawingFloorRef[];
 }
 
@@ -541,8 +543,14 @@ export const api = {
     drawingId: string,
     floor: string,
     body:
-      | { x_px: number; y_px: number; boundary?: "wall" | "entity" }
-      | { x0_px: number; y0_px: number; x1_px: number; y1_px: number },
+      | { x_px: number; y_px: number; boundary?: "wall" | "entity"; kind?: "unnamed" | "exclude" }
+      | {
+          x0_px: number;
+          y0_px: number;
+          x1_px: number;
+          y1_px: number;
+          kind?: "unnamed" | "exclude";
+        },
   ) =>
     request<DrawingFloorLabels>(
       `/api/drawings/${encodeURIComponent(drawingId)}/floors/${encodeURIComponent(floor)}/labels/manual`,
@@ -585,6 +593,27 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ text }),
     }),
+  updateDrawingMemo: (drawingId: string, memoId: string, text: string) =>
+    request<{
+      ok: boolean;
+      drawing_id: string;
+      folder: string;
+      memo: DrawingMemo;
+      memos: DrawingMemo[];
+    }>(
+      `/api/drawings/${encodeURIComponent(drawingId)}/memos/${encodeURIComponent(memoId)}`,
+      { method: "PATCH", body: JSON.stringify({ text }) },
+    ),
+  deleteDrawingMemo: (drawingId: string, memoId: string) =>
+    request<{
+      ok: boolean;
+      drawing_id: string;
+      folder: string;
+      memos: DrawingMemo[];
+    }>(
+      `/api/drawings/${encodeURIComponent(drawingId)}/memos/${encodeURIComponent(memoId)}`,
+      { method: "DELETE" },
+    ),
   deleteDrawing: (drawingId: string) =>
     request<{ ok: boolean; drawing_id: string }>(
       `/api/drawings/${encodeURIComponent(drawingId)}`,

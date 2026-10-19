@@ -195,7 +195,7 @@ function SummaryLabelTag({
 }) {
   // Match drawing-totalroom `_add_label_tag`: seed is the TEXT insert (left edge),
   // not the badge center. Centering here shifts every tag left of the label PNG.
-  const areaText = formatArea(tag.area_m2);
+  const areaText = formatArea(displayAreaM2(tag.text, tag.area_m2));
   const textW = Math.max(inkWidth(tag.text, fontSize), inkWidth(areaText, fontSize));
   const padX = fontSize * 0.4;
   const padY = fontSize * 0.28;
@@ -242,19 +242,38 @@ function SummaryLabelTag({
   );
 }
 
-/** Legend rows with the same displayed area count once in the sum. */
+/** Manual exclude labels (제외-N) are subtracted from area totals. */
+function isExcludeAreaLabel(label: string): boolean {
+  return /^제외-\d+$/.test(label.trim());
+}
+
+/** Signed area for legend/tags: 제외-N shows as negative (e.g. -24.33). */
+function displayAreaM2(label: string, areaM2: number): number {
+  const key = Math.round(Math.abs(areaM2) * 100) / 100;
+  return isExcludeAreaLabel(label) ? -key : key;
+}
+
+/** Legend rows with the same displayed area count once; 제외-N is subtracted. */
 function uniqueSelectedArea(labels: DrawingLabelItem[], selected: Set<string>): number {
-  const seen = new Set<number>();
-  let total = 0;
+  const seenInclude = new Set<number>();
+  const seenExclude = new Set<number>();
+  let include = 0;
+  let exclude = 0;
   for (const item of labels) {
     if (!selected.has(item.label)) continue;
     // Match the 2-decimal value shown next to each legend row.
-    const key = Math.round(item.area_m2 * 100) / 100;
-    if (seen.has(key)) continue;
-    seen.add(key);
-    total += key;
+    const key = Math.round(Math.abs(item.area_m2) * 100) / 100;
+    if (isExcludeAreaLabel(item.label)) {
+      if (seenExclude.has(key)) continue;
+      seenExclude.add(key);
+      exclude += key;
+      continue;
+    }
+    if (seenInclude.has(key)) continue;
+    seenInclude.add(key);
+    include += key;
   }
-  return Math.round(total * 100) / 100;
+  return Math.round((include - exclude) * 100) / 100;
 }
 
 function containLayout(stage: HTMLElement, width: number, height: number) {
@@ -310,6 +329,7 @@ export function DrawingView({ drawingId, initialFloor, onMenuClick, onBack }: Pr
   const [addLabelMode, setAddLabelMode] = useState(false);
   const [addLabelBusy, setAddLabelBusy] = useState(false);
   const [rectDrawMode, setRectDrawMode] = useState(false);
+  const [excludeDrawMode, setExcludeDrawMode] = useState(false);
   const [rectDraft, setRectDraft] = useState<{
     x0: number;
     y0: number;
@@ -327,6 +347,7 @@ export function DrawingView({ drawingId, initialFloor, onMenuClick, onBack }: Pr
   const addLabelBusyRef = useRef(false);
   const pendingCountRef = useRef(0);
   const rectDrawModeRef = useRef(false);
+  const excludeDrawModeRef = useRef(false);
   const spacePanRef = useRef(false);
   const rectDragRef = useRef<{ x0: number; y0: number } | null>(null);
   const dragRef = useRef<{ x: number; y: number; panX: number; panY: number } | null>(null);
@@ -342,6 +363,8 @@ export function DrawingView({ drawingId, initialFloor, onMenuClick, onBack }: Pr
   fitRef.current = fit;
   addLabelBusyRef.current = addLabelBusy;
   rectDrawModeRef.current = rectDrawMode;
+  excludeDrawModeRef.current = excludeDrawMode;
+  const areaPickMode = rectDrawMode || excludeDrawMode;
 
   const preview = PREVIEWS.find((item) => item.kind === kind) ?? PREVIEWS[0];
   const floors = catalog?.floors ?? [];
@@ -375,6 +398,7 @@ export function DrawingView({ drawingId, initialFloor, onMenuClick, onBack }: Pr
     setAddLabelMode(false);
     setAddLabelBusy(false);
     setRectDrawMode(false);
+    setExcludeDrawMode(false);
     setRectDraft(null);
     api
       .getDrawingFloors(drawingId)
@@ -415,6 +439,7 @@ export function DrawingView({ drawingId, initialFloor, onMenuClick, onBack }: Pr
     setLegendHidden(false);
     setLegendPos(null);
     setRectDrawMode(false);
+    setExcludeDrawMode(false);
     setRectDraft(null);
     api
       .getDrawingFloorLabels(drawingId, floor)
@@ -438,6 +463,7 @@ export function DrawingView({ drawingId, initialFloor, onMenuClick, onBack }: Pr
     if (!canAddLabel) {
       setAddLabelMode(false);
       setRectDrawMode(false);
+      setExcludeDrawMode(false);
       setRectDraft(null);
     }
   }, [canAddLabel]);
@@ -454,7 +480,8 @@ export function DrawingView({ drawingId, initialFloor, onMenuClick, onBack }: Pr
   }, [labelData]);
   pendingCountRef.current = pendingCount;
 
-  const showLabelEditBar = canAddLabel && (addLabelMode || rectDrawMode || pendingCount > 0);
+  const showLabelEditBar =
+    canAddLabel && (addLabelMode || rectDrawMode || excludeDrawMode || pendingCount > 0);
   /** While editing labels on summary, show validated walls instead of original. */
   const summaryValidatedBg = showLabelEditBar;
   const fileKind =
@@ -700,6 +727,7 @@ export function DrawingView({ drawingId, initialFloor, onMenuClick, onBack }: Pr
     clientX: number,
     clientY: number,
     boundary: "wall" | "entity" = "entity",
+    kind: "unnamed" | "exclude" = "unnamed",
   ) {
     if (!floor || addLabelBusyRef.current || imageState !== "ready") return;
     const pt = clientToImagePx(clientX, clientY);
@@ -717,9 +745,9 @@ export function DrawingView({ drawingId, initialFloor, onMenuClick, onBack }: Pr
         x_px: pt.x,
         y_px: pt.y,
         boundary,
+        kind,
       });
       applyLabelPayload(data);
-      setLegendHidden(false);
     } catch (err) {
       setError(err instanceof Error ? err.message : "라벨을 추가하지 못했습니다.");
     } finally {
@@ -727,7 +755,13 @@ export function DrawingView({ drawingId, initialFloor, onMenuClick, onBack }: Pr
     }
   }
 
-  async function addManualRectLabel(x0: number, y0: number, x1: number, y1: number) {
+  async function addManualRectLabel(
+    x0: number,
+    y0: number,
+    x1: number,
+    y1: number,
+    kind: "unnamed" | "exclude" = "unnamed",
+  ) {
     if (!floor || addLabelBusyRef.current || imageState !== "ready") return;
     if (Math.abs(x1 - x0) < 4 || Math.abs(y1 - y0) < 4) {
       setError("사각형을 더 크게 그려 주세요.");
@@ -741,9 +775,9 @@ export function DrawingView({ drawingId, initialFloor, onMenuClick, onBack }: Pr
         y0_px: y0,
         x1_px: x1,
         y1_px: y1,
+        kind,
       });
       applyLabelPayload(data);
-      setLegendHidden(false);
     } catch (err) {
       setError(err instanceof Error ? err.message : "사각형 라벨을 추가하지 못했습니다.");
     } finally {
@@ -778,6 +812,7 @@ export function DrawingView({ drawingId, initialFloor, onMenuClick, onBack }: Pr
       applyLabelPayload(data);
       setAddLabelMode(false);
       setRectDrawMode(false);
+      setExcludeDrawMode(false);
       setRectDraft(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : "라벨을 저장하지 못했습니다.");
@@ -795,6 +830,7 @@ export function DrawingView({ drawingId, initialFloor, onMenuClick, onBack }: Pr
       applyLabelPayload(data);
       setAddLabelMode(false);
       setRectDrawMode(false);
+      setExcludeDrawMode(false);
       setRectDraft(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : "임시 라벨을 취소하지 못했습니다.");
@@ -876,6 +912,16 @@ export function DrawingView({ drawingId, initialFloor, onMenuClick, onBack }: Pr
   function activateRectDrawMode() {
     spacePanRef.current = false;
     setRectDrawMode(true);
+    setExcludeDrawMode(false);
+    setAddLabelMode(false);
+    setRectDraft(null);
+    setError(null);
+  }
+
+  function activateExcludeDrawMode() {
+    spacePanRef.current = false;
+    setExcludeDrawMode(true);
+    setRectDrawMode(false);
     setAddLabelMode(false);
     setRectDraft(null);
     setError(null);
@@ -885,6 +931,7 @@ export function DrawingView({ drawingId, initialFloor, onMenuClick, onBack }: Pr
     spacePanRef.current = false;
     setAddLabelMode(true);
     setRectDrawMode(false);
+    setExcludeDrawMode(false);
     setRectDraft(null);
     setError(null);
   }
@@ -910,8 +957,8 @@ export function DrawingView({ drawingId, initialFloor, onMenuClick, onBack }: Pr
     }
     if (event.button !== 0) return;
 
-    // 추가하기: Shift+드래그 = 수동 사각형. 일반 클릭 = WALL 실 선택 (endPan).
-    if (rectDrawModeRef.current && event.shiftKey) {
+    // 추가하기·제외하기: Shift+드래그 = 수동 사각형. 일반 클릭 = WALL 실 선택 (endPan).
+    if ((rectDrawModeRef.current || excludeDrawModeRef.current) && event.shiftKey) {
       const pt = clientToImagePx(event.clientX, event.clientY);
       if (!pt) return;
       event.currentTarget.setPointerCapture(event.pointerId);
@@ -951,7 +998,8 @@ export function DrawingView({ drawingId, initialFloor, onMenuClick, onBack }: Pr
         event.currentTarget.releasePointerCapture(event.pointerId);
       }
       if (!pt || addLabelBusy) return;
-      void addManualRectLabel(start.x0, start.y0, pt.x, pt.y);
+      const rectKind = excludeDrawModeRef.current ? "exclude" : "unnamed";
+      void addManualRectLabel(start.x0, start.y0, pt.x, pt.y, rectKind);
       return;
     }
     const drag = dragRef.current;
@@ -977,8 +1025,14 @@ export function DrawingView({ drawingId, initialFloor, onMenuClick, onBack }: Pr
         }
       }
       // 보이는(체크된) 라벨 영역 클릭 → 범례 체크 토글 (기존·추가 라벨 공통).
-      // 추가하기 모드에서도 이미 라벨이 있는 실은 새로 넣지 않고 표시만 끈다.
-      if (overlayPt && labelData && legendActive && !rectDrawModeRef.current) {
+      // 추가하기·제외하기 모드에서도 이미 라벨이 있는 실은 새로 넣지 않고 표시만 끈다.
+      if (
+        overlayPt &&
+        labelData &&
+        legendActive &&
+        !rectDrawModeRef.current &&
+        !excludeDrawModeRef.current
+      ) {
         const hit = findSelectedLabelAtPx(
           labelData.labels,
           selectedLabels,
@@ -991,9 +1045,13 @@ export function DrawingView({ drawingId, initialFloor, onMenuClick, onBack }: Pr
         }
       }
       if (canAddLabel) {
-        // 추가하기: 클릭 → WALL 기준 실. 다각형 추가: 클릭 → 엔티티 기준.
+        // 추가하기·제외하기: 클릭 → WALL 기준 실. 다각형 추가: 클릭 → 엔티티 기준.
         if (rectDrawModeRef.current) {
-          void addManualLabelAt(event.clientX, event.clientY, "wall");
+          void addManualLabelAt(event.clientX, event.clientY, "wall", "unnamed");
+          return;
+        }
+        if (excludeDrawModeRef.current) {
+          void addManualLabelAt(event.clientX, event.clientY, "wall", "exclude");
           return;
         }
         if (addLabelMode) {
@@ -1003,7 +1061,12 @@ export function DrawingView({ drawingId, initialFloor, onMenuClick, onBack }: Pr
       }
     }
     // Label/summary: click the canvas (not a drag) to toggle the legend, like graph.
-    if (legendActive && (labelData || labelError) && !rectDrawModeRef.current) {
+    if (
+      legendActive &&
+      (labelData || labelError) &&
+      !rectDrawModeRef.current &&
+      !excludeDrawModeRef.current
+    ) {
       setLegendHidden((value) => !value);
     }
   }
@@ -1127,18 +1190,19 @@ export function DrawingView({ drawingId, initialFloor, onMenuClick, onBack }: Pr
               {canAddLabel ? (
                 <button
                   type="button"
-                  className={`drawing-legend-toggle${addLabelMode || rectDrawMode || pendingCount > 0 ? " is-active" : ""}`}
-                  aria-pressed={addLabelMode || rectDrawMode || pendingCount > 0}
+                  className={`drawing-legend-toggle${addLabelMode || rectDrawMode || excludeDrawMode || pendingCount > 0 ? " is-active" : ""}`}
+                  aria-pressed={addLabelMode || rectDrawMode || excludeDrawMode || pendingCount > 0}
                   disabled={imageState !== "ready" || addLabelBusy}
                   title={
-                    addLabelMode || rectDrawMode || pendingCount > 0
+                    addLabelMode || rectDrawMode || excludeDrawMode || pendingCount > 0
                       ? "라벨 편집 바 닫기 (임시 라벨이 있으면 유지)"
                       : "라벨 편집: 기본은 추가하기(사각형)"
                   }
                   onClick={() => {
-                    if (addLabelMode || rectDrawMode) {
+                    if (addLabelMode || rectDrawMode || excludeDrawMode) {
                       setAddLabelMode(false);
                       setRectDrawMode(false);
+                      setExcludeDrawMode(false);
                       setRectDraft(null);
                     } else {
                       activateRectDrawMode();
@@ -1182,7 +1246,7 @@ export function DrawingView({ drawingId, initialFloor, onMenuClick, onBack }: Pr
           {error && <p className="drawing-error">{error}</p>}
           <div
             ref={stageRef}
-            className={`drawing-stage${panning ? " is-panning" : ""}${addLabelMode ? " is-adding-label" : ""}${rectDrawMode ? " is-drawing-rect" : ""}${addLabelBusy ? " is-busy" : ""}`}
+            className={`drawing-stage${panning ? " is-panning" : ""}${addLabelMode ? " is-adding-label" : ""}${areaPickMode ? " is-drawing-rect" : ""}${excludeDrawMode ? " is-drawing-exclude" : ""}${addLabelBusy ? " is-busy" : ""}`}
             onPointerDown={onPointerDown}
             onPointerMove={onPointerMove}
             onPointerUp={endPan}
@@ -1239,6 +1303,16 @@ export function DrawingView({ drawingId, initialFloor, onMenuClick, onBack }: Pr
                   onClick={activateRectDrawMode}
                 >
                   추가하기
+                </button>
+                <button
+                  type="button"
+                  className={`drawing-label-edit-btn${excludeDrawMode ? " is-active" : ""}`}
+                  disabled={addLabelBusy}
+                  aria-pressed={excludeDrawMode}
+                  title="클릭: WALL 실을 제외-N으로 지정 · Shift+드래그: 수동 사각형 · 면적합계에서 제외"
+                  onClick={activateExcludeDrawMode}
+                >
+                  제외하기
                 </button>
                 <button
                   type="button"
@@ -1322,8 +1396,16 @@ export function DrawingView({ drawingId, initialFloor, onMenuClick, onBack }: Pr
                         y={Math.min(rectDraft.y0, rectDraft.y1)}
                         width={Math.abs(rectDraft.x1 - rectDraft.x0)}
                         height={Math.abs(rectDraft.y1 - rectDraft.y0)}
-                        fill="rgba(16, 163, 127, 0.22)"
-                        stroke="rgba(16, 163, 127, 0.95)"
+                        fill={
+                          excludeDrawMode
+                            ? "rgba(196, 72, 72, 0.22)"
+                            : "rgba(16, 163, 127, 0.22)"
+                        }
+                        stroke={
+                          excludeDrawMode
+                            ? "rgba(196, 72, 72, 0.95)"
+                            : "rgba(16, 163, 127, 0.95)"
+                        }
                         strokeWidth={2}
                         strokeDasharray="6 4"
                         vectorEffect="non-scaling-stroke"
@@ -1359,16 +1441,22 @@ export function DrawingView({ drawingId, initialFloor, onMenuClick, onBack }: Pr
                       onPointerUp={onLegendDragEnd}
                       onPointerCancel={onLegendDragEnd}
                     >
-                      <span className="drawing-legend-total-label">선택 합계</span>
+                      <span
+                        className="drawing-legend-total-label"
+                        title="제외-N 면적은 음수로 합계에서 뺍니다"
+                      >
+                        선택 합계
+                      </span>
                       <span className="drawing-legend-total-value">{formatArea(selectedArea)}</span>
                     </div>
                     <div className="drawing-legend-list">
                       {labelData.labels.map((item) => {
                         const checked = selectedLabels.has(item.label);
+                        const areaShown = displayAreaM2(item.label, item.area_m2);
                         return (
                           <label
                             key={item.label}
-                            className={`drawing-legend-item${checked ? "" : " is-off"}`}
+                            className={`drawing-legend-item${checked ? "" : " is-off"}${isExcludeAreaLabel(item.label) ? " is-exclude" : ""}`}
                           >
                             <input
                               type="checkbox"
@@ -1383,7 +1471,7 @@ export function DrawingView({ drawingId, initialFloor, onMenuClick, onBack }: Pr
                             <span className="drawing-legend-label" title={item.label}>
                               {item.label}
                             </span>
-                            <span className="drawing-legend-count">{formatArea(item.area_m2)}</span>
+                            <span className="drawing-legend-count">{formatArea(areaShown)}</span>
                           </label>
                         );
                       })}

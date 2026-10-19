@@ -24,6 +24,8 @@ from application.api.routes_drawings import (
     set_drawing_rating,
     list_drawing_memos,
     add_drawing_memo,
+    update_drawing_memo,
+    delete_drawing_memo,
     undo_manual_floor_label,
 )
 
@@ -464,6 +466,7 @@ class DrawingIdTests(unittest.TestCase):
             )
             empty = list_drawing_memos(artifacts, drawing_id)
             self.assertEqual(empty["memos"], [])
+            self.assertEqual(list_drawings(artifacts)["drawings"][0]["memo_count"], 0)
             first = add_drawing_memo(artifacts, drawing_id, "첫 메모")
             self.assertEqual(first["memo"]["text"], "첫 메모")
             second = add_drawing_memo(artifacts, drawing_id, "두번째 메모")
@@ -473,6 +476,31 @@ class DrawingIdTests(unittest.TestCase):
             self.assertEqual([item["text"] for item in listed["memos"]], ["두번째 메모", "첫 메모"])
             after = list_drawings(artifacts)
             self.assertEqual(after["drawings"][0]["updated_at"], "2026-10-15T02:00:00+09:00")
+            self.assertEqual(after["drawings"][0]["memo_count"], 2)
+            edited = update_drawing_memo(artifacts, drawing_id, first["memo"]["id"], "첫 메모 수정")
+            self.assertEqual(edited["memo"]["text"], "첫 메모 수정")
+            self.assertEqual(edited["memo"]["id"], first["memo"]["id"])
+            self.assertEqual(
+                [item["text"] for item in edited["memos"]],
+                ["두번째 메모", "첫 메모 수정"],
+            )
+            self.assertEqual(list_drawings(artifacts)["drawings"][0]["memo_count"], 2)
+            self.assertEqual(
+                list_drawings(artifacts)["drawings"][0]["updated_at"],
+                "2026-10-15T02:00:00+09:00",
+            )
+            with self.assertRaises(HTTPException):
+                update_drawing_memo(artifacts, drawing_id, first["memo"]["id"], "   ")
+            with self.assertRaises(HTTPException):
+                update_drawing_memo(artifacts, drawing_id, "deadbeef", "없는 메모")
+            removed = delete_drawing_memo(artifacts, drawing_id, second["memo"]["id"])
+            self.assertEqual([item["text"] for item in removed["memos"]], ["첫 메모 수정"])
+            self.assertEqual(list_drawings(artifacts)["drawings"][0]["memo_count"], 1)
+            empty_after = delete_drawing_memo(artifacts, drawing_id, first["memo"]["id"])
+            self.assertEqual(empty_after["memos"], [])
+            self.assertEqual(list_drawings(artifacts)["drawings"][0]["memo_count"], 0)
+            with self.assertRaises(HTTPException):
+                delete_drawing_memo(artifacts, drawing_id, first["memo"]["id"])
             with self.assertRaises(HTTPException):
                 add_drawing_memo(artifacts, drawing_id, "   ")
 
@@ -795,6 +823,130 @@ class DrawingIdTests(unittest.TestCase):
             self.assertEqual([item["label"] for item in pending["labels"]], ["무명-2"])
             saved = json.loads((floor_dir / "floor_label_modified.json").read_text(encoding="utf-8"))
             self.assertEqual([item["label"] for item in saved["labels"]], ["무명-1"])
+
+    def test_add_manual_floor_label_exclude_kind_names_and_skips_area_total(self):
+        with tempfile.TemporaryDirectory() as raw:
+            artifacts = Path(raw)
+            drawing_id = "hotel"
+            floor_dir = artifacts / drawing_id / "floors" / "1F"
+            floor_dir.mkdir(parents=True)
+            (artifacts / "drawing_list.json").write_text(
+                json.dumps(
+                    {
+                        "drawings": [
+                            {
+                                "drawing_id": drawing_id,
+                                "folder": drawing_id,
+                                "source_filename": "hotel.dxf",
+                                "status": "ready",
+                                "floors": [{"floor": "1F", "title": "1F", "status": "ready"}],
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (floor_dir / "floor_original_meta.json").write_text(
+                json.dumps(
+                    {
+                        "bbox_mm": {
+                            "xmin": 0.0,
+                            "ymin": 0.0,
+                            "xmax": 10000.0,
+                            "ymax": 8000.0,
+                        },
+                        "png_size": {"width": 1400, "height": 1280},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (floor_dir / "floor_wall_validated.dxf").write_text("0\nEOF\n", encoding="utf-8")
+            (floor_dir / "floor_label_modified.json").write_text(
+                json.dumps(
+                    {
+                        "labels": [
+                            {
+                                "label": "제외-1",
+                                "color": [1, 2, 3],
+                                "area_m2": 2.0,
+                                "instances": [
+                                    {
+                                        "text": "제외-1",
+                                        "x": 10.0,
+                                        "y": 10.0,
+                                        "area_m2": 2.0,
+                                        "polygon_mm": [[0, 0], [100, 0], [100, 100], [0, 100]],
+                                    }
+                                ],
+                            },
+                            {
+                                "label": "교실",
+                                "color": [4, 5, 6],
+                                "area_m2": 9.0,
+                                "instances": [
+                                    {
+                                        "text": "교실",
+                                        "x": 50.0,
+                                        "y": 50.0,
+                                        "area_m2": 9.0,
+                                        "polygon_mm": [
+                                            [1000, 1000],
+                                            [4000, 1000],
+                                            [4000, 4000],
+                                            [1000, 4000],
+                                        ],
+                                    }
+                                ],
+                            },
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            def fake_detect(_dxf, _x, _y, boundary="entity"):
+                return (
+                    {
+                        "pts": [
+                            [5000.0, 5000.0],
+                            [6000.0, 5000.0],
+                            [6000.0, 6000.0],
+                            [5000.0, 6000.0],
+                        ],
+                        "area_m2": 1.0,
+                        "column_protrusion_m2": 0.0,
+                        "width_m": 1.0,
+                        "height_m": 1.0,
+                        "drawing_area_m2": None,
+                        "boundary_doors": [],
+                    },
+                    None,
+                    5500.0,
+                    5500.0,
+                )
+
+            with patch(
+                "application.api.routes_drawings._detect_face_at",
+                side_effect=fake_detect,
+            ):
+                result = add_manual_floor_label(
+                    artifacts,
+                    drawing_id,
+                    "1F",
+                    x_px=700.0,
+                    y_px=640.0,
+                    kind="exclude",
+                )
+            names = [item["label"] for item in result["labels"]]
+            self.assertIn("제외-2", names)
+            self.assertEqual(
+                next(item for item in result["labels"] if item["label"] == "제외-2")["source"],
+                "pending",
+            )
+            # 교실 9.0 − 제외-1 2.0 − 제외-2 1.0 = 6.0
+            self.assertEqual(result["unique_face_area_m2"], 6.0)
+            pending = json.loads((floor_dir / "floor_label_pending.json").read_text(encoding="utf-8"))
+            self.assertEqual([item["label"] for item in pending["labels"]], ["제외-2"])
 
     def test_undo_manual_floor_label_removes_named(self):
         with tempfile.TemporaryDirectory() as raw:
