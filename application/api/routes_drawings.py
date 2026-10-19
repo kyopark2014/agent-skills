@@ -912,7 +912,22 @@ def _write_modified_labels(path: Path, payload: dict) -> None:
 
 
 def _import_detect_labels():
-    scripts = Path(__file__).resolve().parents[1] / "skills" / "drawing-totalroom" / "scripts"
+    app_dir = Path(__file__).resolve().parents[1]
+    candidates = (
+        app_dir / "skills" / "drawing-totalroom" / "scripts",
+        app_dir.parent
+        / "runtime_agent"
+        / "strands"
+        / "skills"
+        / "drawing-totalroom"
+        / "scripts",
+    )
+    scripts = next((path for path in candidates if path.is_dir()), None)
+    if scripts is None:
+        raise HTTPException(
+            status_code=500,
+            detail="drawing-totalroom scripts를 찾을 수 없습니다.",
+        )
     scripts_str = str(scripts)
     if scripts_str not in sys.path:
         sys.path.insert(0, scripts_str)
