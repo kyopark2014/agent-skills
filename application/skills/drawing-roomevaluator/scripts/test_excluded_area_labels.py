@@ -98,6 +98,8 @@ class ExcludedAreaLabelTests(unittest.TestCase):
 
     def test_ordinary_room_names_stay(self):
         self.assertTrue(evaluate_room.is_room_label("교실"))
+        self.assertTrue(evaluate_room.is_room_label("부속실"))
+        self.assertFalse(evaluate_room.is_excluded_area_label("부속실"))
         self.assertTrue(evaluate_room.is_room_label("개방형도서관"))
         self.assertTrue(evaluate_room.is_room_label("락커룸"))
         self.assertFalse(evaluate_room.is_excluded_area_label("교실"))
@@ -253,9 +255,6 @@ class ExcludedAreaLabelTests(unittest.TestCase):
             "주문제작",
             "BC-1",
             "bc-",
-            "부속실",
-            "부속실1",
-            "부속실-2",
             "보일러실",
             "보일러실1",
             "보일러실-2",
@@ -332,6 +331,9 @@ class ExcludedAreaLabelTests(unittest.TestCase):
             "F.L-",
             "F.L+100",
             "F.L",
+            "FL.",
+            "FL. +150",
+            "FL.+600",
             "장애인 통로",
             "장애인통로",
             "야외전망대",

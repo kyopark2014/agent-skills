@@ -32,6 +32,12 @@ JOIN_MM = 80.0
 DOOR_GAP_MM = 2400.0
 DOOR_TOUCH_MM = 450.0
 WALL_CAP_MM = 300.0
+# WALL/WINDOW ARC·CIRCLE을 직선 조각으로 나눌 때 목표 현 길이.
+ARC_CHORD_MM = 250.0
+# 이보다 작은 CIRCLE은 기둥·심볼로 보고 실 경계에서 뺀다.
+MIN_WALL_CIRCLE_R_MM = 400.0
+# 같은 원호 묶음(중심·반지름)을 판별할 때 반올림 단위.
+ARC_CLUSTER_MM = 50.0
 # 끝점마다 잇는 이웃 수. 이중선 끝막음은 가까운 몇 선이면 된다.
 CAP_PER_END = 3
 # 이보다 많은 선은 실 하나가 아니라 층 전체다. node/polygonize 를 하지 않는다.
@@ -533,12 +539,169 @@ def _door_leaf_rectangle(entity) -> bool:
     return short <= 80.0 and 500.0 <= long <= 1700.0
 
 
+def _arc_point(cx: float, cy: float, r: float, angle_deg: float) -> tuple[float, float]:
+    rad = math.radians(angle_deg % 360.0)
+    return cx + r * math.cos(rad), cy + r * math.sin(rad)
+
+
+def _curve_parts(entity) -> list[tuple[float, float, float, float]]:
+    """ARC/CIRCLE을 현 길이 약 ARC_CHORD_MM 인 직선 조각으로 나눈다.
+
+    작은 CIRCLE(기둥·심볼)은 비운다. DOOR 스윙 호는 호출측에서 제외한다.
+    """
+    kind = entity.dxftype()
+    if kind not in ("ARC", "CIRCLE"):
+        return []
+    try:
+        cx = float(entity.dxf.center.x)
+        cy = float(entity.dxf.center.y)
+        r = float(entity.dxf.radius)
+    except Exception:  # noqa: BLE001
+        return []
+    if r < 1.0:
+        return []
+    if kind == "CIRCLE":
+        if r < MIN_WALL_CIRCLE_R_MM:
+            return []
+        start_deg = 0.0
+        span_deg = 360.0
+        closed = True
+    else:
+        start_deg = float(entity.dxf.start_angle) % 360.0
+        end_deg = float(entity.dxf.end_angle) % 360.0
+        span_deg = (end_deg - start_deg) % 360.0
+        if span_deg <= 1e-9:
+            span_deg = 360.0
+        closed = False
+    step_deg = max(0.5, math.degrees(ARC_CHORD_MM / r))
+    steps = max(2, int(math.ceil(span_deg / step_deg)))
+    pts: list[tuple[float, float]] = []
+    for i in range(steps + (0 if closed else 1)):
+        pts.append(_arc_point(cx, cy, r, start_deg + span_deg * i / steps))
+    if closed:
+        pts.append(pts[0])
+    return [
+        (pts[i][0], pts[i][1], pts[i + 1][0], pts[i + 1][1])
+        for i in range(len(pts) - 1)
+        if math.hypot(pts[i + 1][0] - pts[i][0], pts[i + 1][1] - pts[i][1]) > 0.5
+    ]
+
+
+def _arc_coverage_pieces(
+    spans: list[tuple[float, float]], join_deg: float
+) -> list[tuple[float, float]]:
+    """ARC start/end(도) 목록을 [0,360) 위 겹치지 않는 덮개 구간으로 합친다."""
+    if not spans:
+        return []
+    units: list[tuple[float, float]] = []
+    for sa, ea in spans:
+        start = sa % 360.0
+        span = (ea - sa) % 360.0
+        if span <= 1e-9:
+            span = 360.0
+        if span >= 360.0 - 1e-9:
+            return [(0.0, 360.0)]
+        end = start + span
+        if end <= 360.0:
+            units.append((start, end))
+        else:
+            units.append((start, 360.0))
+            units.append((0.0, end - 360.0))
+    units.sort()
+    merged: list[list[float]] = [[units[0][0], units[0][1]]]
+    for a, b in units[1:]:
+        if a <= merged[-1][1] + join_deg:
+            merged[-1][1] = max(merged[-1][1], b)
+        else:
+            merged.append([a, b])
+    if (
+        len(merged) >= 2
+        and merged[0][0] <= join_deg
+        and merged[-1][1] >= 360.0 - join_deg
+    ):
+        wrap = [merged[-1][0], merged[0][1] + 360.0]
+        mid = merged[1:-1]
+        merged = [wrap, *mid]
+    return [(a, b) for a, b in merged]
+
+
+def _bridged_arc_gap_chords(
+    arc_spans: list[tuple[float, float, float, float, float]],
+) -> list[tuple[float, float, float, float]]:
+    """같은 중심·반지름 WALL/WINDOW ARC에서 원호 길이 DOOR_GAP_MM 이하 틈을 현으로 잇는다."""
+    if not arc_spans:
+        return []
+    groups: dict[tuple[float, float, float], list[tuple[float, float]]] = defaultdict(list)
+    centers: dict[tuple[float, float, float], list[tuple[float, float, float]]] = defaultdict(
+        list
+    )
+    for cx, cy, r, sa, ea in arc_spans:
+        key = (
+            round(cx / ARC_CLUSTER_MM) * ARC_CLUSTER_MM,
+            round(cy / ARC_CLUSTER_MM) * ARC_CLUSTER_MM,
+            round(r / ARC_CLUSTER_MM) * ARC_CLUSTER_MM,
+        )
+        if key[2] < 1.0:
+            continue
+        groups[key].append((sa, ea))
+        centers[key].append((cx, cy, r))
+    out: list[tuple[float, float, float, float]] = []
+    for key, spans in groups.items():
+        samples = centers[key]
+        cx = sum(c[0] for c in samples) / len(samples)
+        cy = sum(c[1] for c in samples) / len(samples)
+        r = sum(c[2] for c in samples) / len(samples)
+        join_deg = max(0.2, math.degrees(JOIN_MM / r))
+        covered = _arc_coverage_pieces(spans, join_deg)
+        if not covered:
+            continue
+        if len(covered) == 1 and covered[0][1] - covered[0][0] >= 360.0 - 1e-6:
+            continue
+        # covered 항목은 [a,b] (b는 360 초과 가능 = 0°를 넘는 구간)
+        ends: list[tuple[float, float]] = []
+        for a, b in covered:
+            if b > 360.0:
+                ends.append((a, 360.0))
+                ends.append((0.0, b - 360.0))
+            else:
+                ends.append((a, b))
+        ends = [(a, b) for a, b in ends if b - a > 1e-6]
+        ends.sort()
+        if not ends:
+            continue
+        pieces: list[list[float]] = [[ends[0][0], ends[0][1]]]
+        for a, b in ends[1:]:
+            if a <= pieces[-1][1] + join_deg:
+                pieces[-1][1] = max(pieces[-1][1], b)
+            else:
+                pieces.append([a, b])
+        gaps = [(pieces[i][1], pieces[i + 1][0]) for i in range(len(pieces) - 1)]
+        wrap = (pieces[0][0] + 360.0) - pieces[-1][1]
+        if wrap > join_deg + 1e-9:
+            gaps.append((pieces[-1][1], pieces[0][0] + 360.0))
+        for ga, gb in gaps:
+            span_deg = gb - ga
+            if span_deg <= 1e-6:
+                continue
+            if r * math.radians(span_deg) > DOOR_GAP_MM:
+                continue
+            x0, y0 = _arc_point(cx, cy, r, ga)
+            x1, y1 = _arc_point(cx, cy, r, gb)
+            if math.hypot(x1 - x0, y1 - y0) > 0.5:
+                out.append((x0, y0, x1, y1))
+    return out
+
+
 def wall_segments(msp, boxes, *, include_door: bool = True, open_doors=None) -> list[tuple[float, float, float, float]]:
     segs: list[tuple[float, float, float, float]] = []
     layers = BOUNDARY_LAYERS if include_door else (WALL_LAYER, WINDOW_LAYER, COLUMN_LAYER)
+    arc_spans: list[tuple[float, float, float, float, float]] = []
     for e in msp:
         # DOOR 선은 경계다. 문짝 사각형과 open_doors 의 문짝은 뺀다.
+        # DOOR ARC(여닫이 스윙)는 경계가 아니다.
         if e.dxf.layer not in layers:
+            continue
+        if e.dxf.layer == DOOR_LAYER and e.dxftype() == "ARC":
             continue
         if e.dxf.layer == DOOR_LAYER and _door_leaf_rectangle(e):
             continue
@@ -559,12 +722,35 @@ def wall_segments(msp, boxes, *, include_door: bool = True, open_doors=None) -> 
             for i in range(n - 1 + (1 if e.closed else 0)):
                 a, b = pts[i], pts[(i + 1) % n]
                 parts.append((a[0], a[1], b[0], b[1]))
+        elif t in ("ARC", "CIRCLE"):
+            parts = _curve_parts(e)
+            if (
+                t == "ARC"
+                and e.dxf.layer in (WALL_LAYER, WINDOW_LAYER)
+                and parts
+            ):
+                try:
+                    arc_spans.append(
+                        (
+                            float(e.dxf.center.x),
+                            float(e.dxf.center.y),
+                            float(e.dxf.radius),
+                            float(e.dxf.start_angle) % 360.0,
+                            float(e.dxf.end_angle) % 360.0,
+                        )
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
         for x0, y0, x1, y1 in parts:
             if _inside_box((x0 + x1) * 0.5, (y0 + y1) * 0.5, boxes):
                 continue
             if e.dxf.layer == DOOR_LAYER and _segment_on_open_door(x0, y0, x1, y1, open_doors):
                 continue
             segs.append((x0, y0, x1, y1))
+    for x0, y0, x1, y1 in _bridged_arc_gap_chords(arc_spans):
+        if _inside_box((x0 + x1) * 0.5, (y0 + y1) * 0.5, boxes):
+            continue
+        segs.append((x0, y0, x1, y1))
     return segs
 
 
@@ -3012,7 +3198,11 @@ def evaluate(
             for item in boundary
         ],
         "rules": {
-            "boundary": "inner face of WALL, WINDOW, COLUMN, and DOOR lines",
+            "boundary": (
+                "inner face of WALL, WINDOW, COLUMN, and DOOR lines; "
+                "WALL/WINDOW ARC and CIRCLE are chord segments; "
+                f"same-ring ARC gaps up to {DOOR_GAP_MM:.0f} mm are bridged"
+            ),
             "door": door,
             "boundary_door_mm": DOOR_TOUCH_MM,
             "door_gap_mm": DOOR_GAP_MM,
