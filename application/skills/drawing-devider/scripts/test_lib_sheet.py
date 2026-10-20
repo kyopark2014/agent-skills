@@ -24,6 +24,8 @@ class ParseFloorLabelTests(unittest.TestCase):
             "EHP 4층 냉난방 제어 평면도": "4F",
             "EHP 지붕층 냉난방 제어 평면도": "RF",
             "EHP 지붕층 냉난방 철거 평면도": "RF",
+            "1층 냉난방 배관평면도": "1F",
+            "지붕층 냉난방 배관평면도": "RF",
             "지하1층": "B1F",
             "제2층": "2F",
             "B1F": "B1F",
@@ -227,6 +229,93 @@ class FacilityPlanSheetTests(unittest.TestCase):
 
         self.assertEqual(found.floors, ["5F", "13F"])
         self.assertTrue(any("다시 나눴" in note for note in found.warnings))
+
+    def test_defpoints_preferred_over_many_untitled_room_scraps(self):
+        """방·구역 조각(제목 없는 sheet)이 많아도 Defpoints 실시트·층 제목을 쓴다.
+
+        067_estgen_bio처럼 PY_01 등 작은 테두리가 도곽으로 잡히고,
+        실제 시트는 Defpoints 닫힌 폴리라인에만 있는 경우를 막는다.
+        """
+        import ezdxf
+
+        doc = ezdxf.new()
+        msp = doc.modelspace()
+
+        def scrap(x0, y0):
+            msp.add_lwpolyline(
+                [(x0, y0), (x0 + 14_000, y0), (x0 + 14_000, y0 + 18_000), (x0, y0 + 18_000)],
+                close=True,
+                dxfattribs={"layer": "PY_01"},
+            )
+            for index in range(40):
+                msp.add_line(
+                    (x0 + 1_000 + index * 200, y0 + 2_000),
+                    (x0 + 1_200 + index * 200, y0 + 2_200),
+                )
+
+        for col in range(4):
+            for row in range(4):
+                scrap(col * 40_000, row * 40_000)
+
+        def sheet(x0, y0, title):
+            msp.add_lwpolyline(
+                [(x0, y0), (x0 + 210_000, y0), (x0 + 210_000, y0 + 169_000), (x0, y0 + 169_000)],
+                close=True,
+                dxfattribs={"layer": "Defpoints"},
+            )
+            msp.add_text(title, dxfattribs={"insert": (x0 + 80_000, y0 + 8_000), "height": 2000})
+            for index in range(80):
+                msp.add_line(
+                    (x0 + 20_000 + (index % 20) * 8_000, y0 + 30_000 + (index // 20) * 20_000),
+                    (x0 + 20_500 + (index % 20) * 8_000, y0 + 30_200 + (index // 20) * 20_000),
+                )
+
+        sheet(600_000, 0, "1층 냉난방 배관평면도")
+        sheet(900_000, 0, "2층 냉난방 배관평면도")
+        sheet(1_200_000, 0, "지붕층 냉난방 배관평면도")
+
+        found = lib_sheet.discover_layout(doc, mode="sheet")
+
+        self.assertEqual(found.floors, ["1F", "2F", "RF"])
+        for frame in found.sheets:
+            self.assertGreaterEqual(
+                min(frame.bbox[2] - frame.bbox[0], frame.bbox[3] - frame.bbox[1]),
+                100_000,
+            )
+        self.assertTrue(any("다시 나눴" in note for note in found.warnings))
+
+    def test_untitled_basement_inferred_from_insert_suffix(self):
+        """제목 TEXT 없는 지하 Defpoints 도곽을 BASEMENT INSERT로 B1F로 붙인다."""
+        import ezdxf
+
+        doc = ezdxf.new()
+        msp = doc.modelspace()
+        basement = doc.blocks.new("Grid-4042931-BASEMENT FLOOR PLAN")
+        basement.add_line((0, 0), (1000, 0))
+
+        def sheet(x0, y0, title=None, insert_name=None):
+            msp.add_lwpolyline(
+                [(x0, y0), (x0 + 210_000, y0), (x0 + 210_000, y0 + 169_000), (x0, y0 + 169_000)],
+                close=True,
+                dxfattribs={"layer": "Defpoints"},
+            )
+            for index in range(80):
+                msp.add_line(
+                    (x0 + 20_000 + (index % 20) * 8_000, y0 + 30_000 + (index // 20) * 20_000),
+                    (x0 + 20_500 + (index % 20) * 8_000, y0 + 30_200 + (index // 20) * 20_000),
+                )
+            if title:
+                msp.add_text(title, dxfattribs={"insert": (x0 + 80_000, y0 + 8_000), "height": 2000})
+            if insert_name:
+                msp.add_blockref(insert_name, insert=(x0 + 40_000, y0 + 40_000))
+
+        sheet(0, 0, insert_name="Grid-4042931-BASEMENT FLOOR PLAN")
+        sheet(300_000, 0, title="1층 냉난방 배관평면도")
+
+        found = lib_sheet.discover_layout(doc, mode="sheet")
+
+        self.assertEqual(found.floors, ["B1F", "1F"])
+        self.assertTrue(any("INSERT" in note for note in found.warnings))
 
     def test_title_above_frame_and_empty_title_cell_dropped(self):
         """제목이 도곽 바로 위에 있고, 빈 복제 제목 칸만 제목을 품은 경우.

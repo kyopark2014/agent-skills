@@ -743,8 +743,18 @@ def resolve_summary_path(out_dir: Path, drawing_id: str) -> Path:
     return out_dir / drawing_id / "extract_summary.json"
 
 
-def merge_extract_summary(path: Path, summary: list[dict]) -> list[dict]:
-    """같은 도면의 이전 층 요약을 유지하고, 이번 층은 교체한다."""
+def merge_extract_summary(
+    path: Path,
+    summary: list[dict],
+    *,
+    replace_all: bool = False,
+) -> list[dict]:
+    """같은 도면의 이전 층 요약을 유지하고, 이번 층은 교체한다.
+
+    replace_all이면 이번 실행 층만 남긴다(옛 sheet_XX 잔여 제거).
+    """
+    if replace_all:
+        return list(summary)
     existing: list[dict] = []
     if path.is_file():
         try:
@@ -761,6 +771,24 @@ def merge_extract_summary(path: Path, summary: list[dict]) -> list[dict]:
             order.append(key)
         merged[key] = item
     return [merged[key] for key in order]
+
+
+def purge_stale_floor_dirs(drawing_dir: Path, keep_floors: set[str]) -> list[str]:
+    """이번 추출에 없는 floors/<F> 폴더를 지운다. 옛 sheet_XX 잔여 UI 혼선을 막는다."""
+    import shutil
+
+    floors_root = drawing_dir / "floors"
+    if not floors_root.is_dir():
+        return []
+    removed: list[str] = []
+    for child in sorted(floors_root.iterdir()):
+        if not child.is_dir():
+            continue
+        if child.name in keep_floors:
+            continue
+        shutil.rmtree(child)
+        removed.append(child.name)
+    return removed
 
 
 def resolve_original_path(
@@ -996,6 +1024,26 @@ def extract_floor(
     return result
 
 
+# 냉난방·배관 등 설비 평면도. ARCH 밑그림만 남기면 Autodesk 원본과 달라진다.
+_MECH_PLAN_TITLE = re.compile(
+    r"냉난방|배관|전열|환기|공조|EHP|GHP|ERV|HEAT\s*PUMP|VENTILATION",
+    re.IGNORECASE,
+)
+
+
+def is_mechanical_plan_title(title: str | None) -> bool:
+    """설비·배관 평면도 제목이면 True. 이 경우 구조(ARCH) 필터를 쓰지 않는다.
+
+    INSERT 접미만으로 보완한 층(`B1F (INSERT: …)`)도 같은 도면의 설비 시트로 본다.
+    """
+    if not title:
+        return False
+    text = str(title)
+    if _MECH_PLAN_TITLE.search(text):
+        return True
+    return "(INSERT:" in text
+
+
 def extract_sheet_floor(
     doc: Drawing,
     floor: str,
@@ -1013,7 +1061,9 @@ def extract_sheet_floor(
 ) -> dict:
     """도곽 bbox를 층으로 저장. 결과는 floor_original.dxf / floor_original.png.
 
-    건축 레이어가 있으면 벽·창·실명·문만 남긴다. 창선은 벽과 같이 둔다. floor_structure.* 는 쓰지 않는다.
+    건축 레이어가 있으면 벽·창·실명·문만 남긴다. 창선은 벽과 같이 둔다.
+    다만 냉난방·배관 등 설비 평면도 제목이면 도곽 안 전체 기하를 남긴다.
+    floor_structure.* 는 쓰지 않는다.
     """
     if variant not in {"clean", "original"}:
         raise ValueError(f"variant 오류: {variant!r}")
@@ -1027,7 +1077,7 @@ def extract_sheet_floor(
     entities: list[DXFEntity] = []
     used_inserts: set[int] = set()
     structural_mode = False
-    if variant == "original":
+    if variant == "original" and not is_mechanical_plan_title(getattr(sheet, "title", None)):
         packed = collect_structural_sheet(doc, clip)
         if packed is not None:
             entities, info = packed
@@ -1037,6 +1087,8 @@ def extract_sheet_floor(
                 f"doors={info['n_door_entities']} layers={info['layers']}"
             )
             print(f"  door blocks: {info['door_blocks']}")
+    elif variant == "original":
+        print("  mechanical plan title → full sheet geometry (skip ARCH-only filter)")
 
     def absorb_insert(ins: Insert) -> None:
         if id(ins) in used_inserts:
@@ -1451,7 +1503,16 @@ def main() -> int:
     meta_path = resolve_summary_path(out_dir, args.drawing_id)
     meta_path.parent.mkdir(parents=True, exist_ok=True)
     run_summary = summary
-    summary = merge_extract_summary(meta_path, summary)
+    # 발견된 전 층을 한 번에 뽑을 때만 옛 sheet_XX 등 잔여 폴더·요약을 지운다.
+    replace_all = floor_spec is None and not any("error" in item for item in summary)
+    if replace_all and args.drawing_id:
+        removed = purge_stale_floor_dirs(
+            out_dir / args.drawing_id,
+            {item.get("floor") for item in summary if item.get("floor")},
+        )
+        if removed:
+            print(f"  purged stale floors: {', '.join(removed)}")
+    summary = merge_extract_summary(meta_path, summary, replace_all=replace_all)
     meta_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
     list_path = upsert_drawing_list(out_dir, args.drawing_id, source_path, layout, run_summary)
     print(f"\nsummary → {meta_path}")

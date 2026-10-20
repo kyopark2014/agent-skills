@@ -249,8 +249,9 @@ def parse_plan_title(value: str) -> str | None:
 def parse_floor_label(value: str) -> str | None:
     """짧은 층 제목만 인정한다. 치수·실명·참조 문구는 제외.
 
-    '1층 평면도'뿐 아니라 '1층 냉난방 평면도', 'EHP 1층 냉난방 제어 평면도',
-    'EHP 지붕층 냉난방 철거 평면도'처럼 앞에 설비 코드가 있고
+    '1층 평면도'뿐 아니라 '1층 냉난방 평면도', '1층 냉난방 배관평면도',
+    'EHP 1층 냉난방 제어 평면도', 'EHP 지붕층 냉난방 철거 평면도',
+    '지붕층 냉난방 배관평면도'처럼 앞에 설비 코드가 있고
     층과 평면도 사이에 용도가 있는 제목도 인정한다.
     '4~5층 평면도'처럼 한 시트에 묶인 층 구간은 시작 층(4F)으로 둔다.
     '옥탑지붕 평면도'는 옥탑(PH)으로 둔다.
@@ -284,11 +285,12 @@ def parse_floor_label(value: str) -> str | None:
         return "PH"
     if re.fullmatch(rf"(?:옥상|지붕층|지붕|ROOF|RF)(?:\s*{_PLAN_TAIL})?", body, re.I):
         return "RF"
-    if re.fullmatch(rf"(?:옥상|지붕층|지붕|ROOF|RF)(?:\s+\S+){{1,4}}\s+{_PLAN_TAIL}", body, re.I):
+    # `\s*` — '지붕층 냉난방 배관평면도'처럼 용도+평면도가 붙어 있어도 인정한다.
+    if re.fullmatch(rf"(?:옥상|지붕층|지붕|ROOF|RF)(?:\s+\S+){{1,4}}\s*{_PLAN_TAIL}", body, re.I):
         return "RF"
     if re.fullmatch(rf"(?:옥탑층|옥탑|PH|PENTHOUSE)(?:\s*{_PLAN_TAIL})?", body, re.I):
         return "PH"
-    if re.fullmatch(rf"(?:옥탑층|옥탑|PH|PENTHOUSE)(?:\s+\S+){{1,4}}\s+{_PLAN_TAIL}", body, re.I):
+    if re.fullmatch(rf"(?:옥탑층|옥탑|PH|PENTHOUSE)(?:\s+\S+){{1,4}}\s*{_PLAN_TAIL}", body, re.I):
         return "PH"
     strict = re.fullmatch(rf"{_FLOOR_HEAD}(?:\s*{_PLAN_TAIL})?{_TRAIL_PAREN}$", body, re.I)
     if strict:
@@ -1578,6 +1580,146 @@ def _rebase_floor_frames(frames: list[SheetFrame]) -> list[SheetFrame]:
     ]
 
 
+def _named_floor_count(frames: list[SheetFrame]) -> int:
+    """sheet_XX·미확정이 아닌 층 제목이 붙은 도곽 수."""
+    return sum(1 for frame in frames if not str(frame.floor).startswith("sheet"))
+
+
+def _median_min_edge_mm(frames: list[SheetFrame]) -> float:
+    if not frames:
+        return 0.0
+    edges = sorted(
+        min(frame.bbox[2] - frame.bbox[0], frame.bbox[3] - frame.bbox[1]) for frame in frames
+    )
+    return edges[len(edges) // 2]
+
+
+def _prefer_construction_over_frames(
+    frames: list[SheetFrame], alt: list[SheetFrame]
+) -> bool:
+    """Defpoints 등 보조선 도곽이 일반 도곽보다 나으면 True.
+
+    방·구역 조각(제목 없는 sheet_XX 다수)보다, 층 제목이 붙은 실제 시트
+    (짧은 변 50 m 이상)를 우선한다. 제목 수가 같으면 개수가 더 많은 쪽.
+    """
+    if not alt:
+        return False
+    if not frames:
+        return True
+    named_alt = _named_floor_count(alt)
+    named_cur = _named_floor_count(frames)
+    if named_alt != named_cur:
+        return named_alt > named_cur
+    edge_alt = _median_min_edge_mm(alt)
+    edge_cur = _median_min_edge_mm(frames)
+    if named_alt > 0 and edge_alt >= _SHEET_MIN_EDGE_MM and edge_cur < _SHEET_MIN_EDGE_MM:
+        return True
+    if named_cur == 0 and edge_alt > edge_cur * 2.0 and edge_alt >= _SHEET_MIN_EDGE_MM:
+        return True
+    return len(alt) > len(frames)
+
+
+# INSERT 블록명에 붙은 층 평면 접미. 제목 TEXT가 없는 지하 시트 등에 쓴다.
+_INSERT_FLOOR_PLAN = (
+    (re.compile(r"BASEMENT\s+FLOOR\s+PLAN", re.I), "B1F"),
+    (re.compile(r"1ST_?\s*FLOOR\s+PLAN", re.I), "1F"),
+    (re.compile(r"2ND\s+FLOOR\s+PLAN", re.I), "2F"),
+    (re.compile(r"3RD\s+FLOOR\s+PLAN", re.I), "3F"),
+    (re.compile(r"4TH\s+FLOOR\s+PLAN", re.I), "4F"),
+    (re.compile(r"5TH\s+FLOOR\s+PLAN", re.I), "5F"),
+    (re.compile(r"ROOF\s+FLOOR\s+PLAN", re.I), "RF"),
+)
+_ROOM_CODE_FLOOR = re.compile(r"\bB(\d+)\.\d", re.I)
+
+
+def _infer_floor_from_clip(doc, bbox: tuple[float, float, float, float]) -> tuple[str, str] | None:
+    """도곽 안 INSERT·실명 코드로 층을 추론한다. ('B1F', 'BASEMENT…') 또는 None."""
+    votes: dict[str, int] = defaultdict(int)
+    evidence: dict[str, str] = {}
+    x0, y0, x1, y1 = bbox
+    for insert in doc.modelspace().query("INSERT"):
+        try:
+            ix = float(insert.dxf.insert.x)
+            iy = float(insert.dxf.insert.y)
+        except Exception:  # noqa: BLE001
+            continue
+        if not (x0 <= ix <= x1 and y0 <= iy <= y1):
+            continue
+        name = str(insert.dxf.name or "")
+        for pattern, floor in _INSERT_FLOOR_PLAN:
+            if pattern.search(name):
+                votes[floor] += 1
+                evidence.setdefault(floor, name[:80])
+                break
+    if votes:
+        floor = max(votes.items(), key=lambda item: item[1])[0]
+        return floor, evidence.get(floor, floor)
+
+    for entity in doc.modelspace():
+        if entity.dxftype() not in {"TEXT", "MTEXT"}:
+            continue
+        try:
+            ix = float(entity.dxf.insert.x)
+            iy = float(entity.dxf.insert.y)
+        except Exception:  # noqa: BLE001
+            continue
+        if not (x0 <= ix <= x1 and y0 <= iy <= y1):
+            continue
+        raw = plain_text(_entity_text(entity))
+        matched = _ROOM_CODE_FLOOR.search(raw)
+        if matched:
+            floor = f"B{int(matched.group(1))}F"
+            return floor, raw
+    return None
+
+
+def _claim_untitled_large_frames(
+    doc,
+    frames: list[SheetFrame],
+    rects: list[tuple[float, float, float, float]],
+    warnings: list[str],
+) -> list[SheetFrame]:
+    """제목 없는 큰 도곽을 INSERT 층 접미로 붙인다.
+
+    067처럼 지하 시트에 '지하층 … 평면도' TEXT가 없고 Defpoints 도곽만 있을 때
+    BASEMENT FLOOR PLAN INSERT로 B1F를 채운다. 이미 제목으로 잡힌 층은 건드리지 않는다.
+    """
+    if not rects:
+        return frames
+    taken_floors = {_base_floor_token(frame.floor) for frame in frames}
+    candidates: list[SheetFrame] = []
+    for rect in rects:
+        edge = min(rect[2] - rect[0], rect[3] - rect[1])
+        if edge < _SHEET_MIN_EDGE_MM:
+            continue
+        if any(_sheets_overlap(rect, frame.bbox) for frame in frames):
+            continue
+        inferred = _infer_floor_from_clip(doc, rect)
+        if inferred is None:
+            continue
+        floor, evidence = inferred
+        if floor in taken_floors:
+            continue
+        if _frame_geometry_count(doc, rect) < _MIN_FRAME_GEOM:
+            continue
+        candidates.append(SheetFrame(floor, f"{floor} (INSERT: {evidence})", rect, 0.0))
+    if not candidates:
+        return frames
+    # 바깥·안쪽 Defpoints가 같이 잡히면 실시트(안쪽)만 남긴다.
+    claimed = [
+        frame
+        for frame in _prefer_largest_same_floor(candidates)
+        if _base_floor_token(frame.floor) not in taken_floors
+    ]
+    if claimed:
+        warnings.append(
+            "제목 없는 도곽을 INSERT 층 접미로 보완했습니다. "
+            + ", ".join(frame.floor for frame in claimed)
+            + " 입니다."
+        )
+    return frames + claimed
+
+
 def discover_sheet_floors(doc) -> LayoutDiscovery:
     rects, lines, texts, plans, numbers, truncated = _collect_primitives(doc)
     warnings: list[str] = []
@@ -1600,16 +1742,23 @@ def discover_sheet_floors(doc) -> LayoutDiscovery:
         )
     frames = _frames_from_sheet_rects(rects, texts, plans, numbers, warnings)
     # Defpoints LINE은 쓰지 않지만, 닫힌 폴리라인 도곽은 후보로 둔다.
-    # 일반 도곽이 없거나(도면틀 끊김), 일부 층만 잡힌 경우(예: 한 장짜리 큰 테두리)에
-    # Defpoints 닫힌 도곽이 더 많은 층을 설명하면 그쪽을 쓴다.
+    # 일반 도곽이 없거나(도면틀 끊김), 방·구역 조각만 잡히거나, 층 제목이 더 적게
+    # 붙으면 Defpoints 닫힌 도곽을 쓴다. 개수만 비교하지 않는다.
     construction = _collect_construction_poly_rects(doc)
     if construction:
         alt_notes: list[str] = []
         alt = _frames_from_sheet_rects(construction, texts, plans, numbers, alt_notes)
-        if alt and (not frames or len(alt) > len(frames)):
+        if _prefer_construction_over_frames(frames, alt):
+            # 버린 일반 도곽의 sheet_XX·미확정 경고는 남기지 않는다.
+            warnings[:] = [
+                note
+                for note in warnings
+                if "도곽만으로 나눈" not in note
+                and "층 이름을 확정하지 못한 도곽" not in note
+            ]
             if frames:
                 warnings.append(
-                    "일반 도곽이 일부 층만 잡아 Defpoints 등 보조선 레이어의 "
+                    "일반 도곽이 층·크기를 제대로 못 잡아 Defpoints 등 보조선 레이어의 "
                     "닫힌 도곽으로 층을 다시 나눴습니다."
                 )
             else:
@@ -1618,6 +1767,10 @@ def discover_sheet_floors(doc) -> LayoutDiscovery:
                 )
             frames = alt
             warnings.extend(alt_notes)
+            frames = _claim_untitled_large_frames(doc, frames, construction, warnings)
+        elif _named_floor_count(frames) > 0:
+            # 제목 있는 층은 있는데 지하처럼 제목 없는 Defpoints만 남은 경우
+            frames = _claim_untitled_large_frames(doc, frames, construction, warnings)
     frames = _prefer_largest_same_floor(frames)
     building = _building_insert_frames(doc, texts, frames, warnings)
     if building:
