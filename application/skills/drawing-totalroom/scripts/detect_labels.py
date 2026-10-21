@@ -53,6 +53,75 @@ MIN_LABEL_AREA_M2 = 2.0
 TINY_AREA_SKIP_REASON = "면적이 2 m² 이하입니다"
 # 가까운 거리부터 왼쪽·오른쪽·위·아래(mm).
 NUDGE_STEPS_MM = (100.0, 200.0, 300.0, 400.0, 600.0, 800.0, 1000.0, 1500.0, 2000.0)
+# --fill-unlabeled: WALL 래스터 → morph close → connected components → 무명_N.
+# --sample-mm 은 래스터 셀 크기(mm). 작을수록 정밀·느림.
+DEFAULT_SAMPLE_MM = 100.0
+# fill 성분 최소 면적. 실명 라벨의 MIN_LABEL_AREA_M2(2 m²)와 따로 둔다.
+FILL_MIN_AREA_M2 = 1.0
+# 래스터 contour 를 벽 안쪽 면(detect_one)으로 바꿀 때: CC 와의 겹침·면적 상한.
+FILL_REFINE_MIN_OVERLAP = 0.50
+FILL_REFINE_MAX_AREA_RATIO = 2.5
+FILL_REFINE_MAX_AREA_EXTRA_M2 = 5.0
+# 실명 면이 모서리를 비워 둔 칸(가구 WALL 등) — 그 AABB 안 조각은 무명으로 안 붙인다.
+FILL_INSIDE_NAMED_BBOX_RATIO = 0.90
+FILL_INSIDE_NAMED_BBOX_PAD_MM = 50.0
+OCCUPIED_OVERLAP = 0.20
+EXTERIOR_AREA_FRAC = 0.85
+# 래스터 틈 메움(셀). 문선이 이미 경계에 있으면 작은 값이면 된다.
+FILL_CLOSE_CELLS = 3
+# 직교 WALL 자유 끝점 L 모서리 갭(mm). 기둥 자리에서 끊긴 코너를 fill 래스터만 잇는다.
+FILL_CORNER_GAP_MIN_MM = 200.0
+FILL_CORNER_GAP_MAX_MM = 1100.0
+FILL_CORNER_JOIN_MM = 50.0
+FILL_CORNER_AXIS_MM = 8.0
+FILL_MAX_GRID = 8000
+FILL_CONTOUR_EPS_PX = 1.5
+# llm_review/review.json 의 promote/demote bbox 중 이 글자가 들어가면 무명 제외.
+FILL_SKIP_REVIEW_AREA_LABELS = (
+    "계단",
+    "화장실",
+    "WC",
+    "승강기",
+    "외벽",
+    "침대",
+)
+FILL_SKIP_REVIEW_X_LABELS = ("X", "샤프트")
+FILL_SKIP_REVIEW_LABELS = FILL_SKIP_REVIEW_AREA_LABELS + FILL_SKIP_REVIEW_X_LABELS
+# 세면대 심볼 → 화장실로 보고 무명 제외.
+# 이중 닫힌 LWPOLYLINE(세면기 외곽·내곽) + 배수 CIRCLE, 또는 동심 CIRCLE 타원 세면기.
+SINK_DRAIN_R_MIN_MM = 10.0
+SINK_DRAIN_R_MAX_MM = 45.0
+SINK_OUTER_LONG_MM = (700.0, 950.0)
+SINK_OUTER_SHORT_MM = (400.0, 600.0)
+SINK_INNER_LONG_MM = (400.0, 600.0)
+SINK_INNER_SHORT_MM = (280.0, 480.0)
+SINK_NEST_CENTER_MM = 100.0
+SINK_DRAIN_NEAR_MM = 350.0
+SINK_OVAL_R_MM = (200.0, 250.0)
+SINK_OVAL_MATE_DR_MM = (8.0, 20.0)
+SINK_OVAL_MATE_CENTER_MM = 15.0
+SINK_OVAL_ARC_R_MM = (120.0, 260.0)
+SINK_OVAL_ARC_NEAR_MM = 180.0
+SINK_OVAL_ARC_MIN = 10
+SINK_DEDUPE_MM = 200.0
+# 칸 안 TEXT 에 있으면 화장실로 보고 라벨을 붙이지 않음(집기 표기 포함).
+FILL_BATHROOM_TEXT = ("세면대", "세면", "화장실", "WC", "W.C", "변기")
+# 교차 대각선(X) — drawing-llmvalidator promote_x_cover_squares 와 같은 범위.
+X_DIAG_LEN_MIN_MM = 200.0
+X_DIAG_LEN_MAX_MM = 15000.0
+X_DIAG_ASPECT_MIN = 0.08
+X_CROSS_SHORT_FRAC = 0.75
+X_SPAN_MIN_MM = 499.0
+X_SPAN_MAX_MM = 12000.0
+X_DOOR_THICK_MIN_MM = 80.0
+X_DOOR_THICK_MAX_MM = 360.0
+X_DOOR_SPAN_MIN_MM = 650.0
+X_DOOR_SPAN_MAX_MM = 1750.0
+X_DOOR_ASPECT_MAX = 0.5
+X_BBOX_PAD_MM = 100.0
+SYNTHETIC_PREFIX = "무명_"
+SYNTHETIC_SOURCE_UNLABELED = "unlabeled_fill"
+REVIEW_JSON_REL = Path("llm_review") / "review.json"
 def is_fixture_label(text: str) -> bool:
     """집기 이름, 또는 그 뒤에 번호만 붙은 표기. 목록은 drawing-roomevaluator label_info.json."""
     return room.is_fixture_label(text)
@@ -74,6 +143,34 @@ def layer_name(label: str, used: set[str]) -> str:
         n += 1
     used.add(name.lower())
     return name
+
+
+def disambiguate_duplicate_names(detected: list[dict]) -> None:
+    """같은 실명이 둘 이상이면 `이름#1`, `이름#2` … 로 나눠 요약 탭에서 따로 끌 수 있게 한다.
+
+    한 번만 나온 이름은 그대로 둔다. 도면에 이미 `이름#1` 이 있으면 그 번호는 건너뛴다.
+    """
+    by_name: dict[str, list[dict]] = {}
+    for inst in detected:
+        by_name.setdefault(inst["name"], []).append(inst)
+
+    claimed = {name for name, group in by_name.items() if len(group) == 1}
+    for name, group in by_name.items():
+        if len(group) < 2:
+            continue
+        group.sort(key=lambda item: (-float(item.get("y") or 0.0), float(item.get("x") or 0.0)))
+        next_n = 1
+        for inst in group:
+            base = str(inst.get("text") or name)
+            while True:
+                candidate = f"{base}#{next_n}"
+                next_n += 1
+                cand_name = room.norm_name(candidate)
+                if cand_name not in claimed:
+                    break
+            inst["text"] = candidate
+            inst["name"] = cand_name
+            claimed.add(cand_name)
 
 
 def rgb_for(index: int) -> tuple[int, int, int]:
@@ -606,6 +703,897 @@ def _face_key(pts: list[tuple[float, float]]) -> tuple[tuple[int, int], ...]:
     return tuple((round(x), round(y)) for x, y in pts)
 
 
+def _bbox_dict(bbox: dict) -> tuple[float, float, float, float] | None:
+    try:
+        return (
+            float(bbox["xmin"]),
+            float(bbox["ymin"]),
+            float(bbox["xmax"]),
+            float(bbox["ymax"]),
+        )
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def _occupied_polygons(detected: list[dict]) -> list[Polygon]:
+    out: list[Polygon] = []
+    for inst in detected:
+        poly = _host_polygon(inst)
+        if poly is not None and not poly.is_empty:
+            out.append(poly)
+    return out
+
+
+def _overlaps_occupied(poly: Polygon, occupied: list[Polygon], ratio: float = OCCUPIED_OVERLAP) -> bool:
+    if not occupied or poly.area <= 0.0:
+        return False
+    shared = 0.0
+    for other in occupied:
+        if not poly.intersects(other):
+            continue
+        shared += poly.intersection(other).area
+        if shared / poly.area > ratio:
+            return True
+    return shared / poly.area > ratio
+
+
+def _named_label_bboxes(
+    detected: list[dict],
+    pad_mm: float = FILL_INSIDE_NAMED_BBOX_PAD_MM,
+) -> list[Polygon]:
+    """실명(비-synthetic) 라벨 면의 축정렬 bbox. 모서리 빈 칸 무명 억제에 쓴다."""
+    out: list[Polygon] = []
+    pad = max(float(pad_mm), 0.0)
+    for inst in detected:
+        if inst.get("synthetic"):
+            continue
+        host = _host_polygon(inst)
+        if host is None or host.is_empty:
+            continue
+        minx, miny, maxx, maxy = host.bounds
+        out.append(box(minx - pad, miny - pad, maxx + pad, maxy + pad))
+    return out
+
+
+def _mostly_inside_named_bbox(
+    poly: Polygon,
+    named_bboxes: list[Polygon],
+    ratio: float = FILL_INSIDE_NAMED_BBOX_RATIO,
+) -> bool:
+    if not named_bboxes or poly.area <= 0.0:
+        return False
+    area = float(poly.area)
+    for bbox_poly in named_bboxes:
+        if float(poly.intersection(bbox_poly).area) / area >= ratio:
+            return True
+    return False
+
+
+def review_json_path(dxf_path: Path) -> Path:
+    """층 폴더의 llm_review/review.json."""
+    return dxf_path.parent / REVIEW_JSON_REL
+
+
+def load_skip_bboxes_from_review(
+    review_path: Path | None,
+    *,
+    labels: tuple[str, ...] = FILL_SKIP_REVIEW_LABELS,
+) -> list[tuple[float, float, float, float]]:
+    """review.json promote/demote bbox 중 계단·화장실·X 등 제외 라벨의 mm 상자."""
+    if review_path is None or not review_path.is_file():
+        return []
+    try:
+        data = json.loads(review_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+    tokens = tuple(room.norm_name(token) for token in labels if token)
+    if not tokens:
+        return []
+    out: list[tuple[float, float, float, float]] = []
+    for key in ("promote_bboxes", "demote_bboxes"):
+        rows = data.get(key)
+        if not isinstance(rows, list):
+            continue
+        for item in rows:
+            if not isinstance(item, dict):
+                continue
+            label = room.norm_name(str(item.get("label") or ""))
+            if not label or not any(token in label for token in tokens):
+                continue
+            try:
+                xmin = float(item["xmin"])
+                ymin = float(item["ymin"])
+                xmax = float(item["xmax"])
+                ymax = float(item["ymax"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if xmax <= xmin or ymax <= ymin:
+                continue
+            out.append((xmin, ymin, xmax, ymax))
+    return out
+
+
+def _bboxes_confirmed_by_geom(
+    vision: list[tuple[float, float, float, float]],
+    geom: list[tuple[float, float, float, float]],
+    *,
+    min_overlap: float = 0.10,
+) -> list[tuple[float, float, float, float]]:
+    """Vision X 상자 중 기하 교차 X 와 겹치는 것만. 문 스윙 오검 X 를 걸러 낸다."""
+    if not vision or not geom:
+        return []
+    geom_boxes = [box(*item) for item in geom]
+    out: list[tuple[float, float, float, float]] = []
+    for item in vision:
+        region = box(*item)
+        area = float(region.area)
+        if area <= 0.0:
+            continue
+        for other in geom_boxes:
+            if not region.intersects(other):
+                continue
+            shared = float(region.intersection(other).area)
+            if shared / min(area, float(other.area)) >= min_overlap:
+                out.append(item)
+                break
+    return out
+
+
+def _hits_skip_bbox(
+    poly: Polygon,
+    seed_x: float,
+    seed_y: float,
+    skip_bboxes: list[tuple[float, float, float, float]],
+    *,
+    overlap_ratio: float = 0.15,
+    max_poly_to_box: float | None = None,
+) -> bool:
+    """중심점이 상자 안이거나 면 겹침이 크면 제외.
+
+    max_poly_to_box 가 있으면 성분 면적이 상자보다 그 배수보다 클 때는
+    겹침 비율만으로는 제외하지 않는다(큰 홀이 작은 X 에 닿는 경우).
+    """
+    if not skip_bboxes:
+        return False
+    pt = Point(seed_x, seed_y)
+    for xmin, ymin, xmax, ymax in skip_bboxes:
+        if xmin <= seed_x <= xmax and ymin <= seed_y <= ymax:
+            return True
+        region = box(xmin, ymin, xmax, ymax)
+        if not poly.intersects(region):
+            continue
+        if region.covers(pt):
+            return True
+        if poly.area <= 0.0:
+            continue
+        shared = poly.intersection(region).area
+        if shared / poly.area < overlap_ratio:
+            continue
+        if max_poly_to_box is not None and region.area > 0.0:
+            if poly.area > region.area * max_poly_to_box:
+                continue
+        return True
+    return False
+
+
+def _segment_crosses(
+    a: tuple[float, float, float, float],
+    b: tuple[float, float, float, float],
+) -> bool:
+    """두 선분이 끝점만 닿지 않고 교차하면 True."""
+    ax0, ay0, ax1, ay1 = a
+    bx0, by0, bx1, by1 = b
+
+    def orient(px: float, py: float, qx: float, qy: float, rx: float, ry: float) -> float:
+        return (qy - py) * (rx - qx) - (qx - px) * (ry - qy)
+
+    def on_seg(px: float, py: float, qx: float, qy: float, rx: float, ry: float) -> bool:
+        return (
+            min(px, rx) - 1e-6 <= qx <= max(px, rx) + 1e-6
+            and min(py, ry) - 1e-6 <= qy <= max(py, ry) + 1e-6
+        )
+
+    o1 = orient(ax0, ay0, ax1, ay1, bx0, by0)
+    o2 = orient(ax0, ay0, ax1, ay1, bx1, by1)
+    o3 = orient(bx0, by0, bx1, by1, ax0, ay0)
+    o4 = orient(bx0, by0, bx1, by1, ax1, ay1)
+    if o1 * o2 < 0.0 and o3 * o4 < 0.0:
+        return True
+    if abs(o1) <= 1e-6 and on_seg(ax0, ay0, bx0, by0, ax1, ay1):
+        return True
+    if abs(o2) <= 1e-6 and on_seg(ax0, ay0, bx1, by1, ax1, ay1):
+        return True
+    if abs(o3) <= 1e-6 and on_seg(bx0, by0, ax0, ay0, bx1, by1):
+        return True
+    if abs(o4) <= 1e-6 and on_seg(bx0, by0, ax1, ay1, bx1, by1):
+        return True
+    return False
+
+
+def _closed_rect_size(
+    pts: list[tuple[float, float]],
+) -> tuple[float, float, float, float] | None:
+    """닫힌 폴리라인의 중심·가로·세로. 점이 부족하면 None."""
+    if len(pts) < 3:
+        return None
+    xs = [p[0] for p in pts]
+    ys = [p[1] for p in pts]
+    width = max(xs) - min(xs)
+    height = max(ys) - min(ys)
+    if width <= 0.0 or height <= 0.0:
+        return None
+    return (
+        (min(xs) + max(xs)) * 0.5,
+        (min(ys) + max(ys)) * 0.5,
+        width,
+        height,
+    )
+
+
+def _is_sink_outer(width: float, height: float) -> bool:
+    long_side, short_side = max(width, height), min(width, height)
+    return (
+        SINK_OUTER_LONG_MM[0] <= long_side <= SINK_OUTER_LONG_MM[1]
+        and SINK_OUTER_SHORT_MM[0] <= short_side <= SINK_OUTER_SHORT_MM[1]
+    )
+
+
+def _is_sink_inner(width: float, height: float) -> bool:
+    long_side, short_side = max(width, height), min(width, height)
+    return (
+        SINK_INNER_LONG_MM[0] <= long_side <= SINK_INNER_LONG_MM[1]
+        and SINK_INNER_SHORT_MM[0] <= short_side <= SINK_INNER_SHORT_MM[1]
+    )
+
+
+def find_sink_centers(msp) -> list[tuple[float, float]]:
+    """세면대 심볼 중심(mm).
+
+    1) BASE/0 이중 닫힌 LWPOLYLINE(세면기 외곽·내곽) + 배수 CIRCLE
+    2) 동심 CIRCLE 쌍(r 200–250) + 주변 ARC ≥10 (타원 세면기)
+    """
+    rects: list[tuple[float, float, float, float]] = []
+    circles: list[tuple[float, float, float]] = []
+    arcs: list[tuple[float, float, float]] = []
+    for entity in msp:
+        kind = entity.dxftype()
+        layer = str(getattr(entity.dxf, "layer", "") or "")
+        try:
+            if kind == "LWPOLYLINE":
+                if layer not in ("BASE", "0"):
+                    continue
+                if not bool(entity.closed):
+                    continue
+                sized = _closed_rect_size(list(entity.get_points("xy")))
+                if sized is not None:
+                    rects.append(sized)
+            elif kind == "CIRCLE":
+                center = entity.dxf.center
+                circles.append(
+                    (float(center.x), float(center.y), float(entity.dxf.radius))
+                )
+            elif kind == "ARC":
+                if layer not in ("BASE", "0"):
+                    continue
+                center = entity.dxf.center
+                arcs.append(
+                    (float(center.x), float(center.y), float(entity.dxf.radius))
+                )
+        except Exception:
+            continue
+
+    drains = [
+        (x, y)
+        for x, y, radius in circles
+        if SINK_DRAIN_R_MIN_MM <= radius <= SINK_DRAIN_R_MAX_MM
+    ]
+    outers = [
+        (x, y, w, h) for x, y, w, h in rects if _is_sink_outer(w, h)
+    ]
+    inners = [
+        (x, y, w, h) for x, y, w, h in rects if _is_sink_inner(w, h)
+    ]
+    sinks: list[tuple[float, float]] = []
+    for ox, oy, _ow, _oh in outers:
+        for ix, iy, _iw, _ih in inners:
+            if math.hypot(ox - ix, oy - iy) > SINK_NEST_CENTER_MM:
+                continue
+            if not any(
+                math.hypot(dx - ox, dy - oy) <= SINK_DRAIN_NEAR_MM
+                for dx, dy in drains
+            ):
+                continue
+            sinks.append(((ox + ix) * 0.5, (oy + iy) * 0.5))
+            break
+
+    for index, (x, y, radius) in enumerate(circles):
+        if not (SINK_OVAL_R_MM[0] <= radius <= SINK_OVAL_R_MM[1]):
+            continue
+        mate = False
+        for other_x, other_y, other_r in circles[index + 1 :]:
+            if math.hypot(other_x - x, other_y - y) > SINK_OVAL_MATE_CENTER_MM:
+                continue
+            delta = abs(other_r - radius)
+            if (
+                SINK_OVAL_MATE_DR_MM[0] <= delta <= SINK_OVAL_MATE_DR_MM[1]
+                and SINK_OVAL_R_MM[0] <= other_r <= SINK_OVAL_R_MM[1]
+            ):
+                mate = True
+                break
+        if not mate:
+            continue
+        oval_arcs = sum(
+            1
+            for ax, ay, ar in arcs
+            if math.hypot(ax - x, ay - y) <= SINK_OVAL_ARC_NEAR_MM
+            and SINK_OVAL_ARC_R_MM[0] <= ar <= SINK_OVAL_ARC_R_MM[1]
+        )
+        if oval_arcs >= SINK_OVAL_ARC_MIN:
+            sinks.append((x, y))
+
+    uniq: list[tuple[float, float]] = []
+    for x, y in sinks:
+        if any(math.hypot(x - ux, y - uy) <= SINK_DEDUPE_MM for ux, uy in uniq):
+            continue
+        uniq.append((x, y))
+    return uniq
+
+
+def _poly_has_sink(poly: Polygon, sinks: list[tuple[float, float]]) -> bool:
+    """세면대 중심이 칸 안에 있으면 True."""
+    if not sinks or poly.is_empty:
+        return False
+    return any(poly.covers(Point(x, y)) for x, y in sinks)
+
+
+def _poly_has_bathroom_text(msp, poly: Polygon) -> bool:
+    """칸 안 TEXT/MTEXT 에 세면·화장실·WC·변기가 있으면 True."""
+    tokens = tuple(room.norm_name(token) for token in FILL_BATHROOM_TEXT)
+    for entity in msp:
+        kind = entity.dxftype()
+        if kind not in ("TEXT", "MTEXT"):
+            continue
+        try:
+            if kind == "TEXT":
+                text = str(entity.dxf.text or "")
+                x = float(entity.dxf.insert.x)
+                y = float(entity.dxf.insert.y)
+            else:
+                text = str(entity.text or "")
+                x = float(entity.dxf.insert.x)
+                y = float(entity.dxf.insert.y)
+        except Exception:
+            continue
+        folded = room.norm_name(text.replace("\\P", " "))
+        if not folded or not any(token in folded for token in tokens):
+            continue
+        if poly.covers(Point(x, y)):
+            return True
+    return False
+
+
+def find_crossed_x_bboxes(msp) -> list[tuple[float, float, float, float]]:
+    """교차 대각선(X) 영역의 mm bbox.
+
+    drawing-llmvalidator 의 X 커버 규칙과 같다. 문 두께 안 얇은 X 는 뺀다.
+    """
+    diags: list[tuple[float, float, float, float, float]] = []
+    for entity in msp:
+        if entity.dxftype() != "LINE":
+            continue
+        try:
+            start = entity.dxf.start
+            end = entity.dxf.end
+            x0, y0 = float(start.x), float(start.y)
+            x1, y1 = float(end.x), float(end.y)
+        except Exception:  # noqa: BLE001
+            continue
+        dx, dy = abs(x1 - x0), abs(y1 - y0)
+        length = math.hypot(x1 - x0, y1 - y0)
+        if not (X_DIAG_LEN_MIN_MM <= length <= X_DIAG_LEN_MAX_MM) or max(dx, dy) <= 0.0:
+            continue
+        if min(dx, dy) / max(dx, dy) < X_DIAG_ASPECT_MIN:
+            continue
+        diags.append((x0, y0, x1, y1, length))
+    crosses: list[tuple[float, float, float, float]] = []
+    for index, left in enumerate(diags):
+        for right in diags[index + 1 :]:
+            short, long = sorted((left[4], right[4]))
+            if short < long * X_CROSS_SHORT_FRAC:
+                continue
+            if not _segment_crosses(left[:4], right[:4]):
+                continue
+            xs = (left[0], left[2], right[0], right[2])
+            ys = (left[1], left[3], right[1], right[3])
+            x0, x1 = min(xs), max(xs)
+            y0, y1 = min(ys), max(ys)
+            width, height = x1 - x0, y1 - y0
+            thick, span = min(width, height), max(width, height)
+            if thick < X_SPAN_MIN_MM or span > X_SPAN_MAX_MM:
+                continue
+            # 벽 두께 안 문 X
+            if (
+                X_DOOR_THICK_MIN_MM <= thick <= X_DOOR_THICK_MAX_MM
+                and X_DOOR_SPAN_MIN_MM <= span <= X_DOOR_SPAN_MAX_MM
+                and thick / span <= X_DOOR_ASPECT_MAX
+            ):
+                continue
+            crosses.append(
+                (
+                    x0 - X_BBOX_PAD_MM,
+                    y0 - X_BBOX_PAD_MM,
+                    x1 + X_BBOX_PAD_MM,
+                    y1 + X_BBOX_PAD_MM,
+                )
+            )
+    uniq: list[tuple[float, float, float, float]] = []
+    for item in crosses:
+        cx = (item[0] + item[2]) * 0.5
+        cy = (item[1] + item[3]) * 0.5
+        if any(
+            abs(cx - (u[0] + u[2]) * 0.5) < 500.0 and abs(cy - (u[1] + u[3]) * 0.5) < 500.0
+            for u in uniq
+        ):
+            continue
+        uniq.append(item)
+    return uniq
+
+
+def _raster_cell_mm(bounds: tuple[float, float, float, float], cell_mm: float) -> float:
+    """격자가 FILL_MAX_GRID 를 넘지 않게 셀을 키운다."""
+    minx, miny, maxx, maxy = bounds
+    width = max(maxx - minx, 1.0)
+    height = max(maxy - miny, 1.0)
+    cell = max(float(cell_mm), 1.0)
+    cols = int(math.ceil(width / cell)) + 1
+    rows = int(math.ceil(height / cell)) + 1
+    if max(cols, rows) <= FILL_MAX_GRID:
+        return cell
+    scale = max(cols, rows) / float(FILL_MAX_GRID)
+    return cell * scale
+
+
+def corner_bridge_segments(
+    segs,
+    *,
+    gap_min_mm: float = FILL_CORNER_GAP_MIN_MM,
+    gap_max_mm: float = FILL_CORNER_GAP_MAX_MM,
+    join_mm: float = FILL_CORNER_JOIN_MM,
+    axis_mm: float = FILL_CORNER_AXIS_MM,
+) -> list[tuple[float, float, float, float]]:
+    """끊긴 직교 WALL 끝점을 L 자로 잇는 가상 선분(fill 래스터 전용).
+
+    가로 자유 끝·세로 자유 끝이 각각 200–1100 mm 떨어지면 코너 (vx, hy) 로
+    두 변을 보강한다. 문 개구(동일 선상 갭)는 건드리지 않는다.
+    """
+    from collections import defaultdict
+
+    axis_segs: list[tuple[float, float, float, float, str]] = []
+    for seg in segs:
+        x0, y0, x1, y1 = float(seg[0]), float(seg[1]), float(seg[2]), float(seg[3])
+        if abs(y1 - y0) <= axis_mm and abs(x1 - x0) >= 80.0:
+            axis_segs.append((x0, y0, x1, y1, "h"))
+        elif abs(x1 - x0) <= axis_mm and abs(y1 - y0) >= 80.0:
+            axis_segs.append((x0, y0, x1, y1, "v"))
+
+    buckets: dict[tuple[int, int], int] = defaultdict(int)
+    for x0, y0, x1, y1, _orient in axis_segs:
+        for x, y in ((x0, y0), (x1, y1)):
+            buckets[(round(x / join_mm), round(y / join_mm))] += 1
+
+    def _is_free(x: float, y: float) -> bool:
+        qx, qy = round(x / join_mm), round(y / join_mm)
+        count = 0
+        for dx in (-1, 0, 1):
+            for dy in (-1, 0, 1):
+                count += buckets.get((qx + dx, qy + dy), 0)
+        return count <= 1
+
+    h_ends: list[tuple[float, float]] = []
+    v_ends: list[tuple[float, float]] = []
+    for x0, y0, x1, y1, orient in axis_segs:
+        for x, y in ((x0, y0), (x1, y1)):
+            if not _is_free(x, y):
+                continue
+            if orient == "h":
+                h_ends.append((x, y))
+            else:
+                v_ends.append((x, y))
+
+    bridges: list[tuple[float, float, float, float]] = []
+    seen: set[tuple[int, int, int, int]] = set()
+    for hx, hy in h_ends:
+        for vx, vy in v_ends:
+            dx = abs(hx - vx)
+            dy = abs(hy - vy)
+            if not (gap_min_mm <= dx <= gap_max_mm and gap_min_mm <= dy <= gap_max_mm):
+                continue
+            key = (round(hx / 50.0), round(hy / 50.0), round(vx / 50.0), round(vy / 50.0))
+            if key in seen:
+                continue
+            seen.add(key)
+            # L: 가로 끝 → 코너 → 세로 끝
+            bridges.append((hx, hy, vx, hy))
+            bridges.append((vx, hy, vx, vy))
+    return bridges
+
+
+def rasterize_wall_mask(
+    segs,
+    bbox: dict,
+    cell_mm: float = DEFAULT_SAMPLE_MM,
+) -> tuple[object, float, tuple[float, float, float, float]] | tuple[None, float, None]:
+    """벽 선을 이진 마스크로 그린다. (mask, cell_mm, bounds).
+
+    직교 자유 끝 L 모서리 갭은 가상 선으로 보강한 뒤 그린다.
+    """
+    import numpy as np
+    import cv2
+
+    bounds = _bbox_dict(bbox)
+    if bounds is None:
+        return None, cell_mm, None
+    minx, miny, maxx, maxy = bounds
+    if maxx <= minx or maxy <= miny:
+        return None, cell_mm, None
+    cell = _raster_cell_mm(bounds, cell_mm)
+    cols = int(math.ceil((maxx - minx) / cell)) + 1
+    rows = int(math.ceil((maxy - miny) / cell)) + 1
+    walls = np.zeros((rows, cols), dtype=np.uint8)
+
+    def to_px(x: float, y: float) -> tuple[int, int]:
+        return (
+            int(round((x - minx) / cell)),
+            int(round((maxy - y) / cell)),
+        )
+
+    draw_segs = list(segs) + corner_bridge_segments(segs)
+    for x0, y0, x1, y1, *_rest in draw_segs:
+        p0 = to_px(x0, y0)
+        p1 = to_px(x1, y1)
+        cv2.line(walls, p0, p1, 255, thickness=1, lineType=cv2.LINE_8)
+    return walls, cell, bounds
+
+
+def _flood_exterior(free: object) -> object:
+    """테두리와 이어진 빈 칸을 외곽으로 표시한 뒤, 내부 빈 칸만 남긴다."""
+    import numpy as np
+    import cv2
+
+    ff = (free.astype(np.uint8) * 255).copy()
+    height, width = ff.shape
+    mask = np.zeros((height + 2, width + 2), dtype=np.uint8)
+    for col in range(width):
+        if ff[0, col] == 255:
+            cv2.floodFill(ff, mask, (col, 0), 128)
+        if ff[height - 1, col] == 255:
+            cv2.floodFill(ff, mask, (col, height - 1), 128)
+    for row in range(height):
+        if ff[row, 0] == 255:
+            cv2.floodFill(ff, mask, (0, row), 128)
+        if ff[row, width - 1] == 255:
+            cv2.floodFill(ff, mask, (width - 1, row), 128)
+    return ff == 255
+
+
+def segment_unlabeled_components(
+    segs,
+    bbox: dict,
+    cell_mm: float = DEFAULT_SAMPLE_MM,
+    min_area_m2: float = MIN_LABEL_AREA_M2,
+) -> list[dict]:
+    """벽 래스터 + connected components 로 닫힌 빈 칸을 찾는다.
+
+    각 항목: pts(mm), x, y(centroid), area_m2, width_m, height_m.
+    """
+    import numpy as np
+    import cv2
+
+    walls, cell, bounds = rasterize_wall_mask(segs, bbox, cell_mm=cell_mm)
+    if walls is None or bounds is None:
+        return []
+    minx, miny, maxx, maxy = bounds
+    kernel = cv2.getStructuringElement(
+        cv2.MORPH_RECT, (FILL_CLOSE_CELLS, FILL_CLOSE_CELLS)
+    )
+    closed = cv2.morphologyEx(walls, cv2.MORPH_CLOSE, kernel)
+    free = closed == 0
+    interior = _flood_exterior(free)
+    if not np.any(interior):
+        return []
+    count, labels, stats, centroids = cv2.connectedComponentsWithStats(
+        interior.astype(np.uint8), connectivity=4
+    )
+    m2_per_px = (cell / 1000.0) ** 2
+    sheet_m2 = ((maxx - minx) / 1000.0) * ((maxy - miny) / 1000.0)
+    max_area = EXTERIOR_AREA_FRAC * sheet_m2 if sheet_m2 > 0 else float("inf")
+    rooms: list[dict] = []
+    for index in range(1, count):
+        area_px = float(stats[index, cv2.CC_STAT_AREA])
+        area_m2 = area_px * m2_per_px
+        if area_m2 <= min_area_m2 or area_m2 > max_area:
+            continue
+        component = (labels == index).astype(np.uint8)
+        contours, _hier = cv2.findContours(
+            component, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+        )
+        if not contours:
+            continue
+        contour = max(contours, key=cv2.contourArea)
+        approx = cv2.approxPolyDP(contour, FILL_CONTOUR_EPS_PX, True)
+        pts: list[tuple[float, float]] = []
+        for point in approx.reshape(-1, 2):
+            px, py = float(point[0]), float(point[1])
+            pts.append((minx + px * cell, maxy - py * cell))
+        if len(pts) < 3:
+            continue
+        if pts[0] == pts[-1]:
+            pts = pts[:-1]
+        if len(pts) < 3:
+            continue
+        area = abs(room.shoelace_m2(pts))
+        if area <= min_area_m2:
+            continue
+        cx, cy = float(centroids[index][0]), float(centroids[index][1])
+        seed_x = minx + cx * cell
+        seed_y = maxy - cy * cell
+        if not room.point_in_poly(seed_x, seed_y, pts):
+            poly = Polygon(pts)
+            if poly.is_valid and not poly.is_empty:
+                rep = poly.representative_point()
+                seed_x, seed_y = float(rep.x), float(rep.y)
+        left = float(stats[index, cv2.CC_STAT_LEFT])
+        top = float(stats[index, cv2.CC_STAT_TOP])
+        width_px = float(stats[index, cv2.CC_STAT_WIDTH])
+        height_px = float(stats[index, cv2.CC_STAT_HEIGHT])
+        rooms.append(
+            {
+                "pts": pts,
+                "holes": [],
+                "area_m2": area,
+                "column_protrusion_m2": 0.0,
+                "width_m": width_px * cell / 1000.0,
+                "height_m": height_px * cell / 1000.0,
+                "x": seed_x,
+                "y": seed_y,
+                "bbox_px": (left, top, width_px, height_px),
+            }
+        )
+    rooms.sort(key=lambda item: (-item["area_m2"], item["x"], item["y"]))
+    return rooms
+
+
+def _refine_fill_to_wall_face(
+    msp,
+    boxes,
+    segs,
+    door: str,
+    seed_x: float,
+    seed_y: float,
+    raster_poly: Polygon,
+    raster_area_m2: float,
+) -> dict | None:
+    """래스터 CC 씨앗에서 실명과 같은 벽 안쪽 면을 다시 잡는다(nudge 없음).
+
+    격자로 벽에 안 붙는 흰 띠를 없앤다. CC 와 많이 안 겹치거나 면이 지나치게
+    커지면(문으로 새는 경우) 거절하고 래스터 contour 를 쓴다.
+    """
+    found, _reason = detect_one(msp, boxes, segs, seed_x, seed_y, door=door)
+    if found is None:
+        return None
+    try:
+        vec = Polygon(found["pts"])
+    except (TypeError, ValueError):
+        return None
+    if not vec.is_valid:
+        vec = vec.buffer(0)
+    if vec.is_empty or vec.geom_type != "Polygon":
+        return None
+    seed = Point(seed_x, seed_y)
+    if not (vec.covers(seed) or vec.distance(seed) <= 1.0):
+        return None
+    raster_area = float(raster_poly.area)
+    if raster_area <= 0:
+        return None
+    if float(vec.intersection(raster_poly).area) / raster_area < FILL_REFINE_MIN_OVERLAP:
+        return None
+    max_area = max(
+        raster_area_m2 * FILL_REFINE_MAX_AREA_RATIO,
+        raster_area_m2 + FILL_REFINE_MAX_AREA_EXTRA_M2,
+    )
+    if float(found["area_m2"]) > max_area:
+        return None
+    return found
+
+
+def fill_unlabeled_rooms(
+    msp,
+    boxes,
+    segs,
+    detected: list[dict],
+    skipped: list[dict],
+    door: str,
+    bbox: dict,
+    sample_mm: float = DEFAULT_SAMPLE_MM,
+    *,
+    review_path: Path | None = None,
+) -> tuple[list[dict], list[dict]]:
+    """실명 없는 닫힌 칸을 래스터 CC 로 찾아 무명_N 을 붙인다.
+
+    CC 로 칸을 찾은 뒤 씨앗에서 벽 안쪽 면(detect_one)을 다시 잡아 격자로
+    생기는 틈을 메운다. llm_review/review.json 의 계단·화장실·승강기·외벽·침대·X bbox,
+    기하 교차 대각선(X), 세면대 심볼·세면/화장실 TEXT 와 겹치면 라벨을 붙이지 않는다.
+    """
+    occupied = _occupied_polygons(detected)
+    named_bboxes = _named_label_bboxes(detected)
+    skip_area = load_skip_bboxes_from_review(
+        review_path, labels=FILL_SKIP_REVIEW_AREA_LABELS
+    )
+    skip_vision_x_raw = load_skip_bboxes_from_review(
+        review_path, labels=FILL_SKIP_REVIEW_X_LABELS
+    )
+    skip_geom_x = find_crossed_x_bboxes(msp)
+    # review 의 X 는 문 스윙·좁은 통로를 덮는 오검이 많다. 기하 교차 X 와
+    # 겹칠 때만 vision X 를 쓰고, 아니면 기하 X 만으로 제외한다.
+    skip_vision_x = _bboxes_confirmed_by_geom(skip_vision_x_raw, skip_geom_x)
+    skip_x = list(skip_vision_x) + list(skip_geom_x)
+    sinks = find_sink_centers(msp)
+    components = segment_unlabeled_components(
+        segs, bbox, cell_mm=sample_mm, min_area_m2=FILL_MIN_AREA_M2
+    )
+    print(
+        f"fill-unlabeled: cc_components={len(components)} cell_mm={sample_mm:.0f}"
+        f" min_area_m2={FILL_MIN_AREA_M2:.0f}"
+        f" skip_area_bbox={len(skip_area)}"
+        f" skip_vision_x_bbox={len(skip_vision_x)}"
+        f"/{len(skip_vision_x_raw)}"
+        f" skip_geom_x_bbox={len(skip_geom_x)}"
+        f" sinks={len(sinks)}",
+        flush=True,
+    )
+    synth_n = 0
+    skipped_area = 0
+    skipped_x = 0
+    skipped_bath = 0
+    skipped_inside_named = 0
+    for index, comp in enumerate(components, start=1):
+        poly = Polygon(comp["pts"])
+        if not poly.is_valid:
+            poly = poly.buffer(0)
+        if poly.is_empty or poly.geom_type != "Polygon":
+            continue
+        if _overlaps_occupied(poly, occupied):
+            continue
+        if any(poly.covers(Point(inst["x"], inst["y"])) for inst in detected):
+            continue
+        label_x, label_y = comp["x"], comp["y"]
+        rep = poly.representative_point()
+        if room.point_in_poly(float(rep.x), float(rep.y), comp["pts"]):
+            label_x, label_y = float(rep.x), float(rep.y)
+        if _mostly_inside_named_bbox(poly, named_bboxes):
+            skipped_inside_named += 1
+            print(
+                f"[fill {index}/{len(components)}] skip inside named "
+                f"{comp['area_m2']:.2f} m2 @ ({label_x:.0f},{label_y:.0f})",
+                flush=True,
+            )
+            continue
+        if _hits_skip_bbox(poly, label_x, label_y, skip_area):
+            skipped_area += 1
+            print(
+                f"[fill {index}/{len(components)}] skip area review "
+                f"{comp['area_m2']:.2f} m2 @ ({label_x:.0f},{label_y:.0f})",
+                flush=True,
+            )
+            continue
+        # Vision/기하 X 칸만 제외. 큰 실이 작은 X 에 조금 겹치는 경우는 남긴다.
+        if _hits_skip_bbox(
+            poly,
+            label_x,
+            label_y,
+            skip_x,
+            overlap_ratio=0.50,
+            max_poly_to_box=4.0,
+        ):
+            skipped_x += 1
+            print(
+                f"[fill {index}/{len(components)}] skip X "
+                f"{comp['area_m2']:.2f} m2 @ ({label_x:.0f},{label_y:.0f})",
+                flush=True,
+            )
+            continue
+        if _poly_has_sink(poly, sinks) or _poly_has_bathroom_text(msp, poly):
+            skipped_bath += 1
+            print(
+                f"[fill {index}/{len(components)}] skip bathroom "
+                f"{comp['area_m2']:.2f} m2 @ ({label_x:.0f},{label_y:.0f})",
+                flush=True,
+            )
+            continue
+        refined = _refine_fill_to_wall_face(
+            msp,
+            boxes,
+            segs,
+            door,
+            label_x,
+            label_y,
+            poly,
+            float(comp["area_m2"]),
+        )
+        if refined is not None:
+            try:
+                refined_poly = Polygon(refined["pts"])
+            except (TypeError, ValueError):
+                refined_poly = None
+            if refined_poly is not None and not refined_poly.is_valid:
+                refined_poly = refined_poly.buffer(0)
+            if (
+                refined_poly is None
+                or refined_poly.is_empty
+                or refined_poly.geom_type != "Polygon"
+            ):
+                refined = None
+            elif _mostly_inside_named_bbox(refined_poly, named_bboxes):
+                skipped_inside_named += 1
+                print(
+                    f"[fill {index}/{len(components)}] skip inside named "
+                    f"{float(refined['area_m2']):.2f} m2 @ ({label_x:.0f},{label_y:.0f})",
+                    flush=True,
+                )
+                continue
+            elif (
+                _overlaps_occupied(refined_poly, occupied)
+                or _poly_has_sink(refined_poly, sinks)
+                or _poly_has_bathroom_text(msp, refined_poly)
+            ):
+                refined = None
+            else:
+                poly = refined_poly
+        synth_n += 1
+        text = f"{SYNTHETIC_PREFIX}{synth_n:03d}"
+        if refined is not None:
+            found = {
+                **refined,
+                "text": text,
+                "x": label_x,
+                "y": label_y,
+                "name": room.norm_name(text),
+                "synthetic": True,
+                "source": SYNTHETIC_SOURCE_UNLABELED,
+            }
+        else:
+            found = {
+                "pts": comp["pts"],
+                "holes": [],
+                "area_m2": comp["area_m2"],
+                "column_protrusion_m2": 0.0,
+                "width_m": comp["width_m"],
+                "height_m": comp["height_m"],
+                "drawing_area_m2": room.drawing_area_m2(msp, comp["pts"]),
+                "boundary_doors": [],
+                "text": text,
+                "x": label_x,
+                "y": label_y,
+                "name": room.norm_name(text),
+                "synthetic": True,
+                "source": SYNTHETIC_SOURCE_UNLABELED,
+            }
+        detected.append(found)
+        occupied.append(poly)
+        print(
+            f"[fill {index}/{len(components)}] {text}  {found['area_m2']:.2f} m2 "
+            f"@ ({label_x:.0f},{label_y:.0f})",
+            flush=True,
+        )
+    print(
+        f"fill-unlabeled: added={synth_n} "
+        f"skipped_area={skipped_area} skipped_x={skipped_x} "
+        f"skipped_bathroom={skipped_bath} skipped_inside_named={skipped_inside_named}",
+        flush=True,
+    )
+    return detected, skipped
+
+
 def _ink_width_mm(text: str, cap_mm: float, mm_per_inch: float) -> float:
     """PNG에 찍히는 글줄의 가로 길이. 한글은 네모, 숫자는 그보다 좁다."""
     fs = max(cap_mm, 1.0) / max(mm_per_inch, 1e-6) * 72.0
@@ -814,15 +1802,29 @@ def _public_instance(inst: dict, shared_with: list[str]) -> dict:
     }
     if shared_with:
         row["shared_with"] = shared_with
+    if inst.get("synthetic"):
+        row["synthetic"] = True
+        row["source"] = inst.get("source") or SYNTHETIC_SOURCE_UNLABELED
     return row
 
 
-def detect(dxf_path: Path, meta_path: Path, door: str = "close") -> dict:
+def detect(
+    dxf_path: Path,
+    meta_path: Path,
+    door: str = "close",
+    *,
+    fill_unlabeled: bool = False,
+    sample_mm: float = DEFAULT_SAMPLE_MM,
+) -> dict:
     started = time.time()
     doc = ezdxf.readfile(str(dxf_path))
     msp = doc.modelspace()
     seeds = collect_labels(msp)
-    print(f"labels: {len(seeds)} door: {door}", flush=True)
+    print(
+        f"labels: {len(seeds)} door: {door}"
+        + (f" fill_unlabeled sample_mm={sample_mm:.0f}" if fill_unlabeled else ""),
+        flush=True,
+    )
     boxes = room.column_boxes(msp)
     segs = room.wall_segments(msp, boxes)
     detected: list[dict] = []
@@ -850,6 +1852,31 @@ def detect(dxf_path: Path, meta_path: Path, door: str = "close") -> dict:
     detected = _subtract_anchor_faces(msp, segs, detected)
     detected, skipped = _drop_tiny_faces(detected, skipped)
 
+    meta = resolve_label_meta_bbox(
+        json.loads(meta_path.read_text(encoding="utf-8")),
+        msp,
+    )
+    bbox = meta.get("bbox_mm") if isinstance(meta.get("bbox_mm"), dict) else {}
+    if fill_unlabeled:
+        if not bbox:
+            xs, ys = _msp_xy_extents(msp)
+            bbox = _bbox_from_xy(xs, ys) if xs and ys else {}
+            meta = dict(meta)
+            meta["bbox_mm"] = bbox
+        detected, skipped = fill_unlabeled_rooms(
+            msp,
+            boxes,
+            segs,
+            detected,
+            skipped,
+            door,
+            bbox,
+            sample_mm=sample_mm,
+            review_path=review_json_path(dxf_path),
+        )
+
+    disambiguate_duplicate_names(detected)
+
     by_face: dict[tuple, list[str]] = {}
     for inst in detected:
         by_face.setdefault(_face_key(inst["pts"]), []).append(inst["text"])
@@ -864,6 +1891,7 @@ def detect(dxf_path: Path, meta_path: Path, door: str = "close") -> dict:
                 "label": inst["text"],
                 "layer": layer_name(inst["text"], used_layers),
                 "color": list(rgb_for(len(order))),
+                "synthetic": bool(inst.get("synthetic")),
                 "instances": [],
             }
             order.append(name)
@@ -875,11 +1903,6 @@ def detect(dxf_path: Path, meta_path: Path, door: str = "close") -> dict:
     dxf_out = out_dir / f"{OUT_STEM}.dxf"
     png_out = out_dir / f"{OUT_STEM}.png"
     json_out = out_dir / f"{OUT_STEM}.json"
-    meta = resolve_label_meta_bbox(
-        json.loads(meta_path.read_text(encoding="utf-8")),
-        msp,
-    )
-    bbox = meta.get("bbox_mm") if isinstance(meta.get("bbox_mm"), dict) else {}
     mm_per_inch = floor_sheet_mm_per_inch(bbox, _px_width(meta))
     write_dxf(
         doc,
@@ -901,16 +1924,18 @@ def detect(dxf_path: Path, meta_path: Path, door: str = "close") -> dict:
             if key not in seen_faces:
                 seen_faces.add(key)
                 unique_area += inst["area_m2"]
-        public_labels.append(
-            {
-                "label": item["label"],
-                "layer": item["layer"],
-                "color": item["color"],
-                "count": len(instances),
-                "area_m2": round(sum(row["area_m2"] for row in instances), 4),
-                "instances": instances,
-            }
-        )
+        row = {
+            "label": item["label"],
+            "layer": item["layer"],
+            "color": item["color"],
+            "count": len(instances),
+            "area_m2": round(sum(r["area_m2"] for r in instances), 4),
+            "instances": instances,
+        }
+        if item.get("synthetic"):
+            row["synthetic"] = True
+            row["source"] = SYNTHETIC_SOURCE_UNLABELED
+        public_labels.append(row)
 
     info = {
         "source_dxf": str(dxf_path),
@@ -927,14 +1952,35 @@ def detect(dxf_path: Path, meta_path: Path, door: str = "close") -> dict:
             "font": "PNG text is the TEXT stored on each label layer, drawn by the floor sheet renderer",
             "png": "rendered from floor_label_detected.dxf",
             "door": door,
+            "fill_unlabeled": fill_unlabeled,
+            "sample_mm": sample_mm if fill_unlabeled else None,
             "boundary": (
                 "inner face of WALL, WINDOW, COLUMN, and DOOR lines; "
                 "WALL/WINDOW ARC and CIRCLE are chord segments; "
                 "same-ring ARC gaps up to 2400 mm are bridged; "
                 "open affects only doors on that room's closed boundary"
             ),
-            "layer": "validated drawing plus one layer per label; HATCH area is that label; name and area text sit on the layer",
+            "layer": (
+                "validated drawing plus one layer per label; "
+                "duplicate room names get #1/#2 postfixes so each place is its own layer; "
+                "HATCH area is that label; name and area text sit on the layer"
+            ),
             "shared_face": "each label keeps the whole face; do not sum shared faces",
+            "unlabeled_fill": (
+                "optional --fill-unlabeled rasters WALL/DOOR segments, "
+                "L-bridges orthogonal free-end corner gaps (200-1100 mm), "
+                "morph-closes small raster gaps, runs connected components on interior free space, "
+                "then refits each seed to the vector wall inner face (detect_one, no nudge) "
+                "so hatches meet walls like named labels; assigns 무명_N; skips llm_review/review.json "
+                "stair/bathroom/elevator/outer-wall/bed bboxes, "
+                "geometric crossed-diagonal X regions "
+                "(review X only when it overlaps a geometric X), "
+                "pockets mostly inside a named label's axis-aligned bbox "
+                "(furniture WALL notches left out of the named face), "
+                "and bathroom wall cells (nested vanity LWPOLYLINE+drain CIRCLE, "
+                "concentric oval CIRCLE sinks, or 세면/화장실/WC/변기 TEXT); "
+                "--sample-mm is raster cell size; validated DXF is not modified"
+            ),
         },
     }
     json_out.write_text(json.dumps(info, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -959,11 +2005,30 @@ def main() -> None:
         default="close",
         help="각 실마다, 닫힌 벽 테두리에 닿는 문만 연다. close(기본)는 그 문도 막는다. 테두리 밖 DOOR는 어느 쪽이든 닫힌 경계로 둔다.",
     )
+    parser.add_argument(
+        "--fill-unlabeled",
+        action="store_true",
+        help="실명 없는 닫힌 칸을 벽 래스터·connected components 로 찾아 무명_N 을 더한다.",
+    )
+    parser.add_argument(
+        "--sample-mm",
+        type=float,
+        default=DEFAULT_SAMPLE_MM,
+        help=f"--fill-unlabeled 래스터 셀 크기(mm). 기본 {DEFAULT_SAMPLE_MM:.0f}",
+    )
     args = parser.parse_args()
     for path in (args.dxf, args.meta):
         if not path.is_file():
             raise SystemExit(f"파일이 없습니다: {path}")
-    info = detect(args.dxf, args.meta, door=args.door)
+    if args.sample_mm <= 0:
+        raise SystemExit("--sample-mm 은 양수여야 합니다")
+    info = detect(
+        args.dxf,
+        args.meta,
+        door=args.door,
+        fill_unlabeled=args.fill_unlabeled,
+        sample_mm=args.sample_mm,
+    )
     print(f"door: {info['rules']['door']}")
     print(f"label_count: {info['label_count']}")
     print(f"instance_count: {info['instance_count']}")

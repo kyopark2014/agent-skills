@@ -74,6 +74,9 @@ def _cmd(args: argparse.Namespace, floor: str) -> list[str]:
         "--door",
         args.door,
     ]
+    if args.fill_unlabeled:
+        cmd.append("--fill-unlabeled")
+        cmd.extend(["--sample-mm", str(args.sample_mm)])
     return cmd
 
 
@@ -114,6 +117,17 @@ def main() -> int:
     parser.add_argument("--skip", default=None, help="건너뛸 층")
     parser.add_argument("--door", choices=("close", "open"), default="close")
     parser.add_argument(
+        "--fill-unlabeled",
+        action="store_true",
+        help="실명 없는 닫힌 칸에 무명_N 을 채운다(래스터 CC). detect_labels.py 로 전달",
+    )
+    parser.add_argument(
+        "--sample-mm",
+        type=float,
+        default=100.0,
+        help="--fill-unlabeled 래스터 셀 크기(mm). 기본 100",
+    )
+    parser.add_argument(
         "--workers",
         type=int,
         default=None,
@@ -122,6 +136,8 @@ def main() -> int:
     args = parser.parse_args()
     if args.workers is not None and args.workers < 1:
         raise SystemExit("--workers 는 1 이상이어야 합니다")
+    if args.sample_mm <= 0:
+        raise SystemExit("--sample-mm 은 양수여야 합니다")
 
     if args.floors:
         floors = [item.strip() for item in args.floors.split(",") if item.strip()]
@@ -149,6 +165,8 @@ def main() -> int:
         "status": "failed" if failed else "completed",
         "workers": worker_n,
         "door": args.door,
+        "fill_unlabeled": bool(args.fill_unlabeled),
+        "sample_mm": args.sample_mm if args.fill_unlabeled else None,
     }
     if failed:
         summary["failed"] = failed
