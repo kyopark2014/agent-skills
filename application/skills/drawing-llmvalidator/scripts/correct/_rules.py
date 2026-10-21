@@ -22820,6 +22820,147 @@ def demote_swing_hinge_door_leaves(msp) -> int:
     return changed
 
 
+def promote_wall_between_adjacent_doors(msp) -> int:
+    """나란한 두 문 사이의 벽(T자 칸막이 머리)은 WALL.
+
+    같은 벽선에 문 개구가 두 개 있고 그 사이 갭(약 0.4–2.5 m)에 남는
+    면·짧은 리턴·칸막이 끝은 벽이다. 문짝·스윙·힌지 선은 올리지 않는다.
+    """
+    openings = list(find_double_door_openings(msp))
+    singles, _leaves, _sides = find_single_door_openings(msp, openings)
+    openings.extend(singles)
+    openings.extend(find_narrow_leaf_openings(msp, openings))
+    if len(openings) < 2:
+        return 0
+
+    by_wall: dict[tuple[bool, int], list[tuple[float, float, float]]] = defaultdict(list)
+    for is_v, ortho, a0, a1 in openings:
+        if a1 - a0 < 600.0:
+            continue
+        by_wall[(is_v, _bucket(ortho))].append((ortho, a0, a1))
+
+    gaps: list[tuple[bool, float, float, float]] = []
+    for (is_v, _ob), items in by_wall.items():
+        # Merge nearby ortho buckets (±150 mm) so 이중면 문이 한 줄로 묶인다.
+        items = sorted(items, key=lambda t: (t[1], t[0]))
+        # Expand with neighbors in ±3 buckets.
+        ortho_key = _ob
+        merged_pool = list(items)
+        for d in (-3, -2, -1, 1, 2, 3):
+            merged_pool.extend(by_wall.get((is_v, ortho_key + d * 50), []))
+        # Dedupe openings by along span.
+        uniq: list[tuple[float, float, float]] = []
+        for ortho, a0, a1 in sorted(merged_pool, key=lambda t: (t[1], t[2])):
+            if uniq and abs(uniq[-1][1] - a0) < 40.0 and abs(uniq[-1][2] - a1) < 40.0:
+                continue
+            uniq.append((ortho, a0, a1))
+        for i in range(len(uniq) - 1):
+            _o0, _a0, end0 = uniq[i]
+            o1, start1, _a1 = uniq[i + 1]
+            # Prefer pairs that don't nest; gap between end of left and start of right.
+            gap0, gap1 = end0, start1
+            gap = gap1 - gap0
+            if not (400.0 <= gap <= 2500.0):
+                continue
+            # Use mean ortho of the two openings as the host wall line.
+            host_ortho = 0.5 * (_o0 + o1)
+            gaps.append((is_v, host_ortho, gap0, gap1))
+
+    # Neighbor-bucket expansion can list the same gap more than once.
+    uniq_gaps: list[tuple[bool, float, float, float]] = []
+    for is_v, host_ortho, gap0, gap1 in sorted(gaps, key=lambda t: (t[0], t[2], t[3])):
+        if uniq_gaps:
+            p = uniq_gaps[-1]
+            if (
+                p[0] == is_v
+                and abs(p[1] - host_ortho) < 80.0
+                and abs(p[2] - gap0) < 40.0
+                and abs(p[3] - gap1) < 40.0
+            ):
+                continue
+        uniq_gaps.append((is_v, host_ortho, gap0, gap1))
+    gaps = uniq_gaps
+    if not gaps:
+        return 0
+
+    painted: set[int] = set()
+    n = 0
+    for entity in _entities(msp):
+        if getattr(entity.dxf, "layer", None) != BASE_LAYER:
+            continue
+        if _dxftype(entity) not in ("LINE", "LWPOLYLINE"):
+            continue
+        spans: list[tuple[tuple[float, float], tuple[float, float]]] = []
+        if _dxftype(entity) == "LINE":
+            try:
+                spans = [((_lx0(entity), _ly0(entity)), (_lx1(entity), _ly1(entity)))]
+            except Exception:  # noqa: BLE001
+                continue
+        else:
+            try:
+                pts = [(float(p[0]), float(p[1])) for p in _poly_xy(entity)]
+            except Exception:  # noqa: BLE001
+                continue
+            spans = list(zip(pts, pts[1:]))
+            if bool(getattr(entity, "closed", False)) and len(pts) > 2:
+                spans.append((pts[-1], pts[0]))
+        hit = False
+        for (x0, y0), (x1, y1) in spans:
+            dx, dy = abs(x1 - x0), abs(y1 - y0)
+            length = math.hypot(dx, dy)
+            if length < 50.0 or (dx > 80.0 and dy > 80.0):
+                continue
+            seg_v = dy >= dx
+            ortho = (x0 + x1) * 0.5 if seg_v else (y0 + y1) * 0.5
+            along0, along1 = (
+                (min(y0, y1), max(y0, y1)) if seg_v else (min(x0, x1), max(x0, x1))
+            )
+            for door_v, host_ortho, gap0, gap1 in gaps:
+                # Parallel face inside the gap (T자 머리의 긴·짧은 변).
+                if seg_v == door_v:
+                    if abs(ortho - host_ortho) > 400.0:
+                        continue
+                    if length < 40.0 or length > 3000.0:
+                        continue
+                    overlap = min(along1, gap1) - max(along0, gap0)
+                    # 긴 면은 대부분 갭 안, 짧은 잼 연결은 끝만 겹쳐도 된다.
+                    need = 0.55 * length if length >= 200.0 else min(30.0, 0.5 * length)
+                    if overlap < need:
+                        continue
+                    if along0 < gap0 - 80.0 or along1 > gap1 + 80.0:
+                        continue
+                    hit = True
+                    break
+                # Perpendicular return / 칸막이 끝 (T자 세로 줄기·짧은 리턴).
+                # 짧은 리턴은 힌지 근처(갭 경계 ±20)도 허용.
+                if length <= 120.0:
+                    if not (gap0 - 20.0 < ortho < gap1 + 20.0):
+                        continue
+                elif not (gap0 + 30.0 < ortho < gap1 - 30.0):
+                    continue
+                band0, band1 = host_ortho - 400.0, host_ortho + 400.0
+                if min(along1, band1) - max(along0, band0) < 40.0:
+                    continue
+                near_host = (
+                    abs(along0 - host_ortho) <= 150.0
+                    or abs(along1 - host_ortho) <= 150.0
+                )
+                short_return = 40.0 <= length <= 550.0
+                partition_tip = length > 550.0 and near_host
+                if not (short_return or partition_tip):
+                    continue
+                hit = True
+                break
+            if hit:
+                break
+        if not hit or id(entity) in painted:
+            continue
+        if _paint_layer(entity, WALL_LAYER, WALL_COLOR):
+            painted.add(id(entity))
+            n += 1
+    return n
+
+
 def promote_door_opening_flanks(msp) -> int:
     """문 개구 바로 바깥에서 문과 같은 줄로 이어진 짧은 면은 벽이다.
 

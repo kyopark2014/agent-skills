@@ -52,8 +52,8 @@ const PREVIEWS = [
   { kind: "wall", label: "Wall", file: "floor_wall_original.png" },
   { kind: "validated", label: "검증", file: "floor_wall_validated.png" },
   { kind: "label", label: "라벨", file: "floor_label_detected.png" },
-  // Wall/validated share the label overlay mm→px space; floor_original.png is often stale.
-  { kind: "summary", label: "요약", file: "floor_wall_original.png" },
+  // Validated walls match label overlay mm→px space; fall back to wall/original if missing.
+  { kind: "summary", label: "요약", file: "floor_wall_validated.png" },
 ] as const;
 
 type PreviewKind = (typeof PREVIEWS)[number]["kind"];
@@ -66,27 +66,19 @@ interface Props {
   onBack: () => void;
 }
 
-function imageKind(
-  kind: PreviewKind,
-  summaryValidated = false,
-): ImageFileKind {
-  // Summary overlays use validated-meta coordinates; wall PNG matches that framing.
-  if (kind === "summary") return summaryValidated ? "validated" : "wall";
+function imageKind(kind: PreviewKind): ImageFileKind {
+  if (kind === "summary") return "validated";
   return kind;
 }
 
-function summaryFileKind(
-  summaryValidated: boolean,
+/** Summary background: always try validated first, then wall, then original. */
+function summaryFallbackChain(
   files: { wall?: boolean; validated?: boolean; original?: boolean } | undefined,
-): ImageFileKind {
-  if (summaryValidated) {
-    if (files?.validated) return "validated";
-    if (files?.wall) return "wall";
-    return "original";
-  }
-  if (files?.wall) return "wall";
-  if (files?.validated) return "validated";
-  return "original";
+): ImageFileKind[] {
+  const chain: ImageFileKind[] = ["validated"];
+  if (!files || files.wall) chain.push("wall");
+  if (!files || files.original) chain.push("original");
+  return chain;
 }
 
 function imageSrc(
@@ -336,6 +328,7 @@ export function DrawingView({ drawingId, initialFloor, onMenuClick, onBack }: Pr
     x1: number;
     y1: number;
   } | null>(null);
+  const [summaryBgIndex, setSummaryBgIndex] = useState(0);
 
   const stageRef = useRef<HTMLDivElement>(null);
   const legendRef = useRef<HTMLDivElement>(null);
@@ -482,13 +475,20 @@ export function DrawingView({ drawingId, initialFloor, onMenuClick, onBack }: Pr
 
   const showLabelEditBar =
     canAddLabel && (addLabelMode || rectDrawMode || excludeDrawMode || pendingCount > 0);
-  /** While editing labels on summary, show validated walls instead of original. */
-  const summaryValidatedBg = showLabelEditBar;
-  const fileKind =
+  const summaryChain = summaryFallbackChain(selected);
+  const fileKind: ImageFileKind =
     kind === "summary"
-      ? summaryFileKind(summaryValidatedBg, selected)
-      : imageKind(kind, summaryValidatedBg);
-  const available = selected ? Boolean(selected[fileKind]) : null;
+      ? summaryChain[Math.min(summaryBgIndex, summaryChain.length - 1)] ?? "validated"
+      : imageKind(kind);
+  // Summary may load validated even if the catalog flag is briefly stale.
+  const available =
+    kind === "summary"
+      ? selected
+        ? Boolean(selected.validated || selected.wall || selected.original)
+        : null
+      : selected
+        ? Boolean(selected[fileKind])
+        : null;
   const src = floor ? imageSrc(drawingId, floor, fileKind) : "";
 
   const overlayLabels = useMemo(() => {
@@ -591,9 +591,13 @@ export function DrawingView({ drawingId, initialFloor, onMenuClick, onBack }: Pr
   }
 
   useEffect(() => {
+    setSummaryBgIndex(0);
+  }, [kind, floor, drawingId]);
+
+  useEffect(() => {
     if (kind !== "summary") return;
     beginImage();
-  }, [kind, summaryValidatedBg, floor]);
+  }, [kind, floor, summaryBgIndex]);
 
   function applyContain() {
     const stage = stageRef.current;
@@ -1350,7 +1354,13 @@ export function DrawingView({ drawingId, initialFloor, onMenuClick, onBack }: Pr
                     visibility: imageState === "ready" ? "visible" : "hidden",
                   }}
                   onLoad={(event) => markImageReady(event.currentTarget)}
-                  onError={() => setImageState("missing")}
+                  onError={() => {
+                    if (kind === "summary" && summaryBgIndex < summaryChain.length - 1) {
+                      setSummaryBgIndex((index) => index + 1);
+                      return;
+                    }
+                    setImageState("missing");
+                  }}
                 />
                 {(overlayLabels.length > 0 || rectDraft) && imageState === "ready" ? (
                   <svg

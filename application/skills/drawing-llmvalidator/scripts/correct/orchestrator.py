@@ -51,8 +51,9 @@ from correct._rules import (
     promote_control_booth_bottom, promote_corner_wall_squares,
     promote_corridor_door_flanks, promote_corridor_walls, promote_crossed_x_walls,
     promote_curved_corner_walls, promote_diagonal_strip_windows,
-    promote_diagonal_wall_turns, promote_door_opening_flanks,
+    promote_diagonal_wall_turns,     promote_door_opening_flanks,
     promote_door_side_corner_runs, promote_door_side_doubles,
+    promote_wall_between_adjacent_doors,
     promote_double_sash_windows, promote_elevator_enclosure_walls,
     promote_end_wall_columns, promote_equipment_store_walls,
     promote_exec_meeting_right, promote_grid_door_flanks, promote_h_symbol_columns,
@@ -591,6 +592,7 @@ def apply_corrections(
         n_column_promoted += promote_hbeam_columns(msp)
     marked = mark_doors_and_columns(msp)
     n_promoted += promote_door_opening_flanks(msp)
+    n_promoted += promote_wall_between_adjacent_doors(msp)
     n_promoted += promote_door_side_doubles(msp)
     n_promoted += promote_door_side_corner_runs(msp)
     n_promoted += promote_service_core_walls(msp)

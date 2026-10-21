@@ -74,6 +74,7 @@ from correct._rules import (  # noqa: F401
     separate_locker_entrance_doors,
     separate_wide_staggered_doors,
     promote_door_opening_flanks,
+    promote_wall_between_adjacent_doors,
     promote_door_side_doubles,
     promote_door_side_corner_runs,
     add_paired_swing_walls,
