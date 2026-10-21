@@ -5,7 +5,8 @@ description: >-
   한 번에 수행합니다. 도면 분석, 면적 조사, 실명 면적, 전체 실 면적, area sizing,
   "이 도면 면적 뽑아" 요청 시 이 스킬을 사용합니다. 내부에서 drawing-devider,
   drawing-walldetector, drawing-llmvalidator, drawing-totalroom 을 순서대로
-  실행합니다. 추출만·벽만·검증만·실 하나만이면 그 개별 스킬을 씁니다.
+  실행합니다. totalroom 단계에서는 --fill-unlabeled 로 실명 없는 칸(무명_N)까지
+  채웁니다. 추출만·벽만·검증만·실 하나만이면 그 개별 스킬을 씁니다.
 ---
 
 # drawing-areasizing (도면 면적 조사)
@@ -19,7 +20,7 @@ drawing-walldetector   floor_wall_original
         ↓
 drawing-llmvalidator   floor_wall_validated
         ↓
-drawing-totalroom      floor_label_detected
+drawing-totalroom      floor_label_detected  (--fill-unlabeled 포함)
 ```
 
 검출·검증·면적 규칙의 원본은 각 스킬의 `SKILL.md`다. 이 스킬은 **순서, 대상 범위, 단계 사이 파일 연결**만 정한다. 규칙을 여기에 다시 적거나, 스크립트를 새로 만들지 않는다.
@@ -171,14 +172,27 @@ python3 "$SKILLS/drawing-llmvalidator/scripts/render_wall_diff.py" \
 
 `get_skill_instructions(..., "drawing-totalroom")` 후 범위 안 층의 라벨 실을 한 번에 계산한다. 인터프리터는 `python3.13`이다. 층이 하나면 그 층 DXF를 `detect_labels.py`에 넘긴다.
 
+면적 조사에서는 **항상** `--fill-unlabeled`를 붙인다. 실명 라벨만 잡고 멈추지 않는다(복도·전실 등 `무명_N` 포함).
+
 ```bash
 python3.13 "$SKILLS/drawing-totalroom/scripts/detect_labels_all.py" \
   --artifacts "$ARTIFACTS_DIR/<drawing_id>" \
   --floors <F,F> \
-  --door close
+  --door close \
+  --fill-unlabeled
 ```
 
-`--door`를 생략하면 `close`다. 사용자가 각 실의 인접 문을 열라고 하면 `--door open`을 붙인다.
+층이 하나면:
+
+```bash
+python3.13 "$SKILLS/drawing-totalroom/scripts/detect_labels.py" \
+  --dxf "$ARTIFACTS_DIR/<drawing_id>/floors/<floor>/floor_wall_validated.dxf" \
+  --meta "$ARTIFACTS_DIR/<drawing_id>/floors/<floor>/floor_wall_validated_meta.json" \
+  --door close \
+  --fill-unlabeled
+```
+
+`--door`를 생략하면 `close`다. 사용자가 각 실의 인접 문을 열라고 하면 `--door open`을 붙인다. `--fill-unlabeled`는 빼지 않는다.
 
 `floor_label_detected.*`가 이미 있어도 skip 하지 않고 같은 폴더에 덮어쓴다. 산출: `floor_label_detected.dxf`, `.png`, `.json`.
 
