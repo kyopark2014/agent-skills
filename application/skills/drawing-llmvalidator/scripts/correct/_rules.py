@@ -23142,7 +23142,7 @@ def _find_side_pocket_sliding_doors(msp) -> list[dict]:
             rec for rec in records
             if rec["vertical"] is vertical
             and 700.0 <= rec["length"] <= 1200.0
-            and rec["layer"] in (WALL_LAYER, BASE_LAYER)
+            and rec["layer"] in (WALL_LAYER, BASE_LAYER, DOOR_LAYER)
         ]
         for left, right in pairs:
             band0, band1 = left["perp"], right["perp"]
@@ -29697,6 +29697,11 @@ def mark_doors_and_columns(msp) -> dict[str, Any]:
         doors.append({
             "kind": "sliding",
             "bbox_mm": [round(value, 1) for value in box],
+        })
+    for door in _find_side_pocket_sliding_doors(msp):
+        doors.append({
+            "kind": "sliding",
+            "bbox_mm": [round(value, 1) for value in door["bbox"]],
         })
 
     for entity in _entities(msp):
