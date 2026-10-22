@@ -95,6 +95,7 @@ from correct._rules import (
     separate_lr_arrow_sliding_doors, separate_observation_windows,
     separate_pocket_face_doors, separate_short_staggered_doors,
     separate_side_pocket_sliding_doors,
+    separate_inwall_line_sliding_doors,
     separate_sliding_door_panels, separate_stacked_sliding_panels,
     separate_stepped_sliding_doors, separate_track_sliding_doors,
     separate_wide_staggered_doors
@@ -220,7 +221,7 @@ def apply_corrections(
     # review demote 는 protect 차감 대상이 아니다.
     # 과대 bbox 는 normalize_bbox_list 에서 이미 skip 되므로,
     # 남은 박스는 Vision 명시 판정 → 복도·계단·엘리베이터·H-Beam protect 보다 우선.
-    # 가구·침대 demote는 창문 keep에 막히지 않고, 그 외는 문 양옆·창문·기둥을 남긴다.
+    # 침대 demote는 평행 이중·윤곽만. 가구는 창문 keep에 막히지 않음. 그 외는 문 양옆·창문·기둥 유지.
     review_boxes = review.get("demote_bboxes") or []
     review_demote = review_demote_ids(msp, review_boxes, column_ids=hbeam_ids)
     door_sides = door_side_wall_ids(msp, review_boxes)
@@ -573,6 +574,10 @@ def apply_corrections(
     n_side_pocket_demote, n_side_pocket_promote = separate_side_pocket_sliding_doors(msp)
     n_demoted += n_side_pocket_demote
     n_promoted += n_side_pocket_promote
+    # 후반 promote 전에 한 번 DOOR로 두어 다시 WALL로 올라가지 않게 한다.
+    n_inwall_demote, n_inwall_promote = separate_inwall_line_sliding_doors(msp)
+    n_demoted += n_inwall_demote
+    n_promoted += n_inwall_promote
     n_diag_pocket_demote, n_diag_pocket_promote = separate_diagonal_pocket_face_doors(msp)
     n_demoted += n_diag_pocket_demote
     n_promoted += n_diag_pocket_promote
@@ -688,6 +693,12 @@ def apply_corrections(
 
     # 후반 demote 가 스윙문 가상 닫힘·이중벽 바깥면을 지울 수 있어 마지막에 다시 잇는다.
     n_promoted += add_closed_door_wall_lines(msp)
+
+    # 후반 promote 가 BASE 이중 문짝을 다시 WALL로 올릴 수 있어, 레이어 분리 직전에 DOOR로 둔다.
+    # 김해보음 3F 4인실#3(~1.42 m·양끝 턱)처럼 1.4 m를 넘는 LINE 이중 미닫이도 포함한다.
+    n_inwall_demote, n_inwall_promote = separate_inwall_line_sliding_doors(msp)
+    n_demoted += n_inwall_demote
+    n_promoted += n_inwall_promote
 
     marked = mark_doors_and_columns(msp)
 

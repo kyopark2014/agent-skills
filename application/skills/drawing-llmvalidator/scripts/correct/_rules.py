@@ -5389,6 +5389,110 @@ def _is_furniture_demote_label(label: object) -> bool:
     return text.startswith("가구") or text.startswith("침대")
 
 
+
+def _is_bed_demote_label(label: object) -> bool:
+    return str(label or "").strip().startswith("침대")
+
+
+def demote_bed_geometry_in_bboxes(
+    msp,
+    bboxes: Iterable[Any],
+) -> set[int]:
+    """Vision 침대 bbox 안: 침대형 평행 이중선·침대 윤곽 폴리선만 demote.
+
+    머리 맞댄 침대 둘이 한 상자에 들어가도 되고, 중점만 보고 상자 안 WALL을
+    전부 내리면 실간 격벽(간격 ~150 mm·길이 수 m)까지 지워진다. 침대 프레임
+    이중(간격 20–100 mm, 변 0.45–2.4 m)과 침대 크기 폴리선만 대상으로 한다.
+    나머지(매트리스 사선·베개 단선 등)는 ``demote_hospital_beds`` 기하가 보완한다.
+    """
+    boxes = normalize_bbox_list(list(bboxes), field="demote_bboxes")
+    if not boxes:
+        return set()
+
+    def _in_any(mx: float, my: float) -> bool:
+        for b in boxes:
+            if b["xmin"] <= mx <= b["xmax"] and b["ymin"] <= my <= b["ymax"]:
+                return True
+        return False
+
+    def _overlap(a0: float, a1: float, b0: float, b1: float) -> float:
+        return max(0.0, min(a1, b1) - max(a0, b0))
+
+    class _Seg:
+        __slots__ = ("entity", "ori", "coord", "a0", "a1", "length")
+
+        def __init__(self, entity, ori, coord, a0, a1, length):
+            self.entity = entity
+            self.ori = ori
+            self.coord = coord
+            self.a0 = a0
+            self.a1 = a1
+            self.length = length
+
+    segs: list[_Seg] = []
+    for entity in _entities(msp):
+        if getattr(entity.dxf, "layer", None) != WALL_LAYER:
+            continue
+        axis = _axis_line(entity)
+        if axis is None:
+            continue
+        ori, coord, a0, a1, length = axis
+        if not (450.0 <= length <= 2400.0):
+            continue
+        mx = coord if ori == "V" else (a0 + a1) * 0.5
+        my = (a0 + a1) * 0.5 if ori == "V" else coord
+        if not _in_any(mx, my):
+            continue
+        segs.append(_Seg(entity, ori, coord, a0, a1, length))
+
+    demote: set[int] = set()
+    for ori in ("H", "V"):
+        group = [s for s in segs if s.ori == ori]
+        group.sort(key=lambda s: s.coord)
+        for i, left in enumerate(group):
+            for right in group[i + 1 :]:
+                gap = right.coord - left.coord
+                if gap < 20.0:
+                    continue
+                if gap > 100.0:
+                    break
+                ov = _overlap(left.a0, left.a1, right.a0, right.a1)
+                if ov < 0.55 * min(left.length, right.length):
+                    continue
+                if ov < 400.0:
+                    continue
+                demote.add(id(left.entity))
+                demote.add(id(right.entity))
+
+    # 닫힌·모서리 둥근 열린 폴리선 침대 윤곽(기하 demote_hospital_beds와 동일 치수).
+    for entity in _entities(msp):
+        if getattr(entity.dxf, "layer", None) != WALL_LAYER:
+            continue
+        if _dxftype(entity) != "LWPOLYLINE":
+            continue
+        pts = _polyline_xy(entity)
+        if len(pts) >= 2 and math.hypot(
+            pts[0][0] - pts[-1][0], pts[0][1] - pts[-1][1]
+        ) <= 1.0:
+            pts = pts[:-1]
+        closed = bool(entity.closed)
+        if closed:
+            if not (4 <= len(pts) <= 16):
+                continue
+        elif not (8 <= len(pts) <= 24):
+            continue
+        xs = [p[0] for p in pts]
+        ys = [p[1] for p in pts]
+        x0, x1, y0, y1 = min(xs), max(xs), min(ys), max(ys)
+        width, height = x1 - x0, y1 - y0
+        short, long = min(width, height), max(width, height)
+        if not (500.0 <= short <= 950.0 and 1400.0 <= long <= 2400.0):
+            continue
+        if _in_any((x0 + x1) * 0.5, (y0 + y1) * 0.5):
+            demote.add(id(entity))
+    return demote
+
+
 def review_demote_ids(
     msp,
     bboxes: Iterable[Any],
@@ -5397,28 +5501,40 @@ def review_demote_ids(
 ) -> set[int]:
     """Vision demote 대상 id.
 
-    가구·침대 상자는 창문·개구 keep에 막히지 않는다(기둥·기둥 맞닿은 면만 남김).
+    침대 상자는 침대형 평행 이중선·침대 윤곽 폴리선만 내린다(상자 안 전 WALL 아님).
+    가구 상자는 창문·개구 keep에 막히지 않는다(기둥 본체만 남김).
     그 외 demote 상자는 기존 keep(문 양옆·창문·기둥·개구 격벽)을 적용한다.
     사선 포셰 벽은 침대 bbox가 가로질러도 지우지 않는다.
     """
     boxes = list(bboxes or [])
-    furn = [b for b in boxes if isinstance(b, dict) and _is_furniture_demote_label(b.get("label"))]
+    bed = [
+        b for b in boxes if isinstance(b, dict) and _is_bed_demote_label(b.get("label"))
+    ]
+    furn = [
+        b
+        for b in boxes
+        if isinstance(b, dict)
+        and str(b.get("label") or "").strip().startswith("가구")
+    ]
     other = [
         b
         for b in boxes
         if not (isinstance(b, dict) and _is_furniture_demote_label(b.get("label")))
     ]
     cols = set(column_ids) if column_ids is not None else find_hbeam_column_entities(msp)
-    # 가구·침대: 기둥 본체만 남긴다. 기둥 맞닿은 면 keep은 소파 장변까지 삼킨다.
-    result = demote_in_bboxes(msp, furn)
+    # 침대: 평행 이중·윤곽만. 가구: 상자 안 WALL(기둥 본체 제외).
+    result = demote_bed_geometry_in_bboxes(msp, bed)
     result -= cols
     result -= diagonal_hatch_wall_ids(msp)
+    furn_ids = demote_in_bboxes(msp, furn)
+    furn_ids -= cols
+    furn_ids -= diagonal_hatch_wall_ids(msp)
+    result |= furn_ids
     other_ids = demote_in_bboxes(msp, other)
     other_ids -= review_demote_keep_ids(msp, other, column_ids=cols)
     other_ids -= diagonal_hatch_wall_ids(msp)
     result |= other_ids
     return result
-
 
 def demote_in_bboxes(
     msp,
@@ -23247,6 +23363,185 @@ def separate_side_pocket_sliding_doors(msp) -> tuple[int, int]:
     return n_demote, n_promote
 
 
+def _find_inwall_line_sliding_doors(msp) -> list[dict]:
+    """벽 두께 안의 LINE 이중 문짝(+끝 턱)을 찾는다.
+
+    간격 20–100 mm·길이 0.55–1.55 m 평행 두 줄이 이중벽(80–350 mm)
+    포켓 안에 있거나, 양끝이 짧은 턱으로 막혀 있으면 미닫이 문짝이다.
+    김해보음병원 서관 3F 탕비실·4인실#3 입구가 그 예다(4인실#3은 ~1.42 m).
+    닫힌 폴리선 문짝과 달리 선 두 줄로만 그린 경우다.
+    """
+    leaves: list[dict] = []
+    faces: list[dict] = []
+    caps: list[dict] = []
+    for entity in _entities(msp):
+        if _dxftype(entity) != "LINE":
+            continue
+        layer = getattr(entity.dxf, "layer", None)
+        if layer not in (WALL_LAYER, BASE_LAYER, DOOR_LAYER):
+            continue
+        try:
+            x0, y0, x1, y1 = _line_xy(entity)
+        except Exception:  # noqa: BLE001
+            continue
+        length = math.hypot(x1 - x0, y1 - y0)
+        if length < 15.0:
+            continue
+        if abs(x1 - x0) <= 20.0:
+            vertical = True
+            perp = (x0 + x1) / 2.0
+            along0, along1 = min(y0, y1), max(y0, y1)
+        elif abs(y1 - y0) <= 20.0:
+            vertical = False
+            perp = (y0 + y1) / 2.0
+            along0, along1 = min(x0, x1), max(x0, x1)
+        else:
+            continue
+        rec = {
+            "entity": entity,
+            "vertical": vertical,
+            "perp": perp,
+            "a0": along0,
+            "a1": along1,
+            "length": length,
+            "layer": layer,
+        }
+        if 550.0 <= length <= 1550.0:
+            leaves.append(rec)
+        if length >= 600.0:
+            faces.append(rec)
+        if 15.0 <= length <= 120.0:
+            caps.append(rec)
+
+    def _overlap(a0: float, a1: float, b0: float, b1: float) -> float:
+        return max(0.0, min(a1, b1) - max(a0, b0))
+
+    found: list[dict] = []
+    used: set[int] = set()
+    for vertical in (True, False):
+        group = sorted(
+            (rec for rec in leaves if rec["vertical"] is vertical),
+            key=lambda rec: (rec["perp"], rec["a0"]),
+        )
+        for i, left in enumerate(group):
+            if id(left["entity"]) in used:
+                continue
+            best: dict | None = None
+            best_score = -1.0
+            for right in group[i + 1 :]:
+                gap = right["perp"] - left["perp"]
+                if gap < 20.0:
+                    continue
+                if gap > 100.0:
+                    break
+                if id(right["entity"]) in used:
+                    continue
+                ov = _overlap(left["a0"], left["a1"], right["a0"], right["a1"])
+                if ov < 0.7 * min(left["length"], right["length"]):
+                    continue
+                if ov < 550.0:
+                    continue
+                span0 = max(left["a0"], right["a0"])
+                span1 = min(left["a1"], right["a1"])
+                mid = (left["perp"] + right["perp"]) * 0.5
+                end_caps: list = []
+                has0 = False
+                has1 = False
+                for cap in caps:
+                    if cap["vertical"] is vertical:
+                        continue
+                    if _overlap(
+                        cap["a0"], cap["a1"], left["perp"] - 5.0, right["perp"] + 5.0
+                    ) < 0.55 * gap:
+                        continue
+                    near0 = abs(cap["perp"] - span0) <= 40.0
+                    near1 = abs(cap["perp"] - span1) <= 40.0
+                    if not (near0 or near1):
+                        continue
+                    end_caps.append(cap["entity"])
+                    if near0:
+                        has0 = True
+                    if near1:
+                        has1 = True
+                if not end_caps:
+                    continue
+                face_cands = [
+                    f
+                    for f in faces
+                    if f["vertical"] is vertical
+                    and _overlap(f["a0"], f["a1"], span0, span1)
+                    >= 0.25 * (span1 - span0)
+                ]
+                lows = [f for f in face_cands if f["perp"] < left["perp"] - 8.0]
+                highs = [f for f in face_cands if f["perp"] > right["perp"] + 8.0]
+                in_pocket = False
+                if lows and highs:
+                    face0 = max(lows, key=lambda f: f["perp"])["perp"]
+                    face1 = min(highs, key=lambda f: f["perp"])["perp"]
+                    pgap = face1 - face0
+                    if 80.0 <= pgap <= 350.0 and face0 + 5.0 < mid < face1 - 5.0:
+                        in_pocket = True
+                both_ends = has0 and has1
+                if not (in_pocket or both_ends):
+                    continue
+                # 같은 길이의 짝을 우선한다(중간 WALL 잔선·포켓 연장과 잘못 묶는 것 방지).
+                length_delta = abs(left["length"] - right["length"])
+                score = ov - length_delta + (200.0 if both_ends else 0.0)
+                if score > best_score:
+                    best_score = score
+                    best = {
+                        "right": right,
+                        "span0": span0,
+                        "span1": span1,
+                        "end_caps": end_caps,
+                    }
+            if best is None:
+                continue
+            right = best["right"]
+            span0 = best["span0"]
+            span1 = best["span1"]
+            end_caps = best["end_caps"]
+            door_ents = [left["entity"], right["entity"], *end_caps]
+            used.add(id(left["entity"]))
+            used.add(id(right["entity"]))
+            if vertical:
+                bbox = [left["perp"], span0, right["perp"], span1]
+            else:
+                bbox = [span0, left["perp"], span1, right["perp"]]
+            found.append({
+                "vertical": vertical,
+                "bbox": bbox,
+                "door": door_ents,
+            })
+            # 같은 개구 안 중간 평행선(길이·구간이 거의 같은 WALL/BASE)도 문짝이다.
+            for mid_leaf in group:
+                if id(mid_leaf["entity"]) in used:
+                    continue
+                if not (left["perp"] + 5.0 < mid_leaf["perp"] < right["perp"] - 5.0):
+                    continue
+                if abs(mid_leaf["length"] - min(left["length"], right["length"])) > 80.0:
+                    continue
+                if _overlap(mid_leaf["a0"], mid_leaf["a1"], span0, span1) < 0.7 * (
+                    span1 - span0
+                ):
+                    continue
+                door_ents.append(mid_leaf["entity"])
+                used.add(id(mid_leaf["entity"]))
+    return found
+
+
+def separate_inwall_line_sliding_doors(msp) -> tuple[int, int]:
+    """벽 두께 안 LINE 이중 미닫이 문짝·끝 턱을 DOOR로 둔다."""
+    n_demote = 0
+    for door in _find_inwall_line_sliding_doors(msp):
+        for entity in door["door"]:
+            if _paint_layer(entity, DOOR_LAYER, DOOR_COLOR):
+                n_demote += 1
+    return n_demote, 0
+
+
+
+
 def _find_short_staggered_doors(msp) -> list[dict]:
     """벽 안에 어긋난 짧은 미닫이 문짝을 찾는다.
 
@@ -29699,6 +29994,11 @@ def mark_doors_and_columns(msp) -> dict[str, Any]:
             "bbox_mm": [round(value, 1) for value in box],
         })
     for door in _find_side_pocket_sliding_doors(msp):
+        doors.append({
+            "kind": "sliding",
+            "bbox_mm": [round(value, 1) for value in door["bbox"]],
+        })
+    for door in _find_inwall_line_sliding_doors(msp):
         doors.append({
             "kind": "sliding",
             "bbox_mm": [round(value, 1) for value in door["bbox"]],

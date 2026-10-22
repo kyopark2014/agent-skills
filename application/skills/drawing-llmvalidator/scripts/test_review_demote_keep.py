@@ -184,6 +184,29 @@ class ReviewDemoteKeepTests(unittest.TestCase):
         self.assertIn(id(short0), demote)
         self.assertIn(id(short1), demote)
 
+    def test_bed_review_demotes_frame_doubles_keeps_partition(self):
+        """침대 bbox가 머리 맞댄 구역을 덮어도 실간 격벽(150 mm·3.7 m)은 남긴다."""
+        doc = ezdxf.new()
+        msp = doc.modelspace()
+        # 실간 이중 격벽 (간격 150 mm, 길이 3700) — Vision 침대 상자 중점 안
+        part0 = _h(msp, 0, 3700, 1000)
+        part1 = _h(msp, 0, 3700, 1150)
+        # 침대 프레임 이중 (간격 40 mm, 짧은 변 900)
+        bed_a0 = _v(msp, 500, 1200, 2100)
+        bed_a1 = _v(msp, 540, 1200, 2100)
+        bed_b0 = _v(msp, 500, 0, 900)
+        bed_b1 = _v(msp, 540, 0, 900)
+
+        boxes = [{"xmin": -50, "ymin": -50, "xmax": 3800, "ymax": 2200, "label": "침대"}]
+        demote = lib_llm_correct.review_demote_ids(msp, boxes, column_ids=set())
+
+        self.assertNotIn(id(part0), demote)
+        self.assertNotIn(id(part1), demote)
+        self.assertIn(id(bed_a0), demote)
+        self.assertIn(id(bed_a1), demote)
+        self.assertIn(id(bed_b0), demote)
+        self.assertIn(id(bed_b1), demote)
+
 
 if __name__ == "__main__":
     unittest.main()

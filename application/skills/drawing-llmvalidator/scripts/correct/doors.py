@@ -68,6 +68,7 @@ from correct._rules import (  # noqa: F401
     separate_partial_arc_radial_swing_doors,
     separate_pocket_face_doors,
     separate_side_pocket_sliding_doors,
+    separate_inwall_line_sliding_doors,
     separate_diagonal_pocket_face_doors,
     separate_arrow_sliding_doors,
     separate_lr_arrow_sliding_doors,
