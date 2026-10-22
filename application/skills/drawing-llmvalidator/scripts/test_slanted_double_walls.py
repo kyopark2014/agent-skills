@@ -55,6 +55,46 @@ class SlantedDoubleWallTests(unittest.TestCase):
 
         self.assertEqual(long.dxf.layer, "BASE")
 
+    def test_polyline_slanted_double_and_mullion_become_wall(self):
+        """오송클리닉처럼 2점 폴리 대각 이중면과 사이 칸도 WALL."""
+        doc = ezdxf.new()
+        msp = doc.modelspace()
+        angle = math.radians(-135.0)
+        ux, uy = math.cos(angle), math.sin(angle)
+        nx, ny = -uy, ux
+        length = 8000.0
+        gap = 148.0
+
+        def _poly_face(offset):
+            x0, y0 = nx * offset, ny * offset
+            return msp.add_lwpolyline(
+                [(x0, y0), (x0 + ux * length, y0 + uy * length)],
+                dxfattribs={"layer": "BASE"},
+            )
+
+        face = _poly_face(0.0)
+        mate = _poly_face(gap)
+        # 면 사이·면에 평행한 얇은 멀리언(~18 mm × ~950 mm)
+        a0 = 2000.0
+        a1 = 2950.0
+        mullion = msp.add_lwpolyline(
+            [
+                (ux * a0 + nx * 60.0, uy * a0 + ny * 60.0),
+                (ux * a1 + nx * 60.0, uy * a1 + ny * 60.0),
+                (ux * a1 + nx * 78.0, uy * a1 + ny * 78.0),
+                (ux * a0 + nx * 78.0, uy * a0 + ny * 78.0),
+            ],
+            close=True,
+            dxfattribs={"layer": "BASE"},
+        )
+
+        promoted = lib_llm_correct.promote_slanted_double_walls(msp)
+
+        self.assertGreaterEqual(promoted, 3)
+        self.assertEqual(face.dxf.layer, "WALL")
+        self.assertEqual(mate.dxf.layer, "WALL")
+        self.assertEqual(mullion.dxf.layer, "WALL")
+
 
 if __name__ == "__main__":
     unittest.main()

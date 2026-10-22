@@ -94,6 +94,7 @@ from correct._rules import (
     separate_partial_arc_radial_swing_doors,
     separate_lr_arrow_sliding_doors, separate_observation_windows,
     separate_pocket_face_doors, separate_short_staggered_doors,
+    separate_side_pocket_sliding_doors,
     separate_sliding_door_panels, separate_stacked_sliding_panels,
     separate_stepped_sliding_doors, separate_track_sliding_doors,
     separate_wide_staggered_doors
@@ -569,6 +570,9 @@ def apply_corrections(
     n_pocket_face_demote, n_pocket_face_promote = separate_pocket_face_doors(msp)
     n_demoted += n_pocket_face_demote
     n_promoted += n_pocket_face_promote
+    n_side_pocket_demote, n_side_pocket_promote = separate_side_pocket_sliding_doors(msp)
+    n_demoted += n_side_pocket_demote
+    n_promoted += n_side_pocket_promote
     n_diag_pocket_demote, n_diag_pocket_promote = separate_diagonal_pocket_face_doors(msp)
     n_demoted += n_diag_pocket_demote
     n_promoted += n_diag_pocket_promote
@@ -660,6 +664,17 @@ def apply_corrections(
         )
         for e in _entities(msp):
             if e.dxf.layer == WALL_LAYER and id(e) in final_review:
+                msp.delete_entity(e)
+                n_demoted += 1
+
+    # 침대 bbox 등으로 포셰 외곽이 지워진 뒤에도 사선 채움 띠는 다시 벽으로 둔다.
+    n_promoted += promote_diagonal_hatch_walls(msp)
+
+    # 사선 채움 재승격이 침대 매트리스를 다시 WALL로 올리면 한 번 더 demote.
+    if do_box_demote:
+        post_hatch_beds = demote_hospital_beds(msp, exclude_ids=hbeam_ids)
+        for e in _entities(msp):
+            if e.dxf.layer == WALL_LAYER and id(e) in post_hatch_beds:
                 msp.delete_entity(e)
                 n_demoted += 1
 

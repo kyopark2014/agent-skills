@@ -105,6 +105,111 @@ class HospitalBedTests(unittest.TestCase):
         self.assertIn(id(pillow), demoted)
         self.assertIn(id(promoted), demoted)
 
+    def test_closed_polyline_bed_demoted_wall_kept(self):
+        """닫힌 폴리선 침대(W≈1800×D≈700)와 안쪽 사선은 demote, 붙은 포쉐 벽은 유지."""
+        doc = ezdxf.new()
+        msp = doc.modelspace()
+        x0, y0, length, depth = 0.0, 100.0, 1800.0, 700.0
+        bed = msp.add_lwpolyline(
+            [
+                (x0, y0),
+                (x0 + length, y0),
+                (x0 + length, y0 + depth),
+                (x0, y0 + depth),
+            ],
+            close=True,
+            dxfattribs={"layer": "WALL", "color": 1},
+        )
+        mattress = msp.add_lwpolyline(
+            [(x0 + 200.0, y0 + 200.0), (x0 + 400.0, y0 + 400.0)],
+            dxfattribs={"layer": "WALL", "color": 1},
+        )
+        # 침대 아래 붙는 얇은 수평 포쉐 벽
+        wall = msp.add_lwpolyline(
+            [
+                (x0 - 50.0, y0 - 100.0),
+                (x0 + length + 50.0, y0 - 100.0),
+                (x0 + length + 50.0, y0),
+                (x0 - 50.0, y0),
+            ],
+            close=True,
+            dxfattribs={"layer": "WALL", "color": 1},
+        )
+
+        demoted = lib_llm_correct.demote_hospital_beds(msp)
+
+        self.assertIn(id(bed), demoted)
+        self.assertIn(id(mattress), demoted)
+        self.assertNotIn(id(wall), demoted)
+
+    def test_narrow_closed_bed_about_540mm_demoted(self):
+        """오송클리닉처럼 짧은 변이 ~540 mm로 그려진 닫힌 침대도 demote."""
+        doc = ezdxf.new()
+        msp = doc.modelspace()
+        bed = msp.add_lwpolyline(
+            [(0.0, 0.0), (2040.0, 0.0), (2040.0, 540.0), (0.0, 540.0)],
+            close=True,
+            dxfattribs={"layer": "WALL", "color": 1},
+        )
+        xmark = msp.add_lwpolyline(
+            [(100.0, 50.0), (1940.0, 490.0)],
+            dxfattribs={"layer": "WALL", "color": 1},
+        )
+
+        demoted = lib_llm_correct.demote_hospital_beds(msp)
+
+        self.assertIn(id(bed), demoted)
+        self.assertIn(id(xmark), demoted)
+
+    def test_open_rounded_frame_long_side_line_demoted(self):
+        """모서리 둥근 열린 침대 프레임 + promote가 복제한 긴 옆 WALL LINE demote."""
+        doc = ezdxf.new()
+        msp = doc.modelspace()
+        # 세로 침대(~0.93×2.17 m) 열린 프레임(모서리 몇 점)
+        x0, x1, y0, y1 = 0.0, 934.0, 0.0, 2173.0
+        frame = msp.add_lwpolyline(
+            [
+                (x0 + 80.0, y1),
+                (x0 + 40.0, y1 - 20.0),
+                (x0 + 20.0, y1 - 40.0),
+                (x0, y1 - 80.0),
+                (x0, y0 + 80.0),
+                (x0 + 20.0, y0 + 40.0),
+                (x0 + 40.0, y0 + 20.0),
+                (x0 + 80.0, y0),
+                (x1 - 80.0, y0),
+                (x1 - 40.0, y0 + 20.0),
+                (x1 - 20.0, y0 + 40.0),
+                (x1, y0 + 80.0),
+                (x1, y1 - 80.0),
+                (x1 - 20.0, y1 - 40.0),
+                (x1 - 40.0, y1 - 20.0),
+            ],
+            dxfattribs={"layer": "BASE", "color": 8},
+        )
+        # 침대 왼쪽 긴 옆변을 promote가 WALL LINE으로 복제한 경우
+        side = _v(msp, x0, y0 + 80.0, y1 - 80.0, "WALL")
+        # 침대에 붙인 얇은 포쉐 격벽은 남긴다
+        poche = msp.add_lwpolyline(
+            [
+                (x0 - 102.0, y0 - 50.0),
+                (x0, y0 - 50.0),
+                (x0, y1 + 50.0),
+                (x0 - 102.0, y1 + 50.0),
+            ],
+            close=True,
+            dxfattribs={"layer": "WALL", "color": 1},
+        )
+        # 침대를 지나 이어진 외벽
+        wall = _v(msp, x0, y0 - 500.0, y1 + 500.0, "WALL")
+
+        demoted = lib_llm_correct.demote_hospital_beds(msp)
+
+        self.assertIn(id(frame), demoted)
+        self.assertIn(id(side), demoted)
+        self.assertNotIn(id(poche), demoted)
+        self.assertNotIn(id(wall), demoted)
+
 
 if __name__ == "__main__":
     unittest.main()
