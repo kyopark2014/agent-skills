@@ -51,7 +51,7 @@ get_skill_instructions(plugin_name="base", skill_name="drawing-totalroom")
 ## Critical Rules
 
 1. **기존 스킬만 실행** — 추출·벽·보정·실면적 코드를 새로 작성하지 않는다. ad-hoc DXF 파싱도 하지 않는다.
-2. **층을 지정하지 않으면 발견 층 전체** — 한 층만 먼저 하고 멈추지 않는다. 추출은 `extract_2d.py --floor all`, 벽은 `detect_walls_all.py`, 타일 준비는 `prepare_review_all.py`, Vision 판정은 `view_image_all.py`, 실면적은 `detect_labels_all.py` 를 범위에 대해 각 한 번 실행한다. 보정은 층마다 `correct_walls_floor.py`와 `render_wall_diff.py`를 bash 한 번으로 실행한다. 그 bash가 끝나면 `{floor}이 끝났습니다`를 쓰고 다음 층을 호출한다. 추출·벽·타일 준비·실면적은 물리 CPU 코어 수만큼 층을 동시에 처리한다. Vision 판정은 진행 중 호출이 물리 CPU 코어 수다. 한 층이 그 수를 쓰고 다음 층으로 넘어간다. 층을 지정하면 그 층만 한다. `review.json` 이 생기기 전에 실면적으로 가지 않는다. `for`, `nohup`, `&`, `sleep`, `find /` 는 쓰지 않는다. 스킬과 산출 경로는 아래 `SKILLS` 와 `ARTIFACTS_DIR` 이다.
+2. **층을 지정하지 않으면 발견 층 전체** — 한 층만 먼저 하고 멈추지 않는다. 추출은 `extract_2d.py --floor all`, 벽은 `detect_walls_all.py`, 타일 준비는 `prepare_review_all.py`, Vision 판정은 `view_image_all.py`를 범위에 대해 각 한 번 실행한다. 실면적은 `detect_labels_all.py`를 **최대 3층 배치**로 나눠 여러 번 호출한다(한 bash에 전 층 금지). 보정은 층마다 `correct_walls_floor.py`와 `render_wall_diff.py`를 bash 한 번으로 실행한다. 그 bash가 끝나면 `{floor}이 끝났습니다`를 쓰고 다음 층을 호출한다. 추출·벽·타일 준비·실면적(배치 안)은 물리 CPU 코어 수만큼 층을 동시에 처리한다. Vision 판정은 진행 중 호출이 물리 CPU 코어 수다. 한 층이 그 수를 쓰고 다음 층으로 넘어간다. 층을 지정하면 그 층만 한다. `review.json` 이 생기기 전에 실면적으로 가지 않는다. `for`, `nohup`, `&`, `sleep`, `find /` 는 쓰지 않는다. 스킬과 산출 경로는 아래 `SKILLS` 와 `ARTIFACTS_DIR` 이다.
 3. **확인 없이 범위 끝까지** — 층 사이·단계 사이에 진행 여부를 묻지 않는다. 보정 층의 bash가 끝나면 `{floor}이 끝났습니다`만 쓰고 바로 다음 층의 bash를 호출한다. 그 외 단계 사이에는 채팅 문장을 쓰지 않는다. 사용자에게 보이는 요약은 전 층이 끝난 뒤 `area_sizing.md`와 함께 한 번 더 쓴다.
 4. **Vision은 생략하지 않는다** — `prepare_review_all.py` 다음에 `view_image_all.py`를 포그라운드로 각 한 번 실행하고, 그 명령이 끝난 뒤에 층마다 보정 bash를 호출한다. `view_image` 도구는 없다. 판정은 채팅에 쓰지 않는다. prepare와 correct를 한 bash에 넣지 않는다. `floor_wall_original.png` 원본은 Vision에 넣지 않는다. `read_file`과 S3 업로드로 이미지를 보지 않는다.
 5. **기존 파일은 skip 하지 않는다** — `floor_original.*`, `floor_wall_original.*`, `floor_wall_validated.*`, `llm_review/`, `floor_label_detected.*`, `structure.*`, `area_sizing.md`가 이미 있어도 그 층·그 단계를 건너뛰거나 묻지 않는다. 같은 경로에 다시 써서 **덮어쓴다**. 도면 폴더를 통째로 지우지는 않는다. 원본 DXF와 각 단계의 읽기 전용 입력(직전 단계 산출)은 그 단계에서 수정하지 않는다.
@@ -102,7 +102,7 @@ test -d "$ARTIFACTS_DIR"
   ↓
 ③ drawing-llmvalidator prepare_review_all 한 번 → view_image_all 한 번 → 보정은 층마다 bash
   ↓
-④ drawing-totalroom   그 범위 전체를 detect_labels_all 한 번
+④ drawing-totalroom   범위 층을 detect_labels_all 최대 3층 배치로 여러 번
   ↓                     (각 산출이 있어도 skip 하지 않고 덮어쓰기)
 ⑤ $ARTIFACTS_DIR/<drawing_id>/area_sizing.md  ← 여기서만 사용자에게 보고
 ```
@@ -170,14 +170,15 @@ python3 "$SKILLS/drawing-llmvalidator/scripts/render_wall_diff.py" \
 
 ### ④ drawing-totalroom
 
-`get_skill_instructions(..., "drawing-totalroom")` 후 범위 안 층의 라벨 실을 한 번에 계산한다. 인터프리터는 `python3.13`이다. 층이 하나면 그 층 DXF를 `detect_labels.py`에 넘긴다.
+`get_skill_instructions(..., "drawing-totalroom")` 후 범위 안 층의 라벨 실을 계산한다. 인터프리터는 `python3.13`이다. 층이 하나면 그 층 DXF를 `detect_labels.py`에 넘긴다. 층이 둘 이상이면 **한 bash에 최대 3층**만 `--floors`로 넣고, 남은 층은 다음 bash로 이어 호출한다.
 
 면적 조사에서는 **항상** `--fill-unlabeled`를 붙인다. 실명 라벨만 잡고 멈추지 않는다(복도·전실 등 `무명_N` 포함).
 
 ```bash
+# 예: 층이 많으면 3층씩 나눠 여러 번 호출
 python3.13 "$SKILLS/drawing-totalroom/scripts/detect_labels_all.py" \
   --artifacts "$ARTIFACTS_DIR/<drawing_id>" \
-  --floors <F,F> \
+  --floors <F,F,F> \
   --door close \
   --fill-unlabeled
 ```

@@ -107,7 +107,14 @@ def _run_floor(args: argparse.Namespace, floor: str) -> tuple[str, int]:
     for line in proc.stdout:
         with _PRINT:
             print(f"[{floor}] {line}", end="", flush=True)
-    return floor, proc.wait()
+    code = proc.wait()
+    # bash streams lines ending with '이 끝났습니다' into the chat SSE.
+    with _PRINT:
+        if code == 0:
+            print(f"{floor}이 끝났습니다", flush=True)
+        else:
+            print(f"{floor} 실패(exit={code})", flush=True)
+    return floor, code
 
 
 def main() -> int:
