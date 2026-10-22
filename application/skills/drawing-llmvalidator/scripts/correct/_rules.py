@@ -24100,11 +24100,13 @@ def _on_outer_point(box: dict, x: float, y: float, *, margin_mm: float = 3000.0)
 def promote_curved_corner_walls(msp) -> int:
     """직선 벽에 이어진 곡선 모서리는 벽이다.
 
-    같은 중심의 큰 호가 벽 두께로 겹치고 양끝이 벽에 닿으면 WALL로 올린다.
+    같은 중심의 호가 벽 두께로 겹치고 양끝이 벽에 닿으면 WALL로 올린다.
+    문 스윙으로 잘못 올린 DOOR 호도 같은 조건이면 벽으로 되돌린다.
     """
     arcs: list[tuple[float, float, float, float, float, object]] = []
     for entity in _entities(msp):
-        if _dxftype(entity) != "ARC" or getattr(entity.dxf, "layer", None) != BASE_LAYER:
+        layer = getattr(entity.dxf, "layer", None)
+        if _dxftype(entity) != "ARC" or layer not in (BASE_LAYER, DOOR_LAYER):
             continue
         try:
             radius = _ar(entity)
@@ -24112,7 +24114,7 @@ def promote_curved_corner_walls(msp) -> int:
             sweep = (_aea(entity) - _asa(entity)) % 360.0
         except Exception:  # noqa: BLE001
             continue
-        if not (4000.0 <= radius <= 12000.0 and 8.0 <= sweep <= 100.0):
+        if not (250.0 <= radius <= 12000.0 and 8.0 <= sweep <= 100.0):
             continue
         arcs.append((float(center.x), float(center.y), radius, sweep, _asa(entity), entity))
     if not arcs:
