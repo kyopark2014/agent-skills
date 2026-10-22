@@ -141,6 +141,42 @@ class XCoverSquareTests(unittest.TestCase):
         self.assertEqual(left.dxf.layer, "WALL")
         self.assertEqual(right.dxf.layer, "WALL")
 
+    def test_double_line_outer_and_pocket_outline_become_wall(self):
+        """승강기 X: 문턱 쪽만 더 나간 바깥 이중선과 다점 안쪽 테두리도 올린다."""
+        doc = ezdxf.new()
+        msp = doc.modelspace()
+        x0, y0, x1, y1 = 0.0, 0.0, 1600.0, 1500.0
+        diag_a = msp.add_lwpolyline([(x0, y0), (x1, y1)], dxfattribs={"layer": "BASE"})
+        diag_b = msp.add_lwpolyline([(x1, y0), (x0, y1)], dxfattribs={"layer": "BASE"})
+        # 안쪽: 위쪽에 문턱 포켓이 있는 12점 윤곽(세 변이 X와 일치)
+        pocket = msp.add_lwpolyline(
+            [
+                (400.0, y1),
+                (400.0, y1 + 120.0),
+                (460.0, y1 + 120.0),
+                (460.0, y1),
+                (x0, y1),
+                (x0, y0),
+                (x1, y0),
+                (x1, y1),
+                (1140.0, y1),
+                (1140.0, y1 + 120.0),
+                (1200.0, y1 + 120.0),
+                (1200.0, y1),
+            ],
+            dxfattribs={"layer": "BASE"},
+        )
+        # 바깥 이중선: 좌·우·아래 ~32 mm, 위(문턱) ~203 mm
+        outer = _rect(msp, x0 - 32.0, y0 - 32.0, x1 + 32.0, y1 + 203.0)
+
+        promoted = lib_llm_correct.promote_x_cover_squares(msp)
+
+        self.assertGreaterEqual(promoted, 4)
+        self.assertEqual(diag_a.dxf.layer, "WALL")
+        self.assertEqual(diag_b.dxf.layer, "WALL")
+        self.assertEqual(pocket.dxf.layer, "WALL")
+        self.assertEqual(outer.dxf.layer, "WALL")
+
 
 if __name__ == "__main__":
     unittest.main()
