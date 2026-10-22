@@ -112,6 +112,68 @@ class FillUnlabeledTest(unittest.TestCase):
         self.assertLessEqual(abs(maxx - 6000.0), 1.0)
         self.assertLessEqual(abs(maxy - 6000.0), 1.0)
 
+    def test_open_alcove_refine_uses_fill_segs(self):
+        """개구로 큰 실과 이어진 알코브는 fill_segs refine 으로 벽에 붙는다.
+
+        층 전체 door bridge 가 막은 칸을 원본 segs 로 refine 하면 개구로 새어
+        면적 상한에 걸리고 래스터 contour(흰 테두리)가 남는다. 래스터와 같은
+        fill_segs 를 쓰면 벽 안쪽 면으로 스냅한다.
+        """
+        doc = ezdxf.new()
+        msp = doc.modelspace()
+        wall = {"layer": "WALL"}
+        # 홀 10×6 m + 알코브 3×2 m. 공유 벽 개구 2500 mm(> DOOR_GAP)라
+        # 로컬 close bridge 로는 안 막고, fill_segs 에만 브리지를 넣는다.
+        msp.add_line((0.0, 2000.0), (0.0, 8000.0), dxfattribs=wall)
+        msp.add_line((0.0, 8000.0), (10000.0, 8000.0), dxfattribs=wall)
+        msp.add_line((10000.0, 8000.0), (10000.0, 2000.0), dxfattribs=wall)
+        msp.add_line((3000.0, 2000.0), (10000.0, 2000.0), dxfattribs=wall)
+        msp.add_line((0.0, 0.0), (3000.0, 0.0), dxfattribs=wall)
+        msp.add_line((3000.0, 0.0), (3000.0, 2000.0), dxfattribs=wall)
+        msp.add_line((0.0, 0.0), (0.0, 2000.0), dxfattribs=wall)
+        msp.add_line((0.0, 2000.0), (250.0, 2000.0), dxfattribs=wall)
+        msp.add_line((2750.0, 2000.0), (3000.0, 2000.0), dxfattribs=wall)
+
+        boxes = labels.room.column_boxes(msp)
+        segs = labels.room.wall_segments(msp, boxes)
+        bridge = (250.0, 2000.0, 2750.0, 2000.0)
+        fill_segs = list(segs) + [bridge]
+        seed_x, seed_y = 1500.0, 1000.0
+        raster = Polygon(
+            [(100.0, 100.0), (2900.0, 100.0), (2900.0, 1900.0), (100.0, 1900.0)]
+        )
+        raster_area = raster.area / 1_000_000.0
+
+        leak, _ = labels.detect_one(msp, boxes, segs, seed_x, seed_y, door="close")
+        self.assertIsNotNone(leak)
+        assert leak is not None
+        self.assertGreater(
+            float(leak["area_m2"]),
+            max(
+                raster_area * labels.FILL_REFINE_MAX_AREA_RATIO,
+                raster_area + labels.FILL_REFINE_MAX_AREA_EXTRA_M2,
+            ),
+        )
+        self.assertIsNone(
+            labels._refine_fill_to_wall_face(
+                msp, boxes, segs, "close", seed_x, seed_y, raster, raster_area
+            )
+        )
+
+        refined = labels._refine_fill_to_wall_face(
+            msp, boxes, fill_segs, "close", seed_x, seed_y, raster, raster_area
+        )
+        self.assertIsNotNone(refined)
+        assert refined is not None
+        face = Polygon(refined["pts"])
+        self.assertGreater(face.area, raster.area)
+        self.assertLess(float(refined["area_m2"]), 10.0)
+        minx, miny, maxx, maxy = face.bounds
+        self.assertLessEqual(abs(minx - 0.0), 1.0)
+        self.assertLessEqual(abs(miny - 0.0), 1.0)
+        self.assertLessEqual(abs(maxx - 3000.0), 1.0)
+        self.assertLessEqual(abs(maxy - 2000.0), 1.0)
+
     def test_skips_pocket_inside_named_room_bbox(self):
         """실명 면이 모서리를 비워 둔 칸은 무명으로 붙이지 않는다."""
         doc = ezdxf.new()
