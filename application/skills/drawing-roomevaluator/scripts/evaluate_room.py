@@ -34,8 +34,11 @@ DOOR_TOUCH_MM = 450.0
 WALL_CAP_MM = 300.0
 # WALL/WINDOW ARC·CIRCLE을 직선 조각으로 나눌 때 목표 현 길이.
 ARC_CHORD_MM = 250.0
-# 이보다 작은 CIRCLE은 기둥·심볼로 보고 실 경계에서 뺀다.
+# WALL/WINDOW 에서 이보다 작은 CIRCLE은 심볼로 보고 실 경계에서 뺀다.
 MIN_WALL_CIRCLE_R_MM = 400.0
+# COLUMN 원형 기둥 CIRCLE 반지름. 벽 끝과 맞아 실을 닫는 경계로 쓴다.
+MIN_COLUMN_CIRCLE_R_MM = 150.0
+MAX_COLUMN_CIRCLE_R_MM = 500.0
 # 같은 원호 묶음(중심·반지름)을 판별할 때 반올림 단위.
 ARC_CLUSTER_MM = 50.0
 # 끝점마다 잇는 이웃 수. 이중선 끝막음은 가까운 몇 선이면 된다.
@@ -243,8 +246,24 @@ def wall_perimeter_ratio(segs, pts) -> float:
     return covered / total
 
 
+def _latin_multiword_room(text: str) -> bool:
+    """공백으로 나뉜 영문 단어 2개 이상(각 글자 2자+)이면 실명 후보. COFFEE SHOP 등."""
+    parts = [p for p in re.split(r"\s+", (text or "").strip()) if p]
+    if len(parts) < 2:
+        return False
+    if any(token in text for token in ("면적", "천장", ":", "：", "=", "/")):
+        return False
+    for part in parts:
+        if not re.fullmatch(r"[A-Za-z][A-Za-z0-9#()·.+-]*", part):
+            return False
+        if len(re.findall(r"[A-Za-z]", part)) < 2:
+            return False
+    name = norm_name(text)
+    return bool(name) and len(name) <= 24
+
+
 def is_room_label(text: str) -> bool:
-    """한글 실명, 또는 영문 2자 이상에 숫자가 붙은 이름. 축선·치수·안내 문구는 제외."""
+    """한글 실명, 영문 2자 이상+숫자, 또는 공백 구분 영문 다단어. 축선·치수·안내는 제외."""
     name = norm_name(text)
     # 마감·비치·주차 안내, 창고, 차고, 화장실, 방풍실, 보관실, 퇴식대, 샤워실, 고압, 저압, 계단실, 복도, EPS, WC, 입구, 출구, 상부 OPEN, DA는 면적 실이 아니다.
     folded = name.upper()
@@ -257,6 +276,8 @@ def is_room_label(text: str) -> bool:
     if folded.startswith("WC(") or folded.startswith("W.C("):
         return False
     if _roomish(text):
+        return True
+    if _latin_multiword_room(text):
         return True
     if any(token in text for token in ("면적", "천장", ":", "：", "=", "/")):
         return False
@@ -539,6 +560,62 @@ def _door_leaf_rectangle(entity) -> bool:
     return short <= 80.0 and 500.0 <= long <= 1700.0
 
 
+def _door_swing_hinges(msp) -> list[tuple[float, float, float]]:
+    """DOOR ARC 힌지 (cx, cy, radius)."""
+    hinges: list[tuple[float, float, float]] = []
+    for entity in msp:
+        if entity.dxftype() != "ARC" or getattr(entity.dxf, "layer", None) != DOOR_LAYER:
+            continue
+        try:
+            radius = float(entity.dxf.radius)
+            sweep = (float(entity.dxf.end_angle) - float(entity.dxf.start_angle)) % 360.0
+            cx = float(entity.dxf.center.x)
+            cy = float(entity.dxf.center.y)
+        except Exception:  # noqa: BLE001
+            continue
+        if 600.0 <= radius <= 1600.0 and 20.0 <= sweep <= 200.0:
+            hinges.append((cx, cy, radius))
+    return hinges
+
+
+def _is_swing_leaf_segment(
+    x0: float,
+    y0: float,
+    x1: float,
+    y1: float,
+    hinges: list[tuple[float, float, float]],
+) -> bool:
+    """힌지에서 문 반지름만큼 나간 문짝 직선.
+
+    close 모드에서는 개구를 벽으로 잇고 문짝은 경계가 아니다.
+    힌지와 힌지를 잇는 개구 현(닫힌 문짝이 벽선에 누운 경우)은 남긴다.
+    WALL로 잘못 올라온 문짝도 같은 형태로 뺀다.
+    """
+    if not hinges:
+        return False
+    length = math.hypot(x1 - x0, y1 - y0)
+    if not (600.0 <= length <= 1700.0):
+        return False
+    for cx, cy, radius in hinges:
+        if abs(length - radius) > 90.0:
+            continue
+        d0 = math.hypot(x0 - cx, y0 - cy)
+        d1 = math.hypot(x1 - cx, y1 - cy)
+        at0, at1 = d0 <= 55.0, d1 <= 55.0
+        if at0 == at1:
+            continue
+        far_x, far_y = (x1, y1) if at0 else (x0, y0)
+        # 다른 힌지에 닿으면 양개문 사이 벽선/닫힌 문짝 — 경계로 유지.
+        if any(
+            math.hypot(far_x - ox, far_y - oy) <= 55.0
+            for ox, oy, _other_r in hinges
+            if abs(ox - cx) > 100.0 or abs(oy - cy) > 100.0
+        ):
+            continue
+        return True
+    return False
+
+
 def _arc_point(cx: float, cy: float, r: float, angle_deg: float) -> tuple[float, float]:
     rad = math.radians(angle_deg % 360.0)
     return cx + r * math.cos(rad), cy + r * math.sin(rad)
@@ -547,7 +624,9 @@ def _arc_point(cx: float, cy: float, r: float, angle_deg: float) -> tuple[float,
 def _curve_parts(entity) -> list[tuple[float, float, float, float]]:
     """ARC/CIRCLE을 현 길이 약 ARC_CHORD_MM 인 직선 조각으로 나눈다.
 
-    작은 CIRCLE(기둥·심볼)은 비운다. DOOR 스윙 호는 호출측에서 제외한다.
+    WALL/WINDOW 의 작은 CIRCLE(심볼)은 비운다. COLUMN 원형 기둥(반지름
+    MIN..MAX_COLUMN_CIRCLE_R_MM)은 벽 끝과 이어 실 경계로 쓴다.
+    DOOR 스윙 호는 호출측에서 제외한다.
     """
     kind = entity.dxftype()
     if kind not in ("ARC", "CIRCLE"):
@@ -561,7 +640,11 @@ def _curve_parts(entity) -> list[tuple[float, float, float, float]]:
     if r < 1.0:
         return []
     if kind == "CIRCLE":
-        if r < MIN_WALL_CIRCLE_R_MM:
+        layer = str(getattr(entity.dxf, "layer", "") or "").upper()
+        if layer == COLUMN_LAYER:
+            if r < MIN_COLUMN_CIRCLE_R_MM or r > MAX_COLUMN_CIRCLE_R_MM:
+                return []
+        elif r < MIN_WALL_CIRCLE_R_MM:
             return []
         start_deg = 0.0
         span_deg = 360.0
@@ -696,8 +779,10 @@ def wall_segments(msp, boxes, *, include_door: bool = True, open_doors=None) -> 
     segs: list[tuple[float, float, float, float]] = []
     layers = BOUNDARY_LAYERS if include_door else (WALL_LAYER, WINDOW_LAYER, COLUMN_LAYER)
     arc_spans: list[tuple[float, float, float, float, float]] = []
+    # close 모드: 문짝 LINE은 경계에서 빼고, 개구는 벽 현·문 틈 bridge 로 막는다.
+    hinges = _door_swing_hinges(msp)
     for e in msp:
-        # DOOR 선은 경계다. 문짝 사각형과 open_doors 의 문짝은 뺀다.
+        # DOOR 선은 경계다. 문짝 사각형·스윙 문짝 LINE과 open_doors 의 문짝은 뺀다.
         # DOOR ARC(여닫이 스윙)는 경계가 아니다.
         if e.dxf.layer not in layers:
             continue
@@ -746,6 +831,9 @@ def wall_segments(msp, boxes, *, include_door: bool = True, open_doors=None) -> 
                 continue
             if e.dxf.layer == DOOR_LAYER and _segment_on_open_door(x0, y0, x1, y1, open_doors):
                 continue
+            # 실 안으로 튀어나온 문짝(DOOR·WALL 오승격)은 경계가 아니다.
+            if _is_swing_leaf_segment(x0, y0, x1, y1, hinges):
+                continue
             segs.append((x0, y0, x1, y1))
     for x0, y0, x1, y1 in _bridged_arc_gap_chords(arc_spans):
         if _inside_box((x0 + x1) * 0.5, (y0 + y1) * 0.5, boxes):
@@ -757,9 +845,10 @@ def wall_segments(msp, boxes, *, include_door: bool = True, open_doors=None) -> 
 def entity_segments(msp, boxes, *, open_doors=None) -> list[tuple[float, float, float, float]]:
     """모든 LINE/LWPOLYLINE 엔티티를 경계로 쓴다 (WALL 레이어만이 아님).
 
-    수동 다각형 추가용. 문짝 사각형·기둥 안 선은 wall_segments 와 같이 뺀다.
+    수동 다각형 추가용. 문짝 사각형·스윙 문짝·기둥 안 선은 wall_segments 와 같이 뺀다.
     """
     segs: list[tuple[float, float, float, float]] = []
+    hinges = _door_swing_hinges(msp)
     for e in msp:
         if e.dxftype() not in ("LINE", "LWPOLYLINE"):
             continue
@@ -769,6 +858,8 @@ def entity_segments(msp, boxes, *, open_doors=None) -> list[tuple[float, float, 
             if _inside_box((x0 + x1) * 0.5, (y0 + y1) * 0.5, boxes):
                 continue
             if e.dxf.layer == DOOR_LAYER and _segment_on_open_door(x0, y0, x1, y1, open_doors):
+                continue
+            if _is_swing_leaf_segment(x0, y0, x1, y1, hinges):
                 continue
             segs.append((x0, y0, x1, y1))
     return segs
@@ -881,6 +972,38 @@ def _gap_crosses_partition(
     return False
 
 
+def _gap_is_through_corridor(
+    horizontal: bool,
+    axis: float,
+    gap0: float,
+    gap1: float,
+    cross_int: dict[float, list[tuple[float, float]]],
+) -> bool:
+    """틈 끝의 직교 벽이 축을 지나 양쪽으로 이어지면 복도 개구다.
+
+    같은 세로선 위·아래 문틀만 있고 그 사이가 복도일 때, 위·아래 가로 벽이
+    그 세로축을 관통해 반대편까지 간다. 이런 틈을 이으면 로비·복도 칸이
+    가짜 세로벽에 막힌다. 한쪽만 닿는 일반 실 벽·문 옆은 해당하지 않는다.
+    """
+    del horizontal  # 축 방향은 cross_int 선택으로 이미 반영됨
+    lo, hi = (gap0, gap1) if gap0 <= gap1 else (gap1, gap0)
+    if hi - lo < 400.0:
+        return False
+    end_band = 150.0
+    past = 400.0
+    for end in (lo, hi):
+        for cross_axis, intervals in cross_int.items():
+            if abs(cross_axis - end) > end_band:
+                continue
+            for c0, c1 in _merge_intervals(list(intervals), JOIN_MM):
+                if c1 - c0 < 800.0:
+                    continue
+                if c0 <= axis + 80.0 and c1 >= axis - 80.0:
+                    if (axis - c0) >= past and (c1 - axis) >= past:
+                        return True
+    return False
+
+
 def bridged_runs(segs, origin: tuple[float, float], pad: float, *, door: str = "close", boxes=None, open_doors=None):
     """원점 주변 세그만 모아 축별로 문 틈을 잇는다."""
     ox, oy = origin
@@ -916,7 +1039,11 @@ def bridged_runs(segs, origin: tuple[float, float], pad: float, *, door: str = "
         cross = v_int if horizontal else h_int
 
         def _allow_close(a: float, b: float, horizontal=horizontal, axis=axis) -> bool:
-            return not _gap_crosses_partition(horizontal, axis, a, b, cross)
+            if _gap_crosses_partition(horizontal, axis, a, b, cross):
+                return False
+            if _gap_is_through_corridor(horizontal, axis, a, b, cross):
+                return False
+            return True
 
         if open_doors:
             return _bridge(
@@ -925,6 +1052,7 @@ def bridged_runs(segs, origin: tuple[float, float], pad: float, *, door: str = "
                 allow=lambda a, b, horizontal=horizontal, axis=axis: (
                     not _gap_is_open_door(horizontal, axis, a, b, open_doors)
                     and not _gap_crosses_partition(horizontal, axis, a, b, cross)
+                    and not _gap_is_through_corridor(horizontal, axis, a, b, cross)
                 ),
             )
         if door == "open":

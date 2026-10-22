@@ -1276,6 +1276,56 @@ def _flood_exterior(free: object) -> object:
     return ff == 255
 
 
+def segs_with_door_close_bridges(
+    segs: list[tuple[float, float, float, float]],
+    bbox: dict,
+    *,
+    door: str = "close",
+    boxes=None,
+) -> list[tuple[float, float, float, float]]:
+    """fill-unlabeled 용 경계. door=close 이면 문 틈(≤2.4 m)을 층 전체에서 잇는다.
+
+    실명 detect 는 씨앗마다 bridged_runs 로 문 개구를 막지만, fill 래스터는
+    생 wall_segments 만 쓰면 복도 벽 문 틈으로 실·외부가 한 칸이 된다.
+    같은 close 규칙으로 축 런을 보강해 복도처럼 라벨 없는 닫힌 통로를 남긴다.
+    """
+    if door != "close" or not segs or not bbox:
+        return list(segs)
+    try:
+        xmin = float(bbox["xmin"])
+        ymin = float(bbox["ymin"])
+        xmax = float(bbox["xmax"])
+        ymax = float(bbox["ymax"])
+    except (KeyError, TypeError, ValueError):
+        return list(segs)
+    ox = (xmin + xmax) * 0.5
+    oy = (ymin + ymax) * 0.5
+    pad = max(xmax - xmin, ymax - ymin) * 0.5 + 1000.0
+    try:
+        h_final, v_final, _dsegs, _xa, _ya = room.bridged_runs(
+            segs,
+            (ox, oy),
+            pad,
+            door="close",
+            boxes=boxes or [],
+            open_doors=None,
+        )
+    except Exception:  # noqa: BLE001
+        return list(segs)
+    out = list(segs)
+    if isinstance(h_final, dict):
+        for y, intervals in h_final.items():
+            for a, b in intervals:
+                if abs(b - a) > 1.0:
+                    out.append((float(a), float(y), float(b), float(y)))
+    if isinstance(v_final, dict):
+        for x, intervals in v_final.items():
+            for a, b in intervals:
+                if abs(b - a) > 1.0:
+                    out.append((float(x), float(a), float(x), float(b)))
+    return out
+
+
 def segment_unlabeled_components(
     segs,
     bbox: dict,
@@ -1438,12 +1488,14 @@ def fill_unlabeled_rooms(
     skip_vision_x = _bboxes_confirmed_by_geom(skip_vision_x_raw, skip_geom_x)
     skip_x = list(skip_vision_x) + list(skip_geom_x)
     sinks = find_sink_centers(msp)
+    fill_segs = segs_with_door_close_bridges(segs, bbox, door=door, boxes=boxes)
     components = segment_unlabeled_components(
-        segs, bbox, cell_mm=sample_mm, min_area_m2=FILL_MIN_AREA_M2
+        fill_segs, bbox, cell_mm=sample_mm, min_area_m2=FILL_MIN_AREA_M2
     )
     print(
         f"fill-unlabeled: cc_components={len(components)} cell_mm={sample_mm:.0f}"
         f" min_area_m2={FILL_MIN_AREA_M2:.0f}"
+        f" door_bridge={'on' if door == 'close' else 'off'}"
         f" skip_area_bbox={len(skip_area)}"
         f" skip_vision_x_bbox={len(skip_vision_x)}"
         f"/{len(skip_vision_x_raw)}"
@@ -1948,7 +2000,7 @@ def detect(
         "labels": public_labels,
         "skipped": skipped,
         "rules": {
-            "labels": "Korean room names, or Latin names with 2+ letters and a digit; stacked lines within 1.8 text heights are joined top to bottom; fixture callouts such as 미니바, 옷장, 신발장, 수납장, 하부장, 상부장, 옷봉설치, 장비, 데스크, 서랍, 온수기, 살균기, 소독기, 도어, 테이블, 정수기, 휴대폰장, 게시판, 렉장, 랙장, 냉장고, 제빙기, 머신, 커피, 전자레인지, 텀블러, 세척기, EV, 화분, 화장대, 월풀욕조, 욕조, (장애인) and non-area names 방풍실, 보관실, 퇴식대, 샤워실, 고압, 저압, 계단실, 복도, 승강기, EPS, OPEN, 오픈, 홀-, 홈-, 입구, 출구, 양치공간, 청소도구함, 청소도구실, 실외기실, 조경, 배경, 평면도, 비품고을, 항습기, 화물, 휠체어, 린넨실, 오물처리실, (장애인, 구급자, 응급환자, 의료가스실, 기계실, (여), (남), 문서고, 기울기, 자동방화, 인), 인승, OTIS, Wlqtnwjd, DA#, DA(, 올려옴, 내려감, DOOR, 패드, 기저귀, 침례탕약, 설치, 드라이기, 유사용, 상하부, 하부, (고객), 서비스동선, Drop-off, 상부, 캐노피선, 고장이슈, 대), 자쿠지, IN-S, 분전함, 세척실, 탕비실, 물품, 스트레쳐, E.V, ELEV, ELEV. HALL, ELEV. 홀, 유도등, 단자함, 소화전, 다용도실, 밸브, (근생), 정화조, 피난기, 보관소, 속도, 주거, 배수, 비상용, 탑승대기, ST(, 탱크, 실외기, 마감, 콘크리트, 행거, 클립바, 수조, 발전기실, 집수정, ASD, W.C, 세면대, ARM실, 옷장, 용수대, 자동문, 거울, 세탁기, 기기배치, 폐쇄, 장애인겸용, 데크, 비품고, 전기실, 충전소, 급속, 폐기품, 폐기물, 콤프레셔, 경계선, 대지안, 벽부형, 산책로, 올라옴, 수거함, 배기, FSD, DORDI, 승강식, OH4700, 유모차보관, C1A, C2A, C3A, TC1, PW1000, AG1100, 노출되는, 자전거, 피난구, DA-, 재활용, 급기, 주문제작, BC-, 세탁실, 승강장, 테라스, 청결물실, 수납, 보일러, 옷방, 파우더, 선큰가든, 발코니, 정원, 배선실, 병동, 수족관, 피난용, 설비, 셔틀, 커텐, 공조실, 공조기, (관통), GS건설, MDF, 펌프실, 축척, 사물함, 석], 공용욕실, S.L, F.L, FL., D.A, 장애인통로, 야외전망대, 안방욕실, LT-, 220V, 시공, 리무진, 세차, 정비, 카트, 용수, 하역장, 방재실, 출입통제, 정수실, 내려옴, 올라감, 회차공간, 하역, (승용/장애인용), (청사), DW3, 투석액 are excluded",
+            "labels": "Korean room names, Latin names with 2+ letters and a digit, or space-separated Latin multi-word names (COFFEE SHOP); stacked lines within 1.8 text heights are joined top to bottom; fixture callouts such as 미니바, 옷장, 신발장, 수납장, 하부장, 상부장, 옷봉설치, 장비, 데스크, 서랍, 온수기, 살균기, 소독기, 도어, 테이블, 정수기, 휴대폰장, 게시판, 렉장, 랙장, 냉장고, 제빙기, 머신, 커피, MACHINE, WARMER, 전자레인지, 텀블러, 세척기, EV, 화분, 화장대, 월풀욕조, 욕조, (장애인) and non-area names 방풍실, 보관실, 퇴식대, 샤워실, 고압, 저압, 계단실, 복도, 승강기, EPS, OPEN, 오픈, 홀-, 홈-, 입구, 출구, 양치공간, 청소도구함, 청소도구실, 실외기실, 조경, 배경, 평면도, 비품고을, 항습기, 화물, 휠체어, 린넨실, 오물처리실, (장애인, 구급자, 응급환자, 의료가스실, 기계실, (여), (남), 문서고, 기울기, 자동방화, 인), 인승, OTIS, Wlqtnwjd, DA#, DA(, 올려옴, 내려감, DOOR, 패드, 기저귀, 침례탕약, 설치, 드라이기, 유사용, 상하부, 하부, (고객), 서비스동선, Drop-off, 상부, 캐노피선, 고장이슈, 대), 자쿠지, IN-S, 분전함, 세척실, 탕비실, 물품, 스트레쳐, E.V, ELEV, ELEV. HALL, ELEV. 홀, 유도등, 단자함, 소화전, 다용도실, 밸브, (근생), 정화조, 피난기, 보관소, 속도, 주거, 배수, 비상용, 탑승대기, ST(, 탱크, 실외기, 마감, 콘크리트, 행거, 클립바, 수조, 발전기실, 집수정, ASD, W.C, 세면대, ARM실, 옷장, 용수대, 자동문, 거울, 세탁기, 기기배치, 폐쇄, 장애인겸용, 데크, 비품고, 전기실, 충전소, 급속, 폐기품, 폐기물, 콤프레셔, 경계선, 대지안, 벽부형, 산책로, 올라옴, 수거함, 배기, FSD, DORDI, 승강식, OH4700, 유모차보관, C1A, C2A, C3A, TC1, PW1000, AG1100, 노출되는, 자전거, 피난구, DA-, 재활용, 급기, 주문제작, BC-, 세탁실, 승강장, 테라스, 청결물실, 수납, 보일러, 옷방, 파우더, 선큰가든, 발코니, 정원, 배선실, 병동, 수족관, 피난용, 설비, 셔틀, 커텐, 공조실, 공조기, (관통), GS건설, MDF, 펌프실, 축척, 사물함, 석], 공용욕실, S.L, F.L, FL., D.A, 장애인통로, 야외전망대, 안방욕실, LT-, 220V, 시공, 리무진, 세차, 정비, 카트, 용수, 하역장, 방재실, 출입통제, 정수실, 내려옴, 올라감, 회차공간, 하역, (승용/장애인용), (청사), DW3, 투석액, 불가, 엑스박스, C-AR, 승용, 장애인, 오피스텔, 사용중 are excluded",
             "font": "PNG text is the TEXT stored on each label layer, drawn by the floor sheet renderer",
             "png": "rendered from floor_label_detected.dxf",
             "door": door,
@@ -1957,6 +2009,7 @@ def detect(
             "boundary": (
                 "inner face of WALL, WINDOW, COLUMN, and DOOR lines; "
                 "WALL/WINDOW ARC and CIRCLE are chord segments; "
+                "COLUMN CIRCLE (radius 150-500 mm) is a round-column boundary; "
                 "same-ring ARC gaps up to 2400 mm are bridged; "
                 "open affects only doors on that room's closed boundary"
             ),

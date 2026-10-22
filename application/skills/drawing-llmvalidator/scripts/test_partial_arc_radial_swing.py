@@ -85,6 +85,22 @@ class PartialArcRadialSwingTests(unittest.TestCase):
         ]
         self.assertGreaterEqual(len(flank_walls), 2)
 
+    def test_680mm_radius_partial_arc_is_door(self):
+        """남산 HVAC AV실처럼 호 반지름 ~680 mm 인 30° 스윙도 DOOR다."""
+        doc = ezdxf.new()
+        msp = doc.modelspace()
+        hx, hy, r = 219183.0, 41192.0, 680.0
+        _partial_arc_swing(msp, hx, hy, r)
+
+        found = lib_llm_correct._find_partial_arc_radial_swings(msp)
+        self.assertEqual(len(found), 1)
+        self.assertAlmostEqual(found[0]["radius"], r, delta=1.0)
+
+        n_demote, _n_promote = lib_llm_correct.separate_partial_arc_radial_swing_doors(msp)
+        self.assertGreaterEqual(n_demote, 1)
+        arcs = [e for e in msp.query("ARC") if e.dxf.layer == "DOOR"]
+        self.assertEqual(len(arcs), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

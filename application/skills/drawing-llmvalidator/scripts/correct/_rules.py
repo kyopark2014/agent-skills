@@ -821,7 +821,97 @@ def demote_closed_furniture_boxes(
                 break
     return result
 
-_MEETING_RE = re.compile(r"^접견실")
+_MEETING_RE = re.compile(r"^(접견실|접객실)")
+
+
+def demote_seat_cushion_line_boxes(
+    msp,
+    *,
+    exclude_ids: set[int] | None = None,
+    layers: tuple[str, ...] | None = None,
+) -> set[int]:
+    """식탁 옆 의자·방석(LINE 사각 ~300–450 mm) 격자 demote.
+
+    짧은 평행선이 간격 350–550 mm 로 같은 띠에 세 쌍 이상이면 가구다.
+    벽 검출 샘플이 의자를 이중벽으로 올린 경우를 되돌린다.
+    layers 기본은 WALL. promote 차단용으로 BASE를 같이 넘길 수 있다.
+    """
+    exclude_ids = exclude_ids or set()
+    want = set(layers or (WALL_LAYER,))
+
+    class _S:
+        __slots__ = ("entity", "is_h", "ortho", "a0", "a1", "length")
+
+        def __init__(self, entity, is_h, ortho, a0, a1, length):
+            self.entity = entity
+            self.is_h = is_h
+            self.ortho = ortho
+            self.a0 = a0
+            self.a1 = a1
+            self.length = length
+
+    shorts: list[_S] = []
+    for entity in _entities(msp):
+        if getattr(entity.dxf, "layer", None) not in want:
+            continue
+        if id(entity) in exclude_ids or _dxftype(entity) != "LINE":
+            continue
+        try:
+            x0, y0, x1, y1 = _line_xy(entity)
+        except Exception:  # noqa: BLE001
+            continue
+        length = math.hypot(x1 - x0, y1 - y0)
+        if not (300.0 <= length <= 450.0):
+            continue
+        dx, dy = abs(x1 - x0), abs(y1 - y0)
+        if dy <= max(20.0, 0.15 * length):
+            shorts.append(_S(entity, True, (y0 + y1) * 0.5, min(x0, x1), max(x0, x1), length))
+        elif dx <= max(20.0, 0.15 * length):
+            shorts.append(_S(entity, False, (x0 + x1) * 0.5, min(y0, y1), max(y0, y1), length))
+
+    demote: set[int] = set()
+    for is_h in (True, False):
+        items = [s for s in shorts if s.is_h == is_h]
+        if len(items) < 6:
+            continue
+        bands: dict[int, list[_S]] = {}
+        for s in items:
+            mid = (s.a0 + s.a1) * 0.5
+            bands.setdefault(int(round(mid / 200.0)), []).append(s)
+        for group in bands.values():
+            if len(group) < 6:
+                continue
+            group = sorted(group, key=lambda s: s.ortho)
+            pairs: list[tuple[_S, _S]] = []
+            for i, a in enumerate(group):
+                for b in group[i + 1 :]:
+                    gap = abs(b.ortho - a.ortho)
+                    if not (350.0 <= gap <= 550.0):
+                        continue
+                    ov = min(a.a1, b.a1) - max(a.a0, b.a0)
+                    if ov < min(a.length, b.length) * 0.65:
+                        continue
+                    if abs(a.length - b.length) > 80.0:
+                        continue
+                    pairs.append((a, b))
+            if len(pairs) < 3:
+                continue
+            for a, b in pairs:
+                demote.add(id(a.entity))
+                demote.add(id(b.entity))
+            # 상자 짧은 변(직교)도 같이 내린다.
+            for a, b in pairs:
+                lo, hi = min(a.ortho, b.ortho), max(a.ortho, b.ortho)
+                a0, a1 = max(a.a0, b.a0), min(a.a1, b.a1)
+                for s in shorts:
+                    if s.is_h == is_h:
+                        continue
+                    if not (a0 - 40.0 <= s.ortho <= a1 + 40.0):
+                        continue
+                    if s.a1 < lo - 40.0 or s.a0 > hi + 40.0:
+                        continue
+                    demote.add(id(s.entity))
+    return demote
 
 
 def _demote_enclosed_interiors(
@@ -930,7 +1020,7 @@ def demote_meeting_room_interiors(
     exclude_ids: set[int] | None = None,
     inset_mm: float = 250.0,
 ) -> set[int]:
-    """접견실 내부의 의자·프로젝터 받침대는 벽이 아니다."""
+    """접견실·접객실 내부의 의자·프로젝터 받침대는 벽이 아니다."""
     return _demote_enclosed_interiors(
         msp,
         segs,
@@ -2298,6 +2388,9 @@ def find_line_h_symbol_column_entities(
     그 상자 안 짧은 직교선을 기둥으로 본다 (금사 DC sheet_10 우상단 등).
     또한 양쪽 끝 플랜지가 있는 사각 슬리브(변 길이 350–1400, 간격 250–450)도
     기둥으로 본다 (sheet_10 하단 복도 문옆 기둥 등).
+    슬리브는 길쭉해야 한다(긴변/짧은변 ≥ 2.5). 소파·의자 좌판처럼 낮고 넓은
+    사각(비율 < 2.5)은 가구이므로 제외한다.
+    2 m 안에 H·슬리브 상자가 넷 이상이면 접객실 의자 격자로 보고 제외한다.
     """
     webs_v: list[tuple[float, float, float, float, Any]] = []
     webs_h: list[tuple[float, float, float, float, Any]] = []
@@ -2333,11 +2426,20 @@ def find_line_h_symbol_column_entities(
             if 350.0 <= length <= 1400.0:
                 sleeves_h.append((y, lo, hi, length, entity))
 
-    boxes: list[tuple[float, float, float, float]] = []
-    ids: set[int] = set()
+    # (box, entity ids) — 밀집 의자 격자는 나중에 한꺼번에 제외한다.
+    box_hits: list[tuple[tuple[float, float, float, float], set[int]]] = []
+
+    def _sleeve_aspect_ok(width: float, height: float) -> bool:
+        short = min(width, height)
+        long = max(width, height)
+        if short < 200.0:
+            return False
+        # 문옆 기둥 300×1140 ≈ 3.8. 소파 좌판 600×250 ≈ 2.4 는 제외.
+        return long / short >= 2.5
 
     def _collect(x0: float, y0: float, x1: float, y1: float) -> None:
         pad = 25.0
+        eids: set[int] = set()
         for sx, slo, shi, slen, smid, sori, sent in shorts:
             if sori == "V":
                 if not (x0 - pad <= sx <= x1 + pad):
@@ -2349,8 +2451,8 @@ def find_line_h_symbol_column_entities(
                     continue
                 if shi < x0 - pad or slo > x1 + pad:
                     continue
-            ids.add(id(sent))
-        boxes.append((x0, y0, x1, y1))
+            eids.add(id(sent))
+        box_hits.append(((x0, y0, x1, y1), eids))
 
     def _end_flanges(
         *,
@@ -2445,6 +2547,9 @@ def find_line_h_symbol_column_entities(
             overlap = y1 - y0
             if overlap < 350.0:
                 continue
+            # gap=두께, overlap=높이 → 문옆 기둥은 높이가 훨씬 길다.
+            if not _sleeve_aspect_ok(gap, overlap):
+                continue
             if not _end_flanges(ori="H", lo=y0, hi=y1, a0=left[0], a1=right[0], gap=gap):
                 continue
             _collect(left[0] - 20.0, y0 - 20.0, right[0] + 20.0, y1 + 20.0)
@@ -2463,17 +2568,36 @@ def find_line_h_symbol_column_entities(
             overlap = x1 - x0
             if overlap < 350.0:
                 continue
+            if not _sleeve_aspect_ok(overlap, gap):
+                continue
             if not _end_flanges(ori="V", lo=x0, hi=x1, a0=bottom[0], a1=top[0], gap=gap):
                 continue
             _collect(x0 - 20.0, bottom[0] - 20.0, x1 + 20.0, top[0] + 20.0)
 
+    # 밀집 격자(접객실 의자 열) 제외 — 구조 기둥은 수 미터 간격.
+    sparse_hits: list[tuple[tuple[float, float, float, float], set[int]]] = []
+    for box, eids in box_hits:
+        x0, y0, x1, y1 = box
+        cx, cy = (x0 + x1) * 0.5, (y0 + y1) * 0.5
+        n_near = 0
+        for other, _ in box_hits:
+            ox0, oy0, ox1, oy1 = other
+            ocx, ocy = (ox0 + ox1) * 0.5, (oy0 + oy1) * 0.5
+            if math.hypot(cx - ocx, cy - ocy) <= 2000.0:
+                n_near += 1
+        if n_near >= 4:
+            continue
+        sparse_hits.append((box, eids))
+
     # 중복 상자 정리
+    ids: set[int] = set()
     uniq_boxes: list[tuple[float, float, float, float]] = []
-    for x0, y0, x1, y1 in boxes:
+    for (x0, y0, x1, y1), eids in sparse_hits:
         cx, cy = (x0 + x1) * 0.5, (y0 + y1) * 0.5
         if any(abs(cx - (a + c) * 0.5) < 80.0 and abs(cy - (b + d) * 0.5) < 80.0 for a, b, c, d in uniq_boxes):
             continue
         uniq_boxes.append((x0, y0, x1, y1))
+        ids |= eids
     return ids, uniq_boxes
 
 
@@ -3192,6 +3316,631 @@ def promote_closed_square_columns(msp) -> int:
     return n
 
 
+def promote_concentric_double_square_columns(msp) -> int:
+    """평행 이중선(동심 사각) 기둥을 WALL로 올린다.
+
+    바깥·안쪽 닫힌 사각이 중심을 공유하고 쉘 두께가 80–250 mm이면 기둥이다.
+    H-Beam `_`·단일 빈 사각과 다르다. 이중벽이 바깥 사각 한 변에서
+    끊기거나 이어질 때만 올려 가구·설비 이중 박스는 제외한다.
+    """
+    h_all: list[tuple[float, float, float, str, float, Any]] = []
+    v_all: list[tuple[float, float, float, str, float, Any]] = []
+    for e in _entities(msp):
+        parsed = _axis_line(e)
+        if parsed is None:
+            continue
+        ori, coord, a, b, length = parsed
+        layer = str(getattr(e.dxf, "layer", "") or "")
+        if layer not in (BASE_LAYER, WALL_LAYER, COLUMN_LAYER):
+            continue
+        if ori == "H":
+            h_all.append((coord, a, b, layer, length, e))
+        else:
+            v_all.append((coord, a, b, layer, length, e))
+
+    h_short = sorted(
+        [t for t in h_all if 700.0 <= t[4] <= 1800.0],
+        key=lambda t: t[0],
+    )
+    v_short = [t for t in v_all if 700.0 <= t[4] <= 1800.0]
+
+    def _pair_gap(vals: list[float]) -> bool:
+        vals = sorted(set(round(v, 1) for v in vals))
+        for i, va in enumerate(vals):
+            for vb in vals[i + 1 :]:
+                if 80.0 <= vb - va <= 350.0:
+                    return True
+        return False
+
+    def wall_abuts(x0: float, y0: float, x1: float, y1: float) -> bool:
+        right: list[float] = []
+        left: list[float] = []
+        top: list[float] = []
+        bot: list[float] = []
+        for y, a, b, layer, length, _e in h_all:
+            if layer != WALL_LAYER or length < 150.0:
+                continue
+            if not (y0 - 40.0 <= y <= y1 + 40.0):
+                continue
+            if abs(a - x1) <= 45.0 and b >= x1 + 100.0:
+                right.append(y)
+            if abs(b - x0) <= 45.0 and a <= x0 - 100.0:
+                left.append(y)
+        for x, a, b, layer, length, _e in v_all:
+            if layer != WALL_LAYER or length < 150.0:
+                continue
+            if not (x0 - 40.0 <= x <= x1 + 40.0):
+                continue
+            if abs(a - y1) <= 45.0 and b >= y1 + 100.0:
+                top.append(x)
+            if abs(b - y0) <= 45.0 and a <= y0 - 100.0:
+                bot.append(x)
+        if _pair_gap(right) or _pair_gap(left) or _pair_gap(top) or _pair_gap(bot):
+            return True
+        for x, a, b, layer, length, _e in v_all:
+            if layer != WALL_LAYER or length < 400.0:
+                continue
+            if abs(x - x0) > 45.0 and abs(x - x1) > 45.0:
+                continue
+            if abs(a - y1) <= 45.0 and b > y1 + 200.0:
+                return True
+            if abs(b - y0) <= 45.0 and a < y0 - 200.0:
+                return True
+        for y, a, b, layer, length, _e in h_all:
+            if layer != WALL_LAYER or length < 400.0:
+                continue
+            if abs(y - y0) > 45.0 and abs(y - y1) > 45.0:
+                continue
+            if abs(a - x1) <= 45.0 and b > x1 + 200.0:
+                return True
+            if abs(b - x0) <= 45.0 and a < x0 - 200.0:
+                return True
+        for y, a, b, layer, length, _e in h_all:
+            if layer != WALL_LAYER or length < 800.0:
+                continue
+            if not (y0 + 40.0 <= y <= y1 - 40.0):
+                continue
+            if abs(a - x1) <= 45.0 and b > x1 + 200.0:
+                return True
+            if abs(b - x0) <= 45.0 and a < x0 - 200.0:
+                return True
+        for x, a, b, layer, length, _e in v_all:
+            if layer != WALL_LAYER or length < 800.0:
+                continue
+            if not (x0 + 40.0 <= x <= x1 - 40.0):
+                continue
+            if abs(a - y1) <= 45.0 and b > y1 + 200.0:
+                return True
+            if abs(b - y0) <= 45.0 and a < y0 - 200.0:
+                return True
+        return False
+
+    rects: list[dict[str, Any]] = []
+    for i, (y0, a0, b0, _l0, _L0, e_bot) in enumerate(h_short):
+        width = b0 - a0
+        for y1, a1, b1, _l1, _L1, e_top in h_short[i + 1 :]:
+            height = y1 - y0
+            if height < 700.0:
+                continue
+            if height > 1800.0:
+                break
+            if abs(a0 - a1) > 25.0 or abs(b0 - b1) > 25.0:
+                continue
+            if abs(width - height) > max(width, height) * 0.22:
+                continue
+            left = right = None
+            for x, ya, yb, _lv, _Lv, ev in v_short:
+                if abs(ya - y0) > 30.0 or abs(yb - y1) > 30.0:
+                    continue
+                if abs(x - a0) <= 30.0:
+                    left = ev
+                elif abs(x - b0) <= 30.0:
+                    right = ev
+            if left is None or right is None:
+                continue
+            rects.append(
+                {
+                    "x0": a0,
+                    "y0": y0,
+                    "x1": b0,
+                    "y1": y1,
+                    "w": width,
+                    "h": height,
+                    "cx": (a0 + b0) * 0.5,
+                    "cy": (y0 + y1) * 0.5,
+                    "ents": [e_bot, e_top, left, right],
+                }
+            )
+
+    uniq: list[dict[str, Any]] = []
+    for r in sorted(rects, key=lambda item: -(item["w"] * item["h"])):
+        if any(
+            math.hypot(r["cx"] - u["cx"], r["cy"] - u["cy"]) < 80.0
+            and abs(r["w"] - u["w"]) < 60.0
+            for u in uniq
+        ):
+            continue
+        uniq.append(r)
+
+    n = 0
+    seen: list[tuple[float, float]] = []
+    for outer in uniq:
+        for inner in uniq:
+            if inner is outer:
+                continue
+            if math.hypot(outer["cx"] - inner["cx"], outer["cy"] - inner["cy"]) > 80.0:
+                continue
+            if abs(outer["cx"] - inner["cx"]) > 40.0 or abs(outer["cy"] - inner["cy"]) > 40.0:
+                continue
+            if not (inner["w"] < outer["w"] - 60.0 and inner["h"] < outer["h"] - 60.0):
+                continue
+            tw = (outer["w"] - inner["w"]) * 0.5
+            th = (outer["h"] - inner["h"]) * 0.5
+            if not (80.0 <= tw <= 250.0 and 80.0 <= th <= 250.0):
+                continue
+            if any(math.hypot(outer["cx"] - sx, outer["cy"] - sy) < 80.0 for sx, sy in seen):
+                continue
+            if not wall_abuts(outer["x0"], outer["y0"], outer["x1"], outer["y1"]):
+                continue
+            seen.append((outer["cx"], outer["cy"]))
+            for ent in outer["ents"] + inner["ents"]:
+                if _paint_layer(ent, WALL_LAYER, WALL_COLOR):
+                    n += 1
+            break
+    return n
+
+
+def find_round_column_rings(
+    msp,
+) -> list[tuple[float, float, float, float, list[Any]]]:
+    """동심 원/호 둥근 기둥 후보.
+
+    반환: (cx, cy, r_in, r_extent, entities).
+    r_extent 는 원 바깥 반지름과 바깥 사각 half 중 큰 값이다.
+
+    패턴 (김포 실낙원 상주휴게실):
+    - 동심 CIRCLE/ARC 2–3겹 (쉘 20–150 mm, r 150–500, 호 합 ≥240°)
+    - 가운데 원을 감싸는 네모(변 길이 400–900 mm, half ≈ r…r+150)가
+      두 변 이상이거나, 이중 WALL이 원주에 닿거나, 짧은 stub(60–250 mm)이
+      모서리에 있으면 기둥으로 본다. 사각 변 선도 entities 에 넣는다.
+    """
+    groups: dict[tuple[float, float], list[tuple[float, float, float, float, Any]]] = defaultdict(
+        list
+    )
+    # (x0,y0,x1,y1,length,layer,entity)
+    short_lines: list[tuple[float, float, float, float, float, str, Any]] = []
+    frame_lines: list[tuple[float, float, float, float, float, str, Any]] = []
+    walls: list[tuple[float, float, float, float, float]] = []
+    for e in _entities(msp):
+        kind = _dxftype(e)
+        layer = str(getattr(e.dxf, "layer", "") or "")
+        if kind in ("ARC", "CIRCLE"):
+            if layer not in (BASE_LAYER, WALL_LAYER, COLUMN_LAYER):
+                continue
+            try:
+                cx, cy = _acx(e), _acy(e)
+                r = _ar(e)
+            except Exception:  # noqa: BLE001
+                continue
+            if not (150.0 <= r <= 500.0):
+                continue
+            if kind == "CIRCLE":
+                sweep = 360.0
+            else:
+                try:
+                    sweep = (float(e.dxf.end_angle) - float(e.dxf.start_angle)) % 360.0
+                except Exception:  # noqa: BLE001
+                    continue
+                if sweep < 20.0:
+                    continue
+            key = (round(cx / 30.0) * 30.0, round(cy / 30.0) * 30.0)
+            groups[key].append((cx, cy, r, sweep, e))
+            continue
+        if kind != "LINE" or layer not in (BASE_LAYER, WALL_LAYER, COLUMN_LAYER):
+            continue
+        parsed = _axis_line(e)
+        if parsed is None:
+            continue
+        try:
+            x0, y0 = _lx0(e), _ly0(e)
+            x1, y1 = _lx1(e), _ly1(e)
+        except Exception:  # noqa: BLE001
+            continue
+        length = parsed[4]
+        if 60.0 <= length <= 250.0:
+            short_lines.append((x0, y0, x1, y1, length, layer, e))
+        if 400.0 <= length <= 900.0:
+            frame_lines.append((x0, y0, x1, y1, length, layer, e))
+        if layer == WALL_LAYER and length >= 400.0:
+            walls.append((x0, y0, x1, y1, length))
+
+    def wall_abuts(cx: float, cy: float, r_out: float) -> bool:
+        ends: list[tuple[float, float]] = []
+        for x0, y0, x1, y1, _length in walls:
+            for x, y in ((x0, y0), (x1, y1)):
+                if abs(math.hypot(x - cx, y - cy) - r_out) <= 80.0:
+                    ends.append((x, y))
+        if len(ends) >= 2:
+            return True
+        near = 0
+        for x0, y0, x1, y1, length in walls:
+            dx, dy = x1 - x0, y1 - y0
+            if length < 1.0:
+                continue
+            t = max(0.0, min(1.0, ((cx - x0) * dx + (cy - y0) * dy) / (length * length)))
+            px, py = x0 + t * dx, y0 + t * dy
+            d = math.hypot(px - cx, py - cy)
+            if abs(d - r_out) <= 100.0 or (
+                r_out - 100.0 <= d <= r_out + 50.0 and (t < 0.05 or t > 0.95)
+            ):
+                near += 1
+        return near >= 2
+
+    def corner_stub_sides(cx: float, cy: float, r_out: float) -> int:
+        """바깥 사각(±r_out) 네 변 중 stub 이 닿는 변 수."""
+        sides = {"L": False, "R": False, "B": False, "T": False}
+        x_l, x_r = cx - r_out, cx + r_out
+        y_b, y_t = cy - r_out, cy + r_out
+        for x0, y0, x1, y1, length, _layer, _e in short_lines:
+            mx, my = (x0 + x1) * 0.5, (y0 + y1) * 0.5
+            if abs(x0 - x1) <= 25.0:  # V stub
+                x = mx
+                for name, xe in (("L", x_l), ("R", x_r)):
+                    if abs(x - xe) > 40.0:
+                        continue
+                    if y_b - 40.0 <= my <= y_t + 40.0:
+                        sides[name] = True
+            elif abs(y0 - y1) <= 25.0:  # H stub
+                y = my
+                for name, ye in (("B", y_b), ("T", y_t)):
+                    if abs(y - ye) > 40.0:
+                        continue
+                    if x_l - 40.0 <= mx <= x_r + 40.0:
+                        sides[name] = True
+            for x, y in ((x0, y0), (x1, y1)):
+                if abs(x - x_l) <= 40.0 and y_b - 40.0 <= y <= y_t + 40.0:
+                    sides["L"] = True
+                if abs(x - x_r) <= 40.0 and y_b - 40.0 <= y <= y_t + 40.0:
+                    sides["R"] = True
+                if abs(y - y_b) <= 40.0 and x_l - 40.0 <= x <= x_r + 40.0:
+                    sides["B"] = True
+                if abs(y - y_t) <= 40.0 and x_l - 40.0 <= x <= x_r + 40.0:
+                    sides["T"] = True
+        return sum(1 for v in sides.values() if v)
+
+    def enclosing_square(
+        cx: float, cy: float, r_out: float
+    ) -> tuple[int, float, list[Any]]:
+        """원 바깥을 감싸는 네모 변(BASE/WALL, 400–900 mm).
+
+        원과 사각 사이에 틈(최대 ~150 mm)이 있어도 된다.
+        반환: (변 개수, half, 변 엔티티).
+        """
+        # side -> list of (half, entity)
+        hits: dict[str, list[tuple[float, Any]]] = {
+            "L": [],
+            "R": [],
+            "B": [],
+            "T": [],
+        }
+        # 원–사각 틈이 도면마다 75–150 mm 로 달라 half 허용을 넉넉히 둔다.
+        half_min, half_max = r_out - 20.0, r_out + 180.0
+        half_tol = 80.0
+        for x0, y0, x1, y1, length, _layer, ent in frame_lines:
+            if abs(x0 - x1) <= 25.0:  # V
+                x = (x0 + x1) * 0.5
+                ya, yb = min(y0, y1), max(y0, y1)
+                # 중심 높이를 덮거나 사각 높이의 상당 부분을 덮음
+                if yb < cy - 40.0 or ya > cy + 40.0:
+                    if not (ya <= cy + r_out and yb >= cy - r_out):
+                        continue
+                half = abs(x - cx)
+                if not (half_min <= half <= half_max):
+                    continue
+                # 변 길이가 half*2 와 크게 어긋나면 긴 벽 조각일 수 있음
+                if length < half * 0.7:
+                    continue
+                name = "L" if x < cx else "R"
+                hits[name].append((half, ent))
+            elif abs(y0 - y1) <= 25.0:  # H
+                y = (y0 + y1) * 0.5
+                xa, xb = min(x0, x1), max(x0, x1)
+                if xb < cx - 40.0 or xa > cx + 40.0:
+                    if not (xa <= cx + r_out and xb >= cx - r_out):
+                        continue
+                half = abs(y - cy)
+                if not (half_min <= half <= half_max):
+                    continue
+                if length < half * 0.7:
+                    continue
+                name = "B" if y < cy else "T"
+                hits[name].append((half, ent))
+
+        # 같은 half(±80)로 모인 변이 가장 많은 그룹을 고른다
+        best_n, best_half, best_ents = 0, r_out, []
+        halves: list[float] = []
+        for side_hits in hits.values():
+            halves.extend(h for h, _e in side_hits)
+        if not halves:
+            return 0, r_out, []
+        for seed in halves:
+            ents: list[Any] = []
+            n = 0
+            for _name, side_hits in hits.items():
+                matched = [e for h, e in side_hits if abs(h - seed) <= half_tol]
+                if matched:
+                    n += 1
+                    ents.extend(matched)
+            if n > best_n or (n == best_n and seed < best_half):
+                best_n, best_half, best_ents = n, seed, ents
+        # 중복 엔티티 제거
+        uniq: list[Any] = []
+        seen_id: set[int] = set()
+        for ent in best_ents:
+            if id(ent) in seen_id:
+                continue
+            seen_id.add(id(ent))
+            uniq.append(ent)
+        return best_n, best_half, uniq
+
+    out: list[tuple[float, float, float, float, list[Any]]] = []
+    seen: list[tuple[float, float]] = []
+    for _key, items in groups.items():
+        cx = sum(i[0] for i in items) / len(items)
+        cy = sum(i[1] for i in items) / len(items)
+        if any(math.hypot(cx - sx, cy - sy) < 80.0 for sx, sy in seen):
+            continue
+        by_r: dict[float, list[Any]] = defaultdict(list)
+        cov: dict[float, float] = defaultdict(float)
+        for _cx, _cy, r, sweep, e in items:
+            rr = round(r / 5.0) * 5.0
+            cov[rr] = min(360.0, cov[rr] + sweep)
+            by_r[rr].append(e)
+        radii = sorted(by_r.keys())
+        best: tuple[float, float, float] | None = None
+        for i, ri in enumerate(radii):
+            for rj in radii[i + 1 :]:
+                shell = rj - ri
+                if not (20.0 <= shell <= 150.0):
+                    continue
+                if max(cov[ri], cov[rj]) < 240.0:
+                    continue
+                if best is None or rj > best[1]:
+                    best = (ri, rj, shell)
+        if best is None:
+            continue
+        ri, rj, _shell = best
+        n_radii = sum(1 for r in radii if ri - 5.0 <= r <= rj + 5.0)
+        stubs = corner_stub_sides(cx, cy, rj)
+        abuts = wall_abuts(cx, cy, rj)
+        sq_n, sq_half, sq_ents = enclosing_square(cx, cy, rj)
+        # 원+바깥 네모(≥2변), 이중벽 접촉, stub 3변, 삼중+stub 2변
+        if not (
+            abuts
+            or stubs >= 3
+            or (n_radii >= 3 and stubs >= 2)
+            or sq_n >= 2
+        ):
+            continue
+        ents: list[Any] = []
+        for r in radii:
+            if ri - 5.0 <= r <= rj + 5.0:
+                ents.extend(by_r[r])
+        if sq_n >= 2:
+            ents.extend(sq_ents)
+        if not ents:
+            continue
+        extent = max(rj, sq_half) if sq_n >= 2 else rj
+        seen.append((cx, cy))
+        out.append((cx, cy, ri, extent, ents))
+    return out
+
+
+def _segment_circle_intersections(
+    x0: float, y0: float, x1: float, y1: float, cx: float, cy: float, r: float
+) -> list[tuple[float, float]]:
+    """선분과 원의 교점 (0–2)."""
+    dx, dy = x1 - x0, y1 - y0
+    fx, fy = x0 - cx, y0 - cy
+    a = dx * dx + dy * dy
+    if a < 1e-9:
+        return []
+    b = 2.0 * (fx * dx + fy * dy)
+    c = fx * fx + fy * fy - r * r
+    disc = b * b - 4.0 * a * c
+    if disc < 0.0:
+        return []
+    root = math.sqrt(max(disc, 0.0))
+    hits: list[tuple[float, float]] = []
+    for t in ((-b - root) / (2.0 * a), (-b + root) / (2.0 * a)):
+        if -0.02 <= t <= 1.02:
+            hits.append((x0 + t * dx, y0 + t * dy))
+    if len(hits) == 2 and math.hypot(hits[0][0] - hits[1][0], hits[0][1] - hits[1][1]) < 1.0:
+        return hits[:1]
+    return hits
+
+
+def trim_walls_through_round_columns(msp) -> int:
+    """둥근 기둥 원반을 관통하는 WALL 선을 원주에서 끊거나 BASE로 내린다."""
+    rings = find_round_column_rings(msp)
+    if not rings:
+        return 0
+    boxed = [
+        {
+            "bbox_mm": [cx - r_out, cy - r_out, cx + r_out, cy + r_out],
+            "cx": cx,
+            "cy": cy,
+            "r_out": r_out,
+        }
+        for cx, cy, _ri, r_out, _ents in rings
+    ]
+    kept, _dropped = _filter_columns_by_separation(boxed)
+    cols = [(item["cx"], item["cy"], item["r_out"]) for item in kept]
+    if not cols:
+        return 0
+
+    n = 0
+    to_add: list[tuple[tuple[float, float], tuple[float, float]]] = []
+    for e in list(_entities(msp)):
+        if _dxftype(e) != "LINE":
+            continue
+        if str(getattr(e.dxf, "layer", "") or "") != WALL_LAYER:
+            continue
+        try:
+            x0, y0 = _lx0(e), _ly0(e)
+            x1, y1 = _lx1(e), _ly1(e)
+        except Exception:  # noqa: BLE001
+            continue
+        length = math.hypot(x1 - x0, y1 - y0)
+        if length < 200.0:
+            continue
+        for cx, cy, r_out in cols:
+            r_cut = max(r_out - 15.0, r_out * 0.9)
+            d0 = math.hypot(x0 - cx, y0 - cy)
+            d1 = math.hypot(x1 - cx, y1 - cy)
+            hits = _segment_circle_intersections(x0, y0, x1, y1, cx, cy, r_cut)
+            inside0, inside1 = d0 < r_cut - 5.0, d1 < r_cut - 5.0
+            if not inside0 and not inside1 and len(hits) < 2:
+                # 접선·외부만 스침
+                dx, dy = x1 - x0, y1 - y0
+                t = max(0.0, min(1.0, ((cx - x0) * dx + (cy - y0) * dy) / (length * length)))
+                if math.hypot(x0 + t * dx - cx, y0 + t * dy - cy) >= r_cut - 5.0:
+                    continue
+            if inside0 and inside1:
+                if _paint_layer(e, BASE_LAYER, BASE_COLOR):
+                    n += 1
+                break
+            if inside0 and not inside1 and hits:
+                hx, hy = min(hits, key=lambda p: math.hypot(p[0] - x1, p[1] - y1))
+                e.dxf.start = (hx, hy)
+                n += 1
+                break
+            if inside1 and not inside0 and hits:
+                hx, hy = min(hits, key=lambda p: math.hypot(p[0] - x0, p[1] - y0))
+                e.dxf.end = (hx, hy)
+                n += 1
+                break
+            if len(hits) >= 2 and not inside0 and not inside1:
+                # 관통: 바깥 두 조각만 남긴다
+                h0, h1 = hits[0], hits[1]
+                # h0 closer to start
+                if math.hypot(h0[0] - x0, h0[1] - y0) > math.hypot(h1[0] - x0, h1[1] - y0):
+                    h0, h1 = h1, h0
+                e.dxf.end = (h0[0], h0[1])
+                to_add.append(((h1[0], h1[1]), (x1, y1)))
+                n += 1
+                break
+    for a, b in to_add:
+        if math.hypot(b[0] - a[0], b[1] - a[1]) < 40.0:
+            continue
+        msp.add_line(a, b, dxfattribs={"layer": WALL_LAYER, "color": WALL_COLOR})
+        n += 1
+    return n
+
+
+def promote_round_columns(msp) -> int:
+    """동심 원/호(평행 이중 원) 둥근 기둥을 WALL로 올린다.
+
+    동심 CIRCLE/ARC + (이중벽 접촉 또는 바깥 사각 stub) 패턴이다.
+    기둥 간 최소 거리보다 가까운 후보는 올리지 않는다.
+    승격 후 원반을 관통하는 WALL 은 원주에서 끊는다.
+    """
+    rings = find_round_column_rings(msp)
+    if not rings:
+        return 0
+    boxed = [
+        {
+            "bbox_mm": [cx - r_out, cy - r_out, cx + r_out, cy + r_out],
+            "ents": ents,
+            "cx": cx,
+            "cy": cy,
+        }
+        for cx, cy, _ri, r_out, ents in rings
+    ]
+    kept, _dropped = _filter_columns_by_separation(boxed)
+    n = 0
+    for item in kept:
+        for ent in item["ents"]:
+            if _paint_layer(ent, WALL_LAYER, WALL_COLOR):
+                n += 1
+    # 목록에 없는 WALL 동심 원(오승격)은 BASE로 되돌린다.
+    kept_ids = {id(ent) for item in kept for ent in item["ents"]}
+    for _cx, _cy, _ri, _rj, ents in rings:
+        for ent in ents:
+            if id(ent) in kept_ids:
+                continue
+            if getattr(ent.dxf, "layer", None) == WALL_LAYER:
+                if _paint_layer(ent, BASE_LAYER, BASE_COLOR):
+                    n += 1
+    n += trim_walls_through_round_columns(msp)
+    return n
+
+
+def _mark_concentric_inner_column_lines(
+    horizontal: list[tuple[float, float, float, Any]],
+    vertical: list[tuple[float, float, float, Any]],
+    x0: float,
+    y0: float,
+    x1: float,
+    y1: float,
+) -> None:
+    """바깥 사각 COLUMN 안의 동심 안쪽 사각 선도 COLUMN으로 둔다."""
+    ow, oh = x1 - x0, y1 - y0
+    inner_h = [
+        (coord, a, b, ent)
+        for coord, a, b, ent in horizontal
+        if y0 + 60.0 <= coord <= y1 - 60.0
+        and a >= x0 + 60.0
+        and b <= x1 - 60.0
+        and 400.0 <= (b - a) <= ow - 100.0
+    ]
+    if len(inner_h) < 2:
+        return
+    inner_h.sort(key=lambda item: item[0])
+    for i, (iy0, ia0, ib0, _e0) in enumerate(inner_h):
+        iw = ib0 - ia0
+        for iy1, ia1, ib1, _e1 in inner_h[i + 1 :]:
+            ih = iy1 - iy0
+            if ih < 400.0:
+                continue
+            if ih > oh - 100.0:
+                break
+            if abs(ia0 - ia1) > 25.0 or abs(ib0 - ib1) > 25.0:
+                continue
+            if abs(iw - ih) > max(iw, ih) * 0.22:
+                continue
+            tw = (ow - iw) * 0.5
+            th = (oh - ih) * 0.5
+            if not (80.0 <= tw <= 250.0 and 80.0 <= th <= 250.0):
+                continue
+            icx, icy = (ia0 + ib0) * 0.5, (iy0 + iy1) * 0.5
+            if abs(icx - (x0 + x1) * 0.5) > 40.0 or abs(icy - (y0 + y1) * 0.5) > 40.0:
+                continue
+            has_left = any(
+                abs(span0 - iy0) <= 30.0
+                and abs(span1 - iy1) <= 30.0
+                and abs(x - ia0) <= 30.0
+                for x, span0, span1, _ent in vertical
+            )
+            has_right = any(
+                abs(span0 - iy0) <= 30.0
+                and abs(span1 - iy1) <= 30.0
+                and abs(x - ib0) <= 30.0
+                for x, span0, span1, _ent in vertical
+            )
+            if not (has_left and has_right):
+                continue
+            for coord, along0, along1, entity in horizontal:
+                on_edge = abs(coord - iy0) <= 20.0 or abs(coord - iy1) <= 20.0
+                if on_edge and along0 >= ia0 - 30.0 and along1 <= ib0 + 30.0:
+                    _mark_column(entity)
+            for coord, along0, along1, entity in vertical:
+                on_edge = abs(coord - ia0) <= 20.0 or abs(coord - ib0) <= 20.0
+                if on_edge and along0 >= iy0 - 30.0 and along1 <= iy1 + 30.0:
+                    _mark_column(entity)
+            return
+
+
 def _point_on_square_edge(
     x: float, y: float, box: tuple[float, float, float, float], tol: float = 50.0
 ) -> bool:
@@ -3364,6 +4113,162 @@ def _mark_column(ent) -> None:
         pass
 
 
+def _column_min_separation_mm(side_a: float, side_b: float) -> float:
+    """구조 기둥 중심 간 최소 거리. 인접·맞닿은 사각 박스는 기둥이 아니다."""
+    return max(2000.0, 2.5 * max(side_a, side_b))
+
+
+def _filter_columns_by_separation(
+    columns: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[list[float]]]:
+    """너무 가까운 기둥 bbox 를 걸러낸다.
+
+    중심 거리가 min(2000 mm, 2.5×긴변) 미만이면 작은 쪽을 제외한다.
+    면적이 비슷하면 둘 다 제외한다(맞닿은 이중 사각·가구 격자).
+    """
+    if len(columns) < 2:
+        return columns, []
+    info: list[tuple[float, float, float, float, dict[str, Any]]] = []
+    for col in columns:
+        box = col["bbox_mm"]
+        x0, y0, x1, y1 = (float(box[0]), float(box[1]), float(box[2]), float(box[3]))
+        w, h = x1 - x0, y1 - y0
+        info.append(((x0 + x1) * 0.5, (y0 + y1) * 0.5, max(w, h), w * h, col))
+    drop: set[int] = set()
+    for i, (cx, cy, side, area, _col) in enumerate(info):
+        for j in range(i + 1, len(info)):
+            ox, oy, oside, oarea, _ocol = info[j]
+            need = _column_min_separation_mm(side, oside)
+            if math.hypot(cx - ox, cy - oy) >= need:
+                continue
+            if area < oarea * 0.9:
+                drop.add(i)
+            elif oarea < area * 0.9:
+                drop.add(j)
+            else:
+                drop.add(i)
+                drop.add(j)
+    kept = [col for idx, col in enumerate(columns) if idx not in drop]
+    dropped = [columns[idx]["bbox_mm"] for idx in sorted(drop)]
+    return kept, dropped
+
+
+def _unmark_column_bbox_to_wall(msp, bbox: list[float]) -> int:
+    """COLUMN 으로 올린 사각·원형 윤곽을 WALL 로 되돌린다. 기둥 목록에서만 뺀다."""
+    x0, y0, x1, y1 = (float(bbox[0]), float(bbox[1]), float(bbox[2]), float(bbox[3]))
+    cx_box, cy_box = (x0 + x1) * 0.5, (y0 + y1) * 0.5
+    n = 0
+    for entity in _entities(msp):
+        if getattr(entity.dxf, "layer", None) != COLUMN_LAYER:
+            continue
+        kind = _dxftype(entity)
+        if kind in ("CIRCLE", "ARC"):
+            try:
+                cx, cy = _acx(entity), _acy(entity)
+                r = _ar(entity)
+            except Exception:  # noqa: BLE001
+                continue
+            if math.hypot(cx - cx_box, cy - cy_box) > 80.0:
+                continue
+            if r > max(x1 - x0, y1 - y0) * 0.6 + 20.0:
+                continue
+            # 간격으로 빠진 둥근 기둥은 WALL 잔상(빨간 이중 원)이 되지 않게 BASE로 둔다.
+            if _paint_layer(entity, BASE_LAYER, BASE_COLOR):
+                n += 1
+            continue
+        if kind == "LWPOLYLINE":
+            sq = _lwpoly_axis_square_box(entity, min_mm=400.0, max_mm=1550.0)
+            if sq is None:
+                continue
+            if (
+                abs(sq[0] - x0) <= 40.0
+                and abs(sq[1] - y0) <= 40.0
+                and abs(sq[2] - x1) <= 40.0
+                and abs(sq[3] - y1) <= 40.0
+            ):
+                if _paint_layer(entity, WALL_LAYER, WALL_COLOR):
+                    n += 1
+            continue
+        parsed = _axis_line(entity)
+        if parsed is None:
+            continue
+        ori, coord, a, b, length = parsed
+        if not (250.0 <= length <= 1550.0):
+            continue
+        on = False
+        if ori == "H":
+            on = (
+                (abs(coord - y0) <= 25.0 or abs(coord - y1) <= 25.0)
+                and a >= x0 - 40.0
+                and b <= x1 + 40.0
+            )
+        else:
+            on = (
+                (abs(coord - x0) <= 25.0 or abs(coord - x1) <= 25.0)
+                and a >= y0 - 40.0
+                and b <= y1 + 40.0
+            )
+        if on and _paint_layer(entity, WALL_LAYER, WALL_COLOR):
+            n += 1
+    return n
+
+
+def _reconcile_column_layer(msp, columns: list[dict[str, Any]]) -> int:
+    """최종 columns bbox 밖의 COLUMN 잔여를 WALL/BASE로 되돌린다.
+
+    H-Beam·벽면 사각이 목록에서 빠져도 선이 COLUMN에 남는 경우를 막는다.
+    """
+    boxes: list[tuple[float, float, float, float]] = []
+    for col in columns:
+        box = col["bbox_mm"]
+        boxes.append(
+            (float(box[0]), float(box[1]), float(box[2]), float(box[3]))
+        )
+
+    def in_kept(cx: float, cy: float, pad: float = 80.0) -> bool:
+        for x0, y0, x1, y1 in boxes:
+            if x0 - pad <= cx <= x1 + pad and y0 - pad <= cy <= y1 + pad:
+                return True
+        return False
+
+    n = 0
+    for entity in _entities(msp):
+        if getattr(entity.dxf, "layer", None) != COLUMN_LAYER:
+            continue
+        kind = _dxftype(entity)
+        keep = False
+        if kind in ("CIRCLE", "ARC"):
+            try:
+                cx, cy = _acx(entity), _acy(entity)
+            except Exception:  # noqa: BLE001
+                cx = cy = None
+            keep = cx is not None and in_kept(cx, cy)
+            if not keep:
+                if _paint_layer(entity, BASE_LAYER, BASE_COLOR):
+                    n += 1
+            continue
+        if kind == "LWPOLYLINE":
+            sq = _lwpoly_axis_square_box(entity, min_mm=300.0, max_mm=1600.0)
+            if sq is not None:
+                keep = in_kept((sq[0] + sq[2]) * 0.5, (sq[1] + sq[3]) * 0.5)
+            if not keep and _paint_layer(entity, WALL_LAYER, WALL_COLOR):
+                n += 1
+            continue
+        if kind == "LINE":
+            try:
+                mx = (_lx0(entity) + _lx1(entity)) * 0.5
+                my = (_ly0(entity) + _ly1(entity)) * 0.5
+            except Exception:  # noqa: BLE001
+                continue
+            keep = in_kept(mx, my)
+            if not keep and _paint_layer(entity, WALL_LAYER, WALL_COLOR):
+                n += 1
+            continue
+        if _paint_layer(entity, WALL_LAYER, WALL_COLOR):
+            n += 1
+    return n
+
+
 def _fold_class_layers(msp) -> None:
     """재검증 때 창·기둥을 잠시 WALL로 되돌린다. 저장 직전에 다시 나눈다."""
     for entity in _entities(msp):
@@ -3526,6 +4431,8 @@ def promote_column_adjacent_wall_pairs(
 ) -> int:
     """기둥에 닿는 이중 평행선(간격 80–350 mm)을 벽으로 올린다.
 
+    사각·H·원형 기둥 bbox를 모두 받을 수 있다. 원형 기둥 사이를 잇는
+    이중·다중 면도 벽이다(방풍실 원형 기둥 사이 세로면).
     문 개구를 지나는 선과, 같은 띠에 4개 이상 모인 평행선(계단·살대)은 올리지 않는다.
     다변 열린 LWPOLYLINE(옷장·단차 E자 윤곽 등 단일선 가구)은 짝 후보에서 제외한다.
     한 변만 이중벽과 겹쳐도 폴리선 전체를 WALL로 칠하지 않기 위함이다.
@@ -4362,6 +5269,39 @@ def review_demote_keep_ids(
     keep |= _column_abutting_wall_ids(msp, cols)
     keep |= _opening_end_partition_ids(msp)
     return keep
+
+
+def _is_furniture_demote_label(label: object) -> bool:
+    text = str(label or "").strip()
+    return text.startswith("가구") or text.startswith("침대")
+
+
+def review_demote_ids(
+    msp,
+    bboxes: Iterable[Any],
+    *,
+    column_ids: set[int] | None = None,
+) -> set[int]:
+    """Vision demote 대상 id.
+
+    가구·침대 상자는 창문·개구 keep에 막히지 않는다(기둥·기둥 맞닿은 면만 남김).
+    그 외 demote 상자는 기존 keep(문 양옆·창문·기둥·개구 격벽)을 적용한다.
+    """
+    boxes = list(bboxes or [])
+    furn = [b for b in boxes if isinstance(b, dict) and _is_furniture_demote_label(b.get("label"))]
+    other = [
+        b
+        for b in boxes
+        if not (isinstance(b, dict) and _is_furniture_demote_label(b.get("label")))
+    ]
+    cols = set(column_ids) if column_ids is not None else find_hbeam_column_entities(msp)
+    # 가구·침대: 기둥 본체만 남긴다. 기둥 맞닿은 면 keep은 소파 장변까지 삼킨다.
+    result = demote_in_bboxes(msp, furn)
+    result -= cols
+    other_ids = demote_in_bboxes(msp, other)
+    other_ids -= review_demote_keep_ids(msp, other, column_ids=cols)
+    result |= other_ids
+    return result
 
 
 def demote_in_bboxes(
@@ -8308,7 +9248,8 @@ def find_narrow_leaf_openings(
             sa, ea = _asa(e), _aea(e)
         except Exception:  # noqa: BLE001
             continue
-        if not (700.0 <= r <= 1200.0) or not (20.0 <= sweep <= 45.0):
+        # 남산 HVAC 등: 짧은 호 스윙 반지름 ~680 mm.
+        if not (650.0 <= r <= 1200.0) or not (20.0 <= sweep <= 45.0):
             continue
         key = (round(cx / 40.0), round(cy / 40.0))
         if key in seen:
@@ -18529,9 +19470,13 @@ def promote_line_swing_door_jambs(msp) -> int:
 
 
 def promote_thick_wall_mates(msp) -> int:
-    """한쪽 면만 벽인 두꺼운 벽(면 간격 약 500 mm)의 맞은편과 끝단을 올린다.
+    """한쪽 면만 벽인 두꺼운 벽(면 간격 약 200–550 mm)의 맞은편과 끝단을 올린다.
 
-    길이가 같은 평행 쌍만 본다. 그 두께 안에 있고 양끝으로 이어진 짧은 꺾임도 벽이다.
+    방풍실 옆 벽처럼 안쪽만 WALL이고 바깥 면·중간 면이 BASE인 경우다.
+    바깥 면이 문·끊김으로 여러 조각이어도, 긴 WALL과 1.5 m 이상 겹치면 올린다.
+    그 두께 안에 있고 양끝으로 이어진 짧은 꺾임도 벽이다.
+    이미 80–180 mm 이중 WALL(일반 칸막이)이 있으면 실 안 가구 BASE는 올리지 않는다.
+    200 mm대 중간면이 있는 두꺼운 벽(방풍실)은 그대로 맞은편을 올린다.
     """
     rows: list[tuple[str, float, float, float, float, object]] = []
     for ent in _entities(msp):
@@ -18548,31 +19493,51 @@ def promote_thick_wall_mates(msp) -> int:
         elif dy <= 25.0:
             rows.append(("H", (a[1] + b[1]) * 0.5, min(a[0], b[0]), max(a[0], b[0]), length, ent))
 
+    def _has_partition_double_face(kind: str, axis: float, c0: float, c1: float) -> bool:
+        span = c1 - c0
+        if span < 1.0:
+            return False
+        need = min(1500.0, 0.5 * span)
+        for kind2, axis2, d0, d1, _length2, ent2 in rows:
+            if kind2 != kind or getattr(ent2.dxf, "layer", None) != WALL_LAYER:
+                continue
+            gap = abs(axis2 - axis)
+            # 일반 이중 칸막이만. 200+ mm 중간면은 두꺼운 벽 슬래브로 본다.
+            if not (80.0 <= gap <= 180.0):
+                continue
+            if min(c1, d1) - max(c0, d0) >= need:
+                return True
+        return False
+
+    # (kind, lo, hi, wall_along0, wall_along1) — WALL 전체 길이를 기준으로 맞은편 조각을 올린다.
     slabs: list[tuple[str, float, float, float, float]] = []
+    seen_slab: set[tuple] = set()
     for kind, axis, c0, c1, length, ent in rows:
-        if getattr(ent.dxf, "layer", None) != WALL_LAYER or length < 2500.0:
+        if getattr(ent.dxf, "layer", None) != WALL_LAYER or length < 2000.0:
             continue
-        if kind != "V":
+        # 칸막이 이중벽 안쪽 → 맞은편 가구선을 두꺼운 벽 바깥으로 오인하지 않는다.
+        if _has_partition_double_face(kind, axis, c0, c1):
             continue
-        for kind2, axis2, d0, d1, length2, ent2 in rows:
+        for kind2, axis2, d0, d1, _length2, ent2 in rows:
             if kind2 != kind or getattr(ent2.dxf, "layer", None) != BASE_LAYER:
                 continue
             gap = abs(axis2 - axis)
-            if not (480.0 <= gap <= 520.0):
+            if not (200.0 <= gap <= 550.0):
                 continue
-            ov0, ov1 = max(c0, d0), min(c1, d1)
-            overlap = ov1 - ov0
-            if overlap < 2500.0:
-                continue
-            if abs(length - length2) > 200.0 or abs((c0 + c1) - (d0 + d1)) > 400.0:
+            overlap = min(c1, d1) - max(c0, d0)
+            if overlap < 1500.0:
                 continue
             lo, hi = (axis, axis2) if axis < axis2 else (axis2, axis)
-            slabs.append((kind, lo, hi, ov0, ov1))
+            key = (kind, round(lo, 0), round(hi, 0), round(c0, 0), round(c1, 0))
+            if key in seen_slab:
+                continue
+            seen_slab.add(key)
+            slabs.append((kind, lo, hi, c0, c1))
 
     changed = 0
     seen: set[int] = set()
-    for kind, lo, hi, ov0, ov1 in slabs:
-        along0, along1 = ov0 - 1300.0, ov1 + 1300.0
+    for kind, lo, hi, wall0, wall1 in slabs:
+        along0, along1 = wall0 - 200.0, wall1 + 200.0
         for kind2, axis, c0, c1, length, ent in rows:
             if kind2 != kind or getattr(ent.dxf, "layer", None) != BASE_LAYER:
                 continue
@@ -18580,9 +19545,8 @@ def promote_thick_wall_mates(msp) -> int:
                 continue
             if not (lo - 30.0 <= axis <= hi + 30.0):
                 continue
-            if c0 < along0 - 5.0 or c1 > along1 + 5.0:
-                continue
-            if length > 1400.0 and not (abs(c0 - ov0) < 30.0 and abs(c1 - ov1) < 30.0):
+            # WALL 구간에 걸치는 BASE 조각(짧은 끊긴 바깥면도 포함).
+            if min(c1, along1) - max(c0, along0) < 300.0:
                 continue
             if _paint_layer(ent, WALL_LAYER, WALL_COLOR):
                 seen.add(id(ent))
@@ -20765,7 +21729,8 @@ def _find_partial_arc_radial_swings(msp) -> list[dict]:
         except Exception:  # noqa: BLE001
             continue
         sweep = (end_angle - start_angle) % 360.0
-        if not (700.0 <= radius <= 1000.0) or not (20.0 <= sweep <= 45.0):
+        # 남산 HVAC AV실 등: 호 반지름 ~680 mm (기존 하한 700에 걸림).
+        if not (650.0 <= radius <= 1000.0) or not (20.0 <= sweep <= 45.0):
             continue
         axis_leaves: list = []
         diag_leaves: list = []
@@ -23438,130 +24403,206 @@ def _promote_core_rectangles(msp, segs: list[dict], anchors: list[tuple[float, f
 
 
 def _promote_stair_runs(msp, segs: list[dict]) -> int:
-    """UP와 Down이 같이 있는 계단의 디딤과 바로 바깥 선을 WALL로 올린다.
+    """DN이 있는 계단의 디딤과 바로 바깥 선을 WALL로 올린다.
 
+    UP+DN뿐 아니라 DN만 있어도 디딤 묶음이 있으면 같다. UP만 있으면 디딤은 올리지 않는다.
     글자는 착지에 있고 디딤은 그 옆에 있다. 비행이 글자에서 몇 미터 떨어져도 같은 계단이다.
+    가로 비행(세로 디딤)은 각도·길이 묶음으로 나눈다. 짧은 계단(디딤 3–4줄)도 올린다.
     """
     n = 0
     painted: set[int] = set()
+
+    def _paint_flight(members: list[dict], x0: float, x1: float, y0: float, y1: float) -> None:
+        nonlocal n
+        for seg in members:
+            if seg["layer"] != BASE_LAYER or id(seg["entity"]) in painted:
+                continue
+            if _paint_layer(seg["entity"], WALL_LAYER, WALL_COLOR):
+                painted.add(id(seg["entity"]))
+                seg["layer"] = WALL_LAYER
+                n += 1
+        pad = 400.0
+        for seg in segs:
+            if seg["layer"] != BASE_LAYER or id(seg["entity"]) in painted or seg["length"] < 600.0:
+                continue
+            mx = (seg["x0"] + seg["x1"]) * 0.5
+            my = (seg["y0"] + seg["y1"]) * 0.5
+            horizontal = abs(seg["uy"]) < 0.2
+            vertical = abs(seg["ux"]) < 0.2
+            on_edge = False
+            if horizontal and x0 - pad <= mx <= x1 + pad:
+                if abs(my - y0) <= 280.0 or abs(my - y1) <= 280.0:
+                    on_edge = True
+            if vertical and y0 - pad <= my <= y1 + pad:
+                if abs(mx - x0) <= 280.0 or abs(mx - x1) <= 280.0:
+                    on_edge = True
+            if not on_edge or seg["length"] > max(x1 - x0, y1 - y0) + 1800.0:
+                continue
+            if _paint_layer(seg["entity"], WALL_LAYER, WALL_COLOR):
+                painted.add(id(seg["entity"]))
+                seg["layer"] = WALL_LAYER
+                n += 1
+        margin = 900.0
+        span = max(x1 - x0, y1 - y0)
+        for seg in segs:
+            if seg["layer"] != BASE_LAYER or id(seg["entity"]) in painted:
+                continue
+            if not (700.0 <= seg["length"] <= min(8000.0, span + 2000.0)):
+                continue
+            if abs(seg["ux"]) > 0.25 and abs(seg["uy"]) > 0.25:
+                continue
+            if (
+                min(seg["x0"], seg["x1"]) < x0 - margin
+                or max(seg["x0"], seg["x1"]) > x1 + margin
+                or min(seg["y0"], seg["y1"]) < y0 - margin
+                or max(seg["y0"], seg["y1"]) > y1 + margin
+            ):
+                continue
+            horizontal = abs(seg["uy"]) < 0.25
+            if horizontal:
+                overlap = min(max(seg["x0"], seg["x1"]), x1) - max(min(seg["x0"], seg["x1"]), x0)
+                cover = x1 - x0
+            else:
+                overlap = min(max(seg["y0"], seg["y1"]), y1) - max(min(seg["y0"], seg["y1"]), y0)
+                cover = y1 - y0
+            if overlap < min(seg["length"], cover) * 0.55:
+                continue
+            if _paint_layer(seg["entity"], WALL_LAYER, WALL_COLOR):
+                painted.add(id(seg["entity"]))
+                seg["layer"] = WALL_LAYER
+                n += 1
+
+    def _spaced_runs(items: list[dict]) -> list[list[list[tuple[float, dict]]]]:
+        """디딤 간격 200–380 mm 연속 묶음.
+
+        이중 디딤(같은 발판의 40–80 mm 평행선)이 끼면 직전 band 대비
+        간격이 200 mm 미만이 된다. 그 선은 같은 디딤으로 포함하고,
+        다음 디딤까지는 last_off 기준으로 200–380 mm 를 본다.
+        """
+        if len(items) < 3:
+            return []
+        origin = items[0]
+        placed: list[tuple[float, dict]] = []
+        for seg in items:
+            off = (seg["x0"] - origin["x0"]) * origin["nx"] + (seg["y0"] - origin["y0"]) * origin["ny"]
+            placed.append((off, seg))
+        placed.sort(key=lambda item: item[0])
+        bands: list[list[tuple[float, dict]]] = []
+        for off, seg in placed:
+            if bands and abs(off - bands[-1][0][0]) <= 50.0:
+                bands[-1].append((off, seg))
+            else:
+                bands.append([(off, seg)])
+        runs: list[list[list[tuple[float, dict]]]] = []
+        run: list[list[tuple[float, dict]]] = [bands[0]]
+        last_off = bands[0][0][0]
+        for band in bands[1:]:
+            step = band[0][0] - last_off
+            if 200.0 <= step <= 380.0:
+                run.append(band)
+                last_off = band[0][0]
+            elif step < 200.0:
+                # 이중 디딤·근접 평행선 — 비행에 넣고 last_off 는 유지
+                run.append(band)
+            else:
+                if len(run) >= 3:
+                    runs.append(run)
+                run = [band]
+                last_off = band[0][0]
+        if len(run) >= 3:
+            runs.append(run)
+        return runs
+
     for cx, cy, labs in find_stair_cores(msp):
-        has_up = any(lab.startswith("UP") for lab in labs)
         has_down = any(lab.startswith("DN") or lab == "DOWN" for lab in labs)
-        if not (has_up and has_down):
+        if not has_down:
             continue
         near = []
         for seg in segs:
             mx = (seg["x0"] + seg["x1"]) * 0.5
             my = (seg["y0"] + seg["y1"]) * 0.5
-            if math.hypot(mx - cx, my - cy) > 8000.0 or not (700.0 <= seg["length"] <= 2400.0):
+            # 짧은 디딤(~500 mm)·착지까지 이어진 긴 디딤(~2.5 m) 포함.
+            if math.hypot(mx - cx, my - cy) > 8000.0 or not (500.0 <= seg["length"] <= 3000.0):
                 continue
-            # 디딤은 계단 중심에 걸친 선만. 위층 벽이 사이에 끼면 간격이 끊긴다.
             along = (mx - cx) * seg["ux"] + (my - cy) * seg["uy"]
             if abs(along) > 4500.0:
                 continue
             near.append(seg)
+        # 1) 같은 각도·길이(~500 mm) 묶음 — 긴 비행·동일 길이 디딤.
+        by_group: dict[tuple[int, int], list[dict]] = {}
+        for seg in near:
+            by_group.setdefault((seg["bin"], round(seg["length"] / 500.0)), []).append(seg)
+        for items in by_group.values():
+            for best in _spaced_runs(items):
+                members = [seg for band in best for _off, seg in band]
+                xs = [value for seg in members for value in (seg["x0"], seg["x1"])]
+                ys = [value for seg in members for value in (seg["y0"], seg["y1"])]
+                x0, x1, y0, y1 = min(xs), max(xs), min(ys), max(ys)
+                if max(x1 - x0, y1 - y0) > 10000.0 or min(x1 - x0, y1 - y0) < 400.0:
+                    continue
+                if not (x0 - 5500.0 <= cx <= x1 + 5500.0 and y0 - 5500.0 <= cy <= y1 + 5500.0):
+                    continue
+                _paint_flight(members, x0, x1, y0, y1)
+
+        # 2) 짧은 계단: 같은 각도에서 간격 200–380 mm 인 연속 3–4줄을 모두 보고,
+        # 길이 차가 ≤1.1 m 이면 올린다. (한쪽만 착지까지 긴 디딤. 긴 run 안의 부분 구간 포함.)
         by_bin: dict[int, list[dict]] = {}
         for seg in near:
             by_bin.setdefault(seg["bin"], []).append(seg)
         for items in by_bin.values():
-            if len(items) < 5:
+            if len(items) < 3:
                 continue
-            origin = items[0]
-            placed: list[tuple[float, dict]] = []
-            for seg in items:
-                off = (seg["x0"] - origin["x0"]) * origin["nx"] + (seg["y0"] - origin["y0"]) * origin["ny"]
-                placed.append((off, seg))
-            placed.sort(key=lambda item: item[0])
-            bands: list[list[tuple[float, dict]]] = []
-            for off, seg in placed:
-                if bands and abs(off - bands[-1][0][0]) <= 50.0:
-                    bands[-1].append((off, seg))
-                else:
-                    bands.append([(off, seg)])
-            run: list[list[tuple[float, dict]]] = []
-            best: list[list[tuple[float, dict]]] = []
-            for index, band in enumerate(bands):
-                if index == 0:
-                    run = [band]
-                    continue
-                step = band[0][0] - bands[index - 1][0][0]
-                if 200.0 <= step <= 380.0:
-                    run.append(band)
-                else:
-                    if len(run) > len(best):
-                        best = run
-                    run = [band]
-            if len(run) > len(best):
-                best = run
-            if len(best) < 5:
-                continue
-            members = [seg for band in best for _off, seg in band]
-            xs = [value for seg in members for value in (seg["x0"], seg["x1"])]
-            ys = [value for seg in members for value in (seg["y0"], seg["y1"])]
-            x0, x1, y0, y1 = min(xs), max(xs), min(ys), max(ys)
-            if max(x1 - x0, y1 - y0) > 10000.0 or min(x1 - x0, y1 - y0) < 800.0:
-                continue
-            # 착지 글자는 비행 끝에서 3m 가까이 떨어져 있다.
-            if not (x0 - 5500.0 <= cx <= x1 + 5500.0 and y0 - 5500.0 <= cy <= y1 + 5500.0):
-                continue
-            for seg in members:
-                if seg["layer"] != BASE_LAYER or id(seg["entity"]) in painted:
-                    continue
-                if _paint_layer(seg["entity"], WALL_LAYER, WALL_COLOR):
-                    painted.add(id(seg["entity"]))
-                    seg["layer"] = WALL_LAYER
-                    n += 1
-            pad = 400.0
-            for seg in segs:
-                if seg["layer"] != BASE_LAYER or id(seg["entity"]) in painted or seg["length"] < 600.0:
-                    continue
-                mx = (seg["x0"] + seg["x1"]) * 0.5
-                my = (seg["y0"] + seg["y1"]) * 0.5
-                horizontal = abs(seg["uy"]) < 0.2
-                vertical = abs(seg["ux"]) < 0.2
-                on_edge = False
-                if horizontal and x0 - pad <= mx <= x1 + pad:
-                    if abs(my - y0) <= 280.0 or abs(my - y1) <= 280.0:
-                        on_edge = True
-                if vertical and y0 - pad <= my <= y1 + pad:
-                    if abs(mx - x0) <= 280.0 or abs(mx - x1) <= 280.0:
-                        on_edge = True
-                if not on_edge or seg["length"] > max(x1 - x0, y1 - y0) + 1800.0:
-                    continue
-                if _paint_layer(seg["entity"], WALL_LAYER, WALL_COLOR):
-                    painted.add(id(seg["entity"]))
-                    seg["layer"] = WALL_LAYER
-                    n += 1
-            # 비행을 가로지르거나 바로 바깥을 두르는 착지·옆선. 대각 절단선과 긴 복도선은 뺀다.
-            margin = 900.0
-            span = max(x1 - x0, y1 - y0)
-            for seg in segs:
-                if seg["layer"] != BASE_LAYER or id(seg["entity"]) in painted:
-                    continue
-                if not (700.0 <= seg["length"] <= min(8000.0, span + 2000.0)):
-                    continue
-                if abs(seg["ux"]) > 0.25 and abs(seg["uy"]) > 0.25:
-                    continue
-                if (
-                    min(seg["x0"], seg["x1"]) < x0 - margin
-                    or max(seg["x0"], seg["x1"]) > x1 + margin
-                    or min(seg["y0"], seg["y1"]) < y0 - margin
-                    or max(seg["y0"], seg["y1"]) > y1 + margin
-                ):
-                    continue
-                horizontal = abs(seg["uy"]) < 0.25
-                if horizontal:
-                    overlap = min(max(seg["x0"], seg["x1"]), x1) - max(min(seg["x0"], seg["x1"]), x0)
-                    cover = x1 - x0
-                else:
-                    overlap = min(max(seg["y0"], seg["y1"]), y1) - max(min(seg["y0"], seg["y1"]), y0)
-                    cover = y1 - y0
-                if overlap < min(seg["length"], cover) * 0.55:
-                    continue
-                if _paint_layer(seg["entity"], WALL_LAYER, WALL_COLOR):
-                    painted.add(id(seg["entity"]))
-                    seg["layer"] = WALL_LAYER
-                    n += 1
+            # 이중 디딤이 끼어도 200–380 mm 디딤 간격으로 3–4칸을 잡는다.
+            tread_runs = _spaced_runs(items)
+            for tread_run in tread_runs:
+                # band → 디딤 칸(이중선은 한 칸)으로 묶은 뒤 3–4칸 창을 민다.
+                tread_groups: list[list[list[tuple[float, dict]]]] = []
+                for band in tread_run:
+                    if (
+                        tread_groups
+                        and band[0][0] - tread_groups[-1][0][0][0] < 200.0
+                    ):
+                        tread_groups[-1].append(band)
+                    else:
+                        tread_groups.append([band])
+                for start in range(len(tread_groups)):
+                    for width in (3, 4):
+                        end = start + width
+                        if end > len(tread_groups):
+                            break
+                        sub_bands = [
+                            band
+                            for group in tread_groups[start:end]
+                            for band in group
+                        ]
+                        seed_len = sub_bands[0][0][1]["length"]
+                        members: list[dict] = []
+                        for band in sub_bands:
+                            picked = [
+                                seg
+                                for _off, seg in band
+                                if abs(seg["length"] - seed_len) <= 1100.0
+                            ]
+                            if not picked:
+                                members = []
+                                break
+                            members.extend(picked)
+                        if len(members) < width:
+                            continue
+                        lengths = [seg["length"] for seg in members]
+                        if max(lengths) - min(lengths) > 1100.0:
+                            continue
+                        xs = [value for seg in members for value in (seg["x0"], seg["x1"])]
+                        ys = [value for seg in members for value in (seg["y0"], seg["y1"])]
+                        x0, x1, y0, y1 = min(xs), max(xs), min(ys), max(ys)
+                        if max(x1 - x0, y1 - y0) > 10000.0 or min(x1 - x0, y1 - y0) < 400.0:
+                            continue
+                        if not (
+                            x0 - 5500.0 <= cx <= x1 + 5500.0
+                            and y0 - 5500.0 <= cy <= y1 + 5500.0
+                        ):
+                            continue
+                        _paint_flight(members, x0, x1, y0, y1)
     return n
 
 
@@ -27659,7 +28700,8 @@ def mark_doors_and_columns(msp) -> dict[str, Any]:
         if parsed is None:
             continue
         ori, coord, along0, along1, length = parsed
-        if not (450.0 <= length <= 1500.0):
+        # 1500 mm 기둥이 부동소수점으로 1500.0000007 이 되어 빠지지 않게 여유를 둔다.
+        if not (450.0 <= length <= 1550.0):
             continue
         if ori == "H":
             horizontal.append((coord, along0, along1, entity))
@@ -27673,7 +28715,7 @@ def mark_doors_and_columns(msp) -> dict[str, Any]:
             height = y1 - y0
             if height < 450.0:
                 continue
-            if height > 1500.0:
+            if height > 1550.0:
                 break
             if abs(x0 - x2) > 25.0 or abs(x1 - x3) > 25.0:
                 continue
@@ -27701,7 +28743,36 @@ def mark_doors_and_columns(msp) -> dict[str, Any]:
                 on_edge = abs(coord - x0) <= 20.0 or abs(coord - x1) <= 20.0
                 if on_edge and along0 >= y0 - 30.0 and along1 <= y1 + 30.0:
                     _mark_column(entity)
+            _mark_concentric_inner_column_lines(horizontal, vertical, x0, y0, x1, y1)
             columns.append({"bbox_mm": _bbox([x0, x1], [y0, y1])})
+    # 동심 원/호 둥근 기둥 (바깥 네모가 이미 사각 기둥으로 잡힌 경우에도 원은 COLUMN)
+    seen_round: list[tuple[float, float]] = []
+    for rcx, rcy, _ri, r_out, rents in find_round_column_rings(msp):
+        if any(math.hypot(rcx - sx, rcy - sy) < 80.0 for sx, sy in seen_round):
+            continue
+        seen_round.append((rcx, rcy))
+        for ent in rents:
+            _mark_column(ent)
+        already = any(
+            abs(rcx - (c["bbox_mm"][0] + c["bbox_mm"][2]) * 0.5) < 80.0
+            and abs(rcy - (c["bbox_mm"][1] + c["bbox_mm"][3]) * 0.5) < 80.0
+            for c in columns
+        )
+        if already:
+            continue
+        columns.append(
+            {
+                "bbox_mm": _bbox(
+                    [rcx - r_out, rcx + r_out], [rcy - r_out, rcy + r_out]
+                )
+            }
+        )
+    # 구조 기둥은 서로 떨어져 있다. 맞닿거나 수 m 안인 사각·원은 COLUMN 에서 뺀다.
+    columns, dropped = _filter_columns_by_separation(columns)
+    for box in dropped:
+        _unmark_column_bbox_to_wall(msp, box)
+    # H-Beam 등으로 COLUMN에만 남고 목록에 없는 잔여 선을 정리한다.
+    _reconcile_column_layer(msp, columns)
     return {
         "n_door": len(doors),
         "n_window": len(windows),
@@ -27876,7 +28947,7 @@ def render_wall_dxf_png(
     wipeouts: list = []
     extra_segs: list[tuple[list[tuple[float, float]], str, object]] = []
     arcs: list[tuple[float, float, float, float, float, str]] = []
-    circles: list[tuple[float, float, float]] = []
+    circles: list[tuple[float, float, float, str]] = []
     xs: list[float] = []
     ys: list[float] = []
 
@@ -27908,7 +28979,7 @@ def render_wall_dxf_png(
                 continue
             elif t == "CIRCLE":
                 c = e.dxf.center
-                circles.append((float(c.x), float(c.y), _ar(e)))
+                circles.append((float(c.x), float(c.y), _ar(e), layer))
                 continue
             elif t == "TEXT":
                 texts.append(
@@ -28032,10 +29103,12 @@ def render_wall_dxf_png(
         ax.add_collection(
             LineCollection(door_segs, colors="#7cba25", linewidths=1.0, antialiased=True)
         )
-    # 문 스윙은 연두, WALL 호(곡선 모서리)는 빨강, 그 밖은 회색.
+    # 문 스윙은 연두, WALL 호는 빨강, COLUMN 원/호는 파랑, 그 밖은 회색.
     for cx, cy, radius, a0, a1, layer in arcs:
         if layer == DOOR_LAYER:
             color, lw = "#7cba25", 0.8
+        elif layer == COLUMN_LAYER:
+            color, lw = "#2980b9", 1.3
         elif layer == WALL_LAYER:
             color, lw = "#e74c3c", 1.1
         else:
@@ -28052,14 +29125,20 @@ def render_wall_dxf_png(
                 linewidth=lw,
             )
         )
-    for cx, cy, radius in circles:
+    for cx, cy, radius, layer in circles:
+        if layer == COLUMN_LAYER:
+            color, lw = "#2980b9", 1.3
+        elif layer == WALL_LAYER:
+            color, lw = "#e74c3c", 1.1
+        else:
+            color, lw = "#555555", 0.45
         ax.add_patch(
             Circle(
                 (cx, cy),
                 radius,
                 fill=False,
-                edgecolor="#555555",
-                linewidth=0.45,
+                edgecolor=color,
+                linewidth=lw,
             )
         )
 

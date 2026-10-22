@@ -77,6 +77,10 @@ class ExcludedAreaLabelTests(unittest.TestCase):
             "머신",
             "커피",
             "커피머신",
+            "MACHINE",
+            "WARMER",
+            "AUTOMATIC COFFEE MACHINE",
+            "CUP WARMER",
             "전자랜지",
             "전자레인지",
             "템블러",
@@ -103,6 +107,10 @@ class ExcludedAreaLabelTests(unittest.TestCase):
         self.assertTrue(evaluate_room.is_room_label("개방형도서관"))
         self.assertTrue(evaluate_room.is_room_label("락커룸"))
         self.assertFalse(evaluate_room.is_excluded_area_label("교실"))
+        self.assertTrue(evaluate_room.is_room_label("COFFEE SHOP"))
+        self.assertTrue(evaluate_room.is_room_label("MEETING ROOM"))
+        self.assertFalse(evaluate_room.is_room_label("C107"))
+        self.assertFalse(evaluate_room.is_room_label("UP"))
 
     def test_callout_words_are_not_area_labels(self):
         for text in (
@@ -379,6 +387,18 @@ class ExcludedAreaLabelTests(unittest.TestCase):
             "dw3",
             "투석액",
             "투석액실",
+            "불가",
+            "출입불가",
+            "엑스박스",
+            "C-AR",
+            "c-ar",
+            "승용",
+            "승용엘리베이터",
+            "장애인",
+            "오피스텔",
+            "오피스텔-1",
+            "사용중",
+            "사용중-1",
         ):
             self.assertTrue(evaluate_room.is_excluded_area_label(text), text)
             self.assertFalse(evaluate_room.is_room_label(text), text)

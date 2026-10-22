@@ -70,9 +70,69 @@ class UpDownStairTests(unittest.TestCase):
         self.assertTrue(all(line.dxf.layer == "WALL" for line in treads))
         self.assertEqual(edge.dxf.layer, "WALL")
         self.assertEqual(far.dxf.layer, "BASE")
-        # UP+DN 전용 경로: UP만이면 디딤을 WALL로 올리지 않는다.
+        # DN이 있을 때만 디딤을 올린다. UP만이면 디딤은 남긴다.
         self.assertEqual(up_promoted, 0)
         self.assertTrue(all(line.dxf.layer == "BASE" for line in up_treads))
+
+    def test_dn_only_horizontal_flight_promotes_vertical_treads(self):
+        """가로 비행(세로 디딤)+DN만 있어도 디딤을 올린다. 길이 다른 세로 벽과 섞여도 된다."""
+        doc = ezdxf.new()
+        msp = doc.modelspace()
+        msp.add_text("DN", dxfattribs={"insert": (2500, 800), "height": 200, "layer": "BASE"})
+        treads = [_v(msp, x, 0, 1600) for x in range(0, 270 * 9, 270)]
+        # 같은 각도 bin·근처의 길이 다른 세로 벽 — 길이 묶음 없으면 디딤 간격이 끊긴다.
+        for x in (450, 990, 1530):
+            _v(msp, x, -200, 700)
+        edge = _h(msp, 0, 2400, -100)
+        far = _v(msp, 20000, 0, 1100)
+
+        segs = lib_llm_correct._core_segments(msp)
+        promoted = lib_llm_correct._promote_stair_runs(msp, segs)
+
+        self.assertGreaterEqual(promoted, len(treads))
+        self.assertTrue(all(line.dxf.layer == "WALL" for line in treads))
+        self.assertEqual(edge.dxf.layer, "WALL")
+        self.assertEqual(far.dxf.layer, "BASE")
+
+    def test_dn_horizontal_flight_with_interleaved_double_treads(self):
+        """가로 비행에 이중 디딤(40 mm)이 끼어도 280 mm 간격 전체를 올린다."""
+        doc = ezdxf.new()
+        msp = doc.modelspace()
+        msp.add_text("UP", dxfattribs={"insert": (2000, 2000), "height": 200, "layer": "BASE"})
+        msp.add_text("DN", dxfattribs={"insert": (2200, 2400), "height": 200, "layer": "BASE"})
+        # 본 디딤 L=1170 + 이중선 L=1250 이 40 mm 간격으로 교차
+        treads = []
+        for i in range(8):
+            x = i * 280
+            treads.append(_v(msp, x, 0, 1170))
+            treads.append(_v(msp, x + 40, -40, 1210))  # L=1250
+        edge = _h(msp, 0, 2000, -100)
+
+        segs = lib_llm_correct._core_segments(msp)
+        promoted = lib_llm_correct._promote_stair_runs(msp, segs)
+
+        self.assertGreaterEqual(promoted, len(treads))
+        self.assertTrue(all(line.dxf.layer == "WALL" for line in treads))
+        self.assertEqual(edge.dxf.layer, "WALL")
+
+    def test_short_dn_flight_with_one_longer_tread(self):
+        """짧은 가로 계단(디딤 3줄). 한쪽만 착지까지 길어도 올린다."""
+        doc = ezdxf.new()
+        msp = doc.modelspace()
+        msp.add_text("DN", dxfattribs={"insert": (900, 800), "height": 200, "layer": "BASE"})
+        treads = [
+            _v(msp, 0, 0, 1600),
+            _v(msp, 270, 0, 1600),
+            _v(msp, 540, -950, 1600),  # 2550 mm — 착지까지 연장
+        ]
+        top = _h(msp, 0, 600, 1600)
+
+        segs = lib_llm_correct._core_segments(msp)
+        promoted = lib_llm_correct._promote_stair_runs(msp, segs)
+
+        self.assertGreaterEqual(promoted, len(treads))
+        self.assertTrue(all(line.dxf.layer == "WALL" for line in treads))
+        self.assertEqual(top.dxf.layer, "WALL")
 
     def test_up_only_with_treads_promotes_end_doubles(self):
         """UP만 있어도 디딤이 있으면 양끝 이중면은 벽이다. 디딤은 남긴다."""

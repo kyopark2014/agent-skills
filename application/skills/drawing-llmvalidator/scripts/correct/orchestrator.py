@@ -33,6 +33,7 @@ from correct._rules import (
     demote_bay_panel_sills, demote_bed_ward_interiors, demote_closed_furniture_boxes,
     demote_elevator_door_back_faces, demote_fitness_equipment, demote_hospital_beds,
     demote_in_bboxes, demote_landscape_walls, demote_meeting_room_interiors,
+    demote_seat_cushion_line_boxes,
     demote_open_hall_center_walls, demote_parallel_grid_axis_walls,
     demote_pictogram_columns, demote_serving_counter_walls,
     demote_swing_hinge_door_leaves, demote_thin_swing_leaf_lines, door_side_wall_ids,
@@ -46,6 +47,8 @@ from correct._rules import (
     promote_bathroom_label_walls, promote_bay_window_outlines,
     promote_bottom_column_run, promote_butt_partitions, promote_capped_triple_walls,
     promote_capped_windows, promote_closed_square_columns,
+    promote_concentric_double_square_columns, promote_round_columns,
+    find_round_column_rings,
     promote_collinear_room_walls, promote_collinear_swing_sides,
     promote_collinear_wall_continuations, promote_column_adjacent_wall_pairs,
     promote_control_booth_bottom, promote_corner_wall_squares,
@@ -82,7 +85,8 @@ from correct._rules import (
     promote_wall_square_columns, promote_wash_room_edges, promote_x_cover_squares,
     promote_zigzag_door_sides, protect_corridor_wall_entities,
     protect_elevator_enclosure_entities, protect_stair_enclosure_entities,
-    remove_swing_squares, review_demote_keep_ids, separate_arrow_sliding_doors,
+    remove_swing_squares, review_demote_keep_ids, review_demote_ids,
+    separate_arrow_sliding_doors,
     separate_diagonal_observation_windows, separate_diagonal_pocket_face_doors,
     separate_diagonal_swing_doors, separate_locker_entrance_doors,
     separate_partial_arc_radial_swing_doors,
@@ -162,6 +166,9 @@ def apply_corrections(
     if do_box_demote:
         furn_ids = demote_fitness_equipment(msp, segs, exclude_ids=hbeam_ids)
         furn_ids |= demote_meeting_room_interiors(msp, segs, exclude_ids=hbeam_ids)
+        furn_ids |= demote_seat_cushion_line_boxes(
+            msp, exclude_ids=hbeam_ids, layers=(WALL_LAYER, BASE_LAYER)
+        )
         furn_ids |= demote_bed_ward_interiors(msp, segs, exclude_ids=hbeam_ids)
         furn_ids |= demote_hospital_beds(msp, exclude_ids=hbeam_ids)
         furn_ids |= demote_landscape_walls(msp, segs, exclude_ids=hbeam_ids)
@@ -199,6 +206,7 @@ def apply_corrections(
         furniture_box_demote = demote_closed_furniture_boxes(msp, exclude_ids=hbeam_ids)
         fitness_demote = demote_fitness_equipment(msp, segs, exclude_ids=hbeam_ids)
         fitness_demote |= demote_meeting_room_interiors(msp, segs, exclude_ids=hbeam_ids)
+        fitness_demote |= demote_seat_cushion_line_boxes(msp, exclude_ids=hbeam_ids)
         fitness_demote |= demote_bed_ward_interiors(msp, segs, exclude_ids=hbeam_ids)
         fitness_demote |= demote_hospital_beds(msp, exclude_ids=hbeam_ids)
         fitness_demote |= demote_serving_counter_walls(msp, segs, exclude_ids=hbeam_ids)
@@ -209,13 +217,10 @@ def apply_corrections(
     # review demote 는 protect 차감 대상이 아니다.
     # 과대 bbox 는 normalize_bbox_list 에서 이미 skip 되므로,
     # 남은 박스는 Vision 명시 판정 → 복도·계단·엘리베이터·H-Beam protect 보다 우선.
-    # 다만 문 양옆·창문·기둥(및 기둥 맞닿은 면)은 항상 남긴다.
+    # 가구·침대 demote는 창문 keep에 막히지 않고, 그 외는 문 양옆·창문·기둥을 남긴다.
     review_boxes = review.get("demote_bboxes") or []
-    review_demote = demote_in_bboxes(msp, review_boxes)
+    review_demote = review_demote_ids(msp, review_boxes, column_ids=hbeam_ids)
     door_sides = door_side_wall_ids(msp, review_boxes)
-    review_demote -= review_demote_keep_ids(
-        msp, review_boxes, column_ids=hbeam_ids
-    )
     n_door_side = 0
     for entity in _entities(msp):
         if id(entity) in door_sides and _paint_layer(entity, WALL_LAYER, WALL_COLOR):
@@ -317,6 +322,7 @@ def apply_corrections(
         post_furn = demote_closed_furniture_boxes(msp, exclude_ids=hbeam_ids)
         post_furn |= demote_fitness_equipment(msp, segs_after, exclude_ids=hbeam_ids)
         post_furn |= demote_meeting_room_interiors(msp, segs_after, exclude_ids=hbeam_ids)
+        post_furn |= demote_seat_cushion_line_boxes(msp, exclude_ids=hbeam_ids)
         post_furn |= demote_bed_ward_interiors(msp, segs_after, exclude_ids=hbeam_ids)
         post_furn |= demote_hospital_beds(msp, exclude_ids=hbeam_ids)
         post_furn |= demote_serving_counter_walls(msp, segs_after, exclude_ids=hbeam_ids)
@@ -375,6 +381,10 @@ def apply_corrections(
     n_wall_square_promoted = promote_wall_square_columns(msp)
     # 선 네 개가 아니라 닫힌 폴리라인만 있는 빈 정사각(클럽하우스 주방 모서리).
     n_wall_square_promoted += promote_closed_square_columns(msp)
+    # 바깥·안쪽 동심 사각(평행 이중선) 기둥. 내부 선 때문에 벽면 정사각 규칙이 건너뛴다.
+    n_wall_square_promoted += promote_concentric_double_square_columns(msp)
+    # 동심 원/호(평행 이중 원) 둥근 기둥.
+    n_wall_square_promoted += promote_round_columns(msp)
     n_promoted += n_wall_square_promoted
     # 조정실 아래 문짝이 문 옆 승격에 같이 올라온 것을 되돌린다.
     n_ctrl_demote, n_ctrl_promote = correct_control_room_bottom_door(msp)
@@ -492,8 +502,12 @@ def apply_corrections(
         if box is None:
             continue
         square_boxes.append(box)
+    round_boxes = [
+        (cx - r_out, cy - r_out, cx + r_out, cy + r_out)
+        for cx, cy, _ri, r_out, _ents in find_round_column_rings(msp)
+    ]
     n_promoted += promote_column_adjacent_wall_pairs(
-        msp, h_boxes + square_boxes + line_h_boxes
+        msp, h_boxes + square_boxes + line_h_boxes + round_boxes
     )
     n_leaf_side_demote, n_leaf_side_promote = correct_door_leaves_and_flanks(msp)
     n_demoted += n_leaf_side_demote
@@ -590,7 +604,8 @@ def apply_corrections(
     # 문 가상 닫힘으로 생긴 사각 슬리브(문옆 기둥)도 H/슬리브 규칙으로 올린다.
     if do_column_promote:
         n_column_promoted += promote_hbeam_columns(msp)
-    marked = mark_doors_and_columns(msp)
+    # 문·기둥 레이어 분리는 모든 promote 이후에 한다. 중간에 나누면
+    # 후반 promote/H-Beam 잔여가 COLUMN에 남아 밀집 기둥처럼 보인다.
     n_promoted += promote_door_opening_flanks(msp)
     n_promoted += promote_wall_between_adjacent_doors(msp)
     n_promoted += promote_door_side_doubles(msp)
@@ -618,11 +633,28 @@ def apply_corrections(
     # 앞선 문 처리가 가로·세로가 아닌 양개문은 닫지 않는다. 마지막에 힌지 사이를 잇는다.
     n_promoted += add_paired_swing_walls(msp)
 
-    # 후반 promote_* 가 다시 올린 병원 침대 잔여 WALL도 제거한다.
+    # 후반 promote_* 가 다시 올린 병원 침대·의자/방석·접객실 잔여 WALL도 제거한다.
     if do_box_demote:
         final_beds = demote_hospital_beds(msp, exclude_ids=hbeam_ids)
+        segs_final_furn = iter_axis_segs(msp, min_len_mm=70.0)
+        final_furn = demote_seat_cushion_line_boxes(msp, exclude_ids=hbeam_ids)
+        final_furn |= demote_meeting_room_interiors(
+            msp, segs_final_furn, exclude_ids=hbeam_ids
+        )
+        final_furn |= final_beds
         for e in _entities(msp):
-            if e.dxf.layer == WALL_LAYER and id(e) in final_beds:
+            if e.dxf.layer == WALL_LAYER and id(e) in final_furn:
+                msp.delete_entity(e)
+                n_demoted += 1
+
+    # 후반 promote_* 가 다시 올린 Vision demote(가구 등)도 제거한다.
+    final_review_boxes = review.get("demote_bboxes") or []
+    if final_review_boxes:
+        final_review = review_demote_ids(
+            msp, final_review_boxes, column_ids=hbeam_ids
+        )
+        for e in _entities(msp):
+            if e.dxf.layer == WALL_LAYER and id(e) in final_review:
                 msp.delete_entity(e)
                 n_demoted += 1
 
@@ -636,6 +668,8 @@ def apply_corrections(
 
     # 후반 demote 가 스윙문 가상 닫힘·이중벽 바깥면을 지울 수 있어 마지막에 다시 잇는다.
     n_promoted += add_closed_door_wall_lines(msp)
+
+    marked = mark_doors_and_columns(msp)
 
     n_wall = sum(1 for e in _entities(msp) if e.dxf.layer == WALL_LAYER)
     n_base = sum(1 for e in _entities(msp) if e.dxf.layer == BASE_LAYER)

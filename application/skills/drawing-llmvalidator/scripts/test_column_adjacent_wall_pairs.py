@@ -91,6 +91,48 @@ class ColumnAdjacentWallPairsTests(unittest.TestCase):
         self.assertEqual(furn.dxf.layer, "BASE")
         self.assertEqual(n, 0)
 
+    def test_promotes_double_between_round_columns(self):
+        """원형 기둥 사이를 잇는 이중 세로면도 WALL로 올린다."""
+        doc = ezdxf.new()
+        msp = doc.modelspace()
+        # 위·아래 원형 기둥 — 인식용 이중 WALL은 가로로만 붙여 세로면과 겹치지 않게 한다.
+        for cy in (0.0, 2000.0):
+            msp.add_circle((0.0, cy), 225.0, dxfattribs={"layer": "BASE", "color": 8})
+            msp.add_circle((0.0, cy), 325.0, dxfattribs={"layer": "BASE", "color": 8})
+            msp.add_line(
+                (325.0, cy - 100.0),
+                (4000.0, cy - 100.0),
+                dxfattribs={"layer": "WALL", "color": 1},
+            )
+            msp.add_line(
+                (325.0, cy + 100.0),
+                (4000.0, cy + 100.0),
+                dxfattribs={"layer": "WALL", "color": 1},
+            )
+        # 기둥 사이를 잇는 이중 세로면 (방풍실 우측)
+        a = msp.add_line(
+            (-75.0, 325.0),
+            (-75.0, 1675.0),
+            dxfattribs={"layer": "BASE", "color": 8},
+        )
+        b = msp.add_line(
+            (75.0, 325.0),
+            (75.0, 1675.0),
+            dxfattribs={"layer": "BASE", "color": 8},
+        )
+        lib_llm_correct.promote_round_columns(msp)
+        round_boxes = [
+            (cx - r_out, cy - r_out, cx + r_out, cy + r_out)
+            for cx, cy, _ri, r_out, _ents in lib_llm_correct.find_round_column_rings(
+                msp
+            )
+        ]
+        self.assertGreaterEqual(len(round_boxes), 2)
+        n = lib_llm_correct.promote_column_adjacent_wall_pairs(msp, round_boxes)
+        self.assertGreaterEqual(n, 2)
+        self.assertEqual(a.dxf.layer, "WALL")
+        self.assertEqual(b.dxf.layer, "WALL")
+
 
 if __name__ == "__main__":
     unittest.main()

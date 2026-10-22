@@ -875,6 +875,69 @@ def column_grid_entity_idxs(entities: list[DXFEntity]) -> set[int]:
     return found
 
 
+def drop_seat_cushion_wall_keys(
+    segs: list[Seg],
+    wall_keys: set[tuple[int, int]],
+) -> set[tuple[int, int]]:
+    """식탁 옆 의자·방석 격자(짧은 변·두꺼운 간격)를 벽 키에서 뺀다.
+
+    길이 300–450 mm 평행선이 간격 350–550 mm 로 세 쌍 이상 같은 띠에
+    반복되면 가구로 본다. 샘플 LLM이 의자 이중선을 벽으로 적은 경우를 막는다.
+    """
+    by_key = {s.key: s for s in segs if s.key in wall_keys}
+    drop: set[tuple[int, int]] = set()
+
+    def _collect(is_h: bool) -> None:
+        items = [
+            s
+            for s in by_key.values()
+            if s.is_h == is_h and 300.0 <= s.length <= 450.0
+        ]
+        if len(items) < 6:
+            return
+        # 띠(직교 좌표)별로 묶고, 그 안에서 350–550 mm 간격 짝을 센다.
+        bands: dict[int, list[Seg]] = {}
+        for s in items:
+            if is_h:
+                mid = (s.x0 + s.x1) * 0.5
+            else:
+                mid = (s.y0 + s.y1) * 0.5
+            bands.setdefault(int(round(mid / 200.0)), []).append(s)
+        for group in bands.values():
+            if len(group) < 6:
+                continue
+            group = sorted(
+                group,
+                key=lambda s: (s.y0 + s.y1) * 0.5 if is_h else (s.x0 + s.x1) * 0.5,
+            )
+            pair_keys: list[tuple[Seg, Seg]] = []
+            for i, a in enumerate(group):
+                ao = (a.y0 + a.y1) * 0.5 if is_h else (a.x0 + a.x1) * 0.5
+                for b in group[i + 1 :]:
+                    bo = (b.y0 + b.y1) * 0.5 if is_h else (b.x0 + b.x1) * 0.5
+                    gap = abs(bo - ao)
+                    if not (350.0 <= gap <= 550.0):
+                        continue
+                    if is_h:
+                        ov = _overlap_1d(a.x0, a.x1, b.x0, b.x1)
+                    else:
+                        ov = _overlap_1d(a.y0, a.y1, b.y0, b.y1)
+                    if ov < min(a.length, b.length) * 0.65:
+                        continue
+                    if abs(a.length - b.length) > 80.0:
+                        continue
+                    pair_keys.append((a, b))
+            if len(pair_keys) < 3:
+                continue
+            for a, b in pair_keys:
+                drop.add(a.key)
+                drop.add(b.key)
+
+    _collect(True)
+    _collect(False)
+    return drop
+
+
 def detect_wall_keys(
     segs: list[Seg],
     *,
@@ -910,6 +973,7 @@ def detect_wall_keys(
             wall_pack_gap_mm=wall_pack_gap_mm,
         )
         wall |= _detect_wall_keys_one(segs, tuned, doors, slots, skipped)
+    wall -= drop_seat_cushion_wall_keys(segs, wall)
     return wall
 
 

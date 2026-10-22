@@ -9,6 +9,7 @@ from __future__ import annotations
 from correct._rules import (  # noqa: F401
     demote_closed_furniture_boxes,
     demote_meeting_room_interiors,
+    demote_seat_cushion_line_boxes,
     demote_bed_ward_interiors,
     demote_hospital_beds,
     demote_kitchen_equipment,

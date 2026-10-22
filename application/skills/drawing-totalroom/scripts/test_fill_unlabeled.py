@@ -588,6 +588,79 @@ class FillUnlabeledTest(unittest.TestCase):
         ]
         self.assertEqual(len(open_hit), 0)
 
+    def test_corridor_door_gaps_get_unlabeled_when_bridged(self):
+        """복도 벽 문 틈(≤2.4 m)이 열려 있어도 door=close fill 이면 무명으로 잡는다."""
+        doc = ezdxf.new()
+        msp = doc.modelspace()
+        wall = {"layer": "WALL"}
+        # 위·아래 실 + 가운데 복도. 복도 남북 벽에 900 mm 문 틈.
+        # outer 12 m × 10 m, corridor band y=4000–6000.
+        outer = [
+            (0.0, 0.0),
+            (12000.0, 0.0),
+            (12000.0, 10000.0),
+            (0.0, 10000.0),
+        ]
+        _wall_room(msp, outer)
+        # 위실 바닥(복도 천장): 문 틈 4500–5400
+        msp.add_line((0.0, 6000.0), (4500.0, 6000.0), dxfattribs=wall)
+        msp.add_line((5400.0, 6000.0), (12000.0, 6000.0), dxfattribs=wall)
+        # 아래실 천장(복도 바닥): 문 틈 4500–5400
+        msp.add_line((0.0, 4000.0), (4500.0, 4000.0), dxfattribs=wall)
+        msp.add_line((5400.0, 4000.0), (12000.0, 4000.0), dxfattribs=wall)
+        msp.add_text("사무실", dxfattribs={"layer": "0", "height": 300}).set_placement(
+            (6000.0, 8000.0)
+        )
+        msp.add_text("회의실", dxfattribs={"layer": "0", "height": 300}).set_placement(
+            (6000.0, 2000.0)
+        )
+
+        boxes = labels.room.column_boxes(msp)
+        segs = labels.room.wall_segments(msp, boxes)
+        bbox = {"xmin": -500.0, "ymin": -500.0, "xmax": 12500.0, "ymax": 10500.0}
+
+        detected = []
+        for x, y, text in ((6000.0, 8000.0, "사무실"), (6000.0, 2000.0, "회의실")):
+            found, reason, sx, sy = labels.detect_one_with_nudge(
+                msp, boxes, segs, x, y, door="close"
+            )
+            self.assertIsNone(reason)
+            assert found is not None
+            found.update(
+                {
+                    "text": text,
+                    "x": sx,
+                    "y": sy,
+                    "name": labels.room.norm_name(text),
+                }
+            )
+            detected.append(found)
+
+        # 문 틈을 안 이으면 복도가 실과 한 칸 → 실명과 겹쳐 무명이 안 생긴다.
+        no_bridge = labels.fill_unlabeled_rooms(
+            msp, boxes, segs, list(detected), [], "open", bbox, sample_mm=100.0
+        )[0]
+        corridor_open = [
+            inst
+            for inst in no_bridge
+            if inst.get("synthetic")
+            and labels.room.point_in_poly(6000.0, 5000.0, inst["pts"])
+        ]
+        self.assertEqual(len(corridor_open), 0)
+
+        # door=close 브리지면 복도만 남아 무명.
+        with_bridge = labels.fill_unlabeled_rooms(
+            msp, boxes, segs, list(detected), [], "close", bbox, sample_mm=100.0
+        )[0]
+        corridor = [
+            inst
+            for inst in with_bridge
+            if inst.get("synthetic")
+            and labels.room.point_in_poly(6000.0, 5000.0, inst["pts"])
+        ]
+        self.assertEqual(len(corridor), 1)
+        self.assertTrue(corridor[0]["text"].startswith("무명_"))
+
 
 if __name__ == "__main__":
     unittest.main()
