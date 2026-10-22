@@ -20190,6 +20190,179 @@ def promote_bay_window_outlines(msp) -> int:
     return changed
 
 
+def promote_orthogonal_bay_windows(msp) -> int:
+    """직교 돌출창(베이) 윤곽을 WALL로 올린다.
+
+    같은 벽면 WINDOW 사이 갭(1.5–8 m) 양끝에, 벽면에서 400–900 mm 나간
+    return 과 그 바깥면이 있으면 베이다. return·바깥면 BASE 만 올린다.
+    45° 볼살 베이는 ``promote_bay_window_outlines`` 가 담당한다.
+    """
+    segs: list[tuple[object, str, float, float, float, float, str]] = []
+    for entity in _entities(msp):
+        axis = _axis_line(entity)
+        if axis is None:
+            continue
+        layer = getattr(entity.dxf, "layer", None)
+        if layer not in (WALL_LAYER, BASE_LAYER, DOOR_LAYER, WINDOW_LAYER):
+            continue
+        ori, coord, a0, a1, length = axis
+        segs.append((entity, ori, coord, a0, a1, length, layer))
+
+    def _overlap(a0: float, a1: float, b0: float, b1: float) -> float:
+        return max(0.0, min(a1, b1) - max(a0, b0))
+
+    def _window_gaps(face_ori: str) -> list[tuple[float, float, float]]:
+        """(wall_coord, gap0, gap1) — 같은 벽면 WINDOW 사이 빈 구간."""
+        by_wall: dict[float, list[tuple[float, float]]] = {}
+        for _ent, ori, coord, a0, a1, length, layer in segs:
+            if ori != face_ori or layer != WINDOW_LAYER or length < 400.0:
+                continue
+            key = round(coord / 20.0) * 20.0
+            by_wall.setdefault(key, []).append((a0, a1))
+        gaps: list[tuple[float, float, float]] = []
+        for wall_coord, spans in by_wall.items():
+            spans.sort()
+            merged: list[list[float]] = []
+            for a0, a1 in spans:
+                if not merged or a0 > merged[-1][1] + 80.0:
+                    merged.append([a0, a1])
+                else:
+                    merged[-1][1] = max(merged[-1][1], a1)
+            for i in range(len(merged) - 1):
+                gap0, gap1 = merged[i][1], merged[i + 1][0]
+                if 1500.0 <= gap1 - gap0 <= 8000.0:
+                    gaps.append((wall_coord, gap0, gap1))
+        return gaps
+
+    def _returns_at(
+        return_ori: str, wall_at: float, tip: float
+    ) -> list[tuple[object, float, float, float, float]]:
+        """벽면 tip 에서 바깥으로 나가는 return 후보."""
+        found: list[tuple[object, float, float, float, float]] = []
+        for entity, ori, coord, a0, a1, length, layer in segs:
+            if ori != return_ori or layer != BASE_LAYER:
+                continue
+            if abs(coord - tip) > 180.0:
+                continue
+            if not (400.0 <= length <= 900.0):
+                continue
+            touches_wall = min(abs(a0 - wall_at), abs(a1 - wall_at)) <= 80.0
+            if not touches_wall:
+                continue
+            found.append((entity, coord, a0, a1, length))
+        return found
+
+    def _face_cover(face_ori: str, at: float, left: float, right: float) -> float:
+        cover = 0.0
+        for _ent, ori, coord, s0, s1, _length, layer in segs:
+            if ori != face_ori or layer not in (BASE_LAYER, WALL_LAYER, WINDOW_LAYER, DOOR_LAYER):
+                continue
+            if abs(coord - at) > 40.0:
+                continue
+            cover += _overlap(s0, s1, left, right)
+        return cover
+
+    bays: list[dict[str, float | str]] = []
+    seen: set[tuple] = set()
+    for face_ori, return_ori in (("H", "V"), ("V", "H")):
+        for wall_at, gap0, gap1 in _window_gaps(face_ori):
+            span = gap1 - gap0
+            left_returns = _returns_at(return_ori, wall_at, gap0)
+            right_returns = _returns_at(return_ori, wall_at, gap1)
+            if not left_returns or not right_returns:
+                continue
+            # 양끝 return 이 같은 깊이 쪽으로 나가는지 확인.
+            paired = False
+            depth0 = depth1 = outer_at = 0.0
+            for _le, _lc, l0, l1, l_len in left_returns:
+                for _re, _rc, r0, r1, r_len in right_returns:
+                    if max(l_len, r_len) / min(l_len, r_len) > 1.35:
+                        continue
+                    if abs(l0 - r0) > 80.0 or abs(l1 - r1) > 80.0:
+                        continue
+                    d0, d1 = min(l0, r0), max(l1, r1)
+                    if not (400.0 <= d1 - d0 <= 900.0):
+                        continue
+                    # wall_at 반대쪽이 바깥.
+                    if abs(d0 - wall_at) <= 80.0:
+                        candidate_outer = d1
+                    elif abs(d1 - wall_at) <= 80.0:
+                        candidate_outer = d0
+                    else:
+                        continue
+                    if _face_cover(face_ori, candidate_outer, gap0, gap1) < span * 0.35:
+                        continue
+                    depth0, depth1, outer_at = d0, d1, candidate_outer
+                    paired = True
+                    break
+                if paired:
+                    break
+            if not paired:
+                continue
+            # 입구에 이미 긴 경계가 있으면 베이가 아니다.
+            mouth = _face_cover(face_ori, wall_at, gap0 + 100.0, gap1 - 100.0)
+            if mouth >= span * 0.5:
+                continue
+            key = (face_ori, round(wall_at / 50.0), round(gap0 / 50.0), round(gap1 / 50.0))
+            if key in seen:
+                continue
+            seen.add(key)
+            bays.append({
+                "return_ori": return_ori,
+                "face_ori": face_ori,
+                "left": gap0,
+                "right": gap1,
+                "wall_at": wall_at,
+                "outer_at": outer_at,
+                "depth0": depth0,
+                "depth1": depth1,
+            })
+
+    if not bays:
+        return 0
+
+    painted: set[int] = set()
+    changed = 0
+    for bay in bays:
+        return_ori = str(bay["return_ori"])
+        face_ori = str(bay["face_ori"])
+        left = float(bay["left"])
+        right = float(bay["right"])
+        outer_at = float(bay["outer_at"])
+        depth0 = float(bay["depth0"])
+        depth1 = float(bay["depth1"])
+        depth = depth1 - depth0
+        for entity, ori, coord, a0, a1, length, layer in segs:
+            if id(entity) in painted or layer != BASE_LAYER:
+                continue
+            if ori == return_ori:
+                near_left = abs(coord - left) <= 180.0
+                near_right = abs(coord - right) <= 180.0
+                if not (near_left or near_right):
+                    continue
+                if _overlap(a0, a1, depth0, depth1) < depth * 0.55:
+                    continue
+                if not (350.0 <= length <= 950.0):
+                    continue
+                if _paint_layer(entity, WALL_LAYER, WALL_COLOR):
+                    changed += 1
+                painted.add(id(entity))
+                continue
+            if ori != face_ori:
+                continue
+            if abs(coord - outer_at) > 50.0:
+                continue
+            cover = _overlap(a0, a1, left, right)
+            if cover < 80.0:
+                continue
+            if (a0 < left - 120.0 or a1 > right + 120.0) and cover < length * 0.7:
+                continue
+            if _paint_layer(entity, WALL_LAYER, WALL_COLOR):
+                changed += 1
+            painted.add(id(entity))
+    return changed
+
+
 def demote_thin_swing_leaf_lines(msp) -> int:
     """두께 20–80 mm 여닫이문 잎과 그에 겹친 평행선은 WALL에서 뺀다.
 
@@ -26413,6 +26586,164 @@ def promote_capped_triple_walls(msp) -> int:
     return n
 
 
+def _is_diagonal_hatch_angle(ang_deg: float) -> bool:
+    ang = ang_deg % 180.0
+    return (25.0 < ang < 65.0) or (115.0 < ang < 155.0)
+
+
+def _diagonal_hatch_stroke(entity) -> tuple[float, float, Any] | None:
+    """짧은 사선 한 획. 포셰 채움에 쓰는 2점 폴리선·LINE."""
+    layer = getattr(entity.dxf, "layer", None)
+    if layer not in (BASE_LAYER, WALL_LAYER):
+        return None
+    kind = _dxftype(entity)
+    if kind == "LINE":
+        try:
+            x0, y0, x1, y1 = _line_xy(entity)
+        except Exception:  # noqa: BLE001
+            return None
+    elif kind == "LWPOLYLINE":
+        try:
+            pts = [(float(p[0]), float(p[1])) for p in _poly_xy(entity)]
+        except Exception:  # noqa: BLE001
+            return None
+        if len(pts) != 2:
+            return None
+        (x0, y0), (x1, y1) = pts
+    else:
+        return None
+    length = math.hypot(x1 - x0, y1 - y0)
+    if not (35.0 <= length <= 280.0):
+        return None
+    ang = math.degrees(math.atan2(y1 - y0, x1 - x0))
+    if not _is_diagonal_hatch_angle(ang):
+        return None
+    return ((x0 + x1) * 0.5, (y0 + y1) * 0.5, entity)
+
+
+def _diagonal_hatch_zigzag(entity) -> tuple[float, float, float, float, float, int, Any] | None:
+    """벽 두께 띠를 지그재그 사선으로 채운 폴리선."""
+    if _dxftype(entity) != "LWPOLYLINE":
+        return None
+    layer = getattr(entity.dxf, "layer", None)
+    if layer not in (BASE_LAYER, WALL_LAYER):
+        return None
+    try:
+        pts = [(float(p[0]), float(p[1])) for p in _poly_xy(entity)]
+    except Exception:  # noqa: BLE001
+        return None
+    if len(pts) < 6:
+        return None
+    xs = [p[0] for p in pts]
+    ys = [p[1] for p in pts]
+    x0, x1 = min(xs), max(xs)
+    y0, y1 = min(ys), max(ys)
+    width, height = x1 - x0, y1 - y0
+    short, long = min(width, height), max(width, height)
+    if not (40.0 <= short <= 180.0 and long >= 400.0):
+        return None
+    pairs = list(zip(pts, pts[1:]))
+    if bool(entity.closed) and pts[0] != pts[-1]:
+        pairs.append((pts[-1], pts[0]))
+    diag_n = 0
+    for a, b in pairs:
+        length = math.hypot(b[0] - a[0], b[1] - a[1])
+        if length < 5.0 or length > short * 3.0 + 40.0:
+            continue
+        ang = math.degrees(math.atan2(b[1] - a[1], b[0] - a[0]))
+        if _is_diagonal_hatch_angle(ang):
+            diag_n += 1
+    if diag_n < 4:
+        return None
+    return (x0, y0, x1, y1, long, diag_n, entity)
+
+
+def promote_diagonal_hatch_walls(msp) -> int:
+    """사선으로 채운 얇은 벽(포셰)은 벽이다.
+
+    두께 70–180 mm 인 닫힌 면 안에 짧은 35–280 mm 사선이 여러 줄
+    있으면 그 닫힌 면과 사선을 WALL로 둔다. 같은 두께의 지그재그
+    사선 채움도 WALL로 둔다. 오송클리닉 sheet_01 화살표가 그 예다.
+    """
+    strokes: list[tuple[float, float, Any]] = []
+    zigzags: list[tuple[float, float, float, float, float, int, Any]] = []
+    shells: list[tuple[Any, float, float, float, float, float]] = []
+    for entity in _entities(msp):
+        stroke = _diagonal_hatch_stroke(entity)
+        if stroke is not None:
+            strokes.append(stroke)
+            continue
+        zigzag = _diagonal_hatch_zigzag(entity)
+        if zigzag is not None:
+            zigzags.append(zigzag)
+            continue
+        if _dxftype(entity) != "LWPOLYLINE" or not entity.closed:
+            continue
+        if getattr(entity.dxf, "layer", None) not in (BASE_LAYER, WALL_LAYER):
+            continue
+        pts = _polyline_xy(entity)
+        if len(pts) >= 2 and math.hypot(pts[0][0] - pts[-1][0], pts[0][1] - pts[-1][1]) <= 1.0:
+            pts = pts[:-1]
+        if not (4 <= len(pts) <= 12):
+            continue
+        axis = True
+        for index in range(len(pts)):
+            start, end = pts[index], pts[(index + 1) % len(pts)]
+            dx, dy = abs(end[0] - start[0]), abs(end[1] - start[1])
+            if min(dx, dy) > 12.0 and max(dx, dy) > 40.0:
+                axis = False
+                break
+        if not axis:
+            continue
+        xs = [point[0] for point in pts]
+        ys = [point[1] for point in pts]
+        width, height = max(xs) - min(xs), max(ys) - min(ys)
+        short, long = min(width, height), max(width, height)
+        if not (70.0 <= short <= 180.0 and long >= 500.0):
+            continue
+        shells.append((entity, min(xs), min(ys), max(xs), max(ys), long))
+
+    n = 0
+    promoted_shells: list[tuple[float, float, float, float]] = []
+    for entity, x0, y0, x1, y1, long in shells:
+        pad = 15.0
+        stroke_n = sum(
+            1
+            for cx, cy, _ent in strokes
+            if x0 - pad <= cx <= x1 + pad and y0 - pad <= cy <= y1 + pad
+        )
+        zigzag_n = sum(
+            1
+            for zx0, zy0, zx1, zy1, _long, _diag, _ent in zigzags
+            if not (zx1 < x0 - pad or zx0 > x1 + pad or zy1 < y0 - pad or zy0 > y1 + pad)
+        )
+        need = max(4, int(long // 200.0))
+        if stroke_n < need and zigzag_n < 1:
+            continue
+        if _paint_layer(entity, WALL_LAYER, WALL_COLOR):
+            n += 1
+        promoted_shells.append((x0, y0, x1, y1))
+
+    def _in_promoted(cx: float, cy: float, pad: float = 20.0) -> bool:
+        for x0, y0, x1, y1 in promoted_shells:
+            if x0 - pad <= cx <= x1 + pad and y0 - pad <= cy <= y1 + pad:
+                return True
+        return False
+
+    for cx, cy, entity in strokes:
+        if not _in_promoted(cx, cy):
+            continue
+        if _paint_layer(entity, WALL_LAYER, WALL_COLOR):
+            n += 1
+
+    for x0, y0, x1, y1, _long, diag_n, entity in zigzags:
+        cx, cy = (x0 + x1) * 0.5, (y0 + y1) * 0.5
+        if _in_promoted(cx, cy) or diag_n >= 4:
+            if _paint_layer(entity, WALL_LAYER, WALL_COLOR):
+                n += 1
+    return n
+
+
 def _gap_coverage(spans: list[tuple[float, float]], start: float, end: float) -> tuple[float, float]:
     intervals: list[list[float]] = []
     for left, right in spans:
@@ -26668,11 +26999,15 @@ def _covering_rect_bbox(entity) -> tuple[float, float, float, float] | None:
 
 
 def _x_box_covers(box: tuple[float, float, float, float], cross: tuple[float, float, float, float]) -> bool:
-    """사각형이 X 외곽을 덮으면 True. 안쪽은 40 mm, 바깥은 160 mm까지 허용."""
+    """사각형이 X 외곽을 덮으면 True. 안쪽은 40 mm, 바깥은 350 mm까지 허용.
+
+    한 변당 약 100 mm 큰 바깥 네모뿐 아니라, 벽 두께(80–350 mm) 이중선과
+    승강기 문턱 쪽으로만 더 나간 바깥 겹도 포함한다.
+    """
     x0, y0, x1, y1 = cross
     rx0, ry0, rx1, ry1 = box
     pads = (x0 - rx0, y0 - ry0, rx1 - x1, ry1 - y1)
-    return all(-40.0 <= pad <= 160.0 for pad in pads)
+    return all(-40.0 <= pad <= 350.0 for pad in pads)
 
 
 def _cluster_x_boxes(
@@ -26768,37 +27103,70 @@ def _x_box_edge_covered(
     return False
 
 
+def _lwpolyline_segments(entity) -> list[tuple[float, float, float, float]]:
+    """LWPOLYLINE의 인접 분절. 닫힌 폴리선은 마지막→첫 점도 포함한다."""
+    pts = _polyline_xy(entity)
+    if len(pts) >= 2 and math.hypot(pts[0][0] - pts[-1][0], pts[0][1] - pts[-1][1]) <= 1.0:
+        pts = pts[:-1]
+    count = len(pts)
+    if count < 2:
+        return []
+    segments: list[tuple[float, float, float, float]] = []
+    for index in range(count - 1 + (1 if entity.closed and count > 2 else 0)):
+        start, end = pts[index], pts[(index + 1) % count]
+        segments.append((start[0], start[1], end[0], end[1]))
+    return segments
+
+
 def promote_x_cover_squares(msp) -> int:
     """X와 그를 감싼 네모는 벽이다.
 
     교차 대각선(X)과 바로 위의 사각형 변을 모두 WALL로 둔다.
-    안쪽 네모와, 한 변당 약 100 mm 큰 바깥 네모가 같이 있으면 둘 다 올린다.
+    안쪽 네모와, 한 변당 약 100 mm·벽 두께(80–350 mm)만큼 큰 바깥 이중선
+    네모가 같이 있으면 둘 다 올린다. 승강기 문턱 쪽으로만 더 나간 바깥 겹도 같다.
     네모가 LWPOLYLINE이 아니라 선 네 개여도 그 변을 올린다.
+    X 대각선이 LINE이 아니라 점 두 개·지그재그 LWPOLYLINE이어도
+    그 세그먼트로 교차를 찾고 감싼 네모를 올린다.
+    문턱 포켓이 있는 다점 폴리선 테두리도, X 변 위에 분절이 있으면 올린다.
     네모가 없고 X만 있으면 대각선 끝에 맞춘 사각형을 새로 그어 네 변을 벽으로 둔다.
     벽 두께 안에서 교차하는 문 X의 네모는 그대로 둔다.
     긴 덕트 X(짧은 변 ≥500 mm, 긴 변 ≤12 m)도 올린다.
     """
-    diags: list[tuple[Any, float, float, float, float, float]] = []
+    diags: list[tuple[Any, float, float, float, float, float, bool]] = []
     for entity in _entities(msp):
-        if _dxftype(entity) != "LINE":
-            continue
         if getattr(entity.dxf, "layer", None) not in (BASE_LAYER, DOOR_LAYER, WALL_LAYER):
             continue
-        try:
-            x0, y0, x1, y1 = _line_xy(entity)
-        except Exception:  # noqa: BLE001
+        kind = _dxftype(entity)
+        edges: list[tuple[float, float, float, float]] = []
+        if kind == "LINE":
+            try:
+                edges.append(_line_xy(entity))
+            except Exception:  # noqa: BLE001
+                continue
+        elif kind == "LWPOLYLINE":
+            pts = _polyline_xy(entity)
+            if len(pts) >= 2 and math.hypot(pts[0][0] - pts[-1][0], pts[0][1] - pts[-1][1]) <= 1.0:
+                pts = pts[:-1]
+            count = len(pts)
+            for index in range(count - 1 + (1 if entity.closed and count > 2 else 0)):
+                start, end = pts[index], pts[(index + 1) % count]
+                edges.append((start[0], start[1], end[0], end[1]))
+        else:
             continue
-        dx, dy = abs(x1 - x0), abs(y1 - y0)
-        length = math.hypot(x1 - x0, y1 - y0)
-        if not (200.0 <= length <= 15000.0) or max(dx, dy) <= 0.0:
-            continue
-        if min(dx, dy) / max(dx, dy) < 0.08:
-            continue
-        diags.append((entity, x0, y0, x1, y1, length))
+        for x0, y0, x1, y1 in edges:
+            dx, dy = abs(x1 - x0), abs(y1 - y0)
+            length = math.hypot(x1 - x0, y1 - y0)
+            if not (200.0 <= length <= 15000.0) or max(dx, dy) <= 0.0:
+                continue
+            if min(dx, dy) / max(dx, dy) < 0.08:
+                continue
+            diags.append((entity, x0, y0, x1, y1, length, (x1 - x0) * (y1 - y0) > 0.0))
     crosses: list[tuple[float, float, float, float]] = []
     cross_diag_ids: set[int] = set()
     for index, left in enumerate(diags):
         for right in diags[index + 1 :]:
+            if left[0] is right[0] or left[6] == right[6]:
+                continue
             short, long = sorted((left[5], right[5]))
             if short < long * 0.75:
                 continue
@@ -26847,17 +27215,29 @@ def promote_x_cover_squares(msp) -> int:
                 return pts[0][0], pts[0][1], pts[1][0], pts[1][1]
         return None
 
-    # 선·2점 폴리선으로 그린 사각 변을 올린다.
+    # 선·2점 폴리선·다점 폴리선 분절로 그린 사각 변을 올린다.
     edge_lines: list[tuple[float, float, float, float]] = []
     for entity in _entities(msp):
         if getattr(entity.dxf, "layer", None) not in (BASE_LAYER, WALL_LAYER, DOOR_LAYER):
             continue
         xy = _edge_xy(entity)
-        if xy is None:
+        if xy is not None:
+            x0, y0, x1, y1 = xy
+            edge_lines.append((x0, y0, x1, y1))
+            if any(_line_on_x_box_edge(x0, y0, x1, y1, cross) for cross in crosses):
+                chosen.add(id(entity))
             continue
-        x0, y0, x1, y1 = xy
-        edge_lines.append((x0, y0, x1, y1))
-        if any(_line_on_x_box_edge(x0, y0, x1, y1, cross) for cross in crosses):
+        if _dxftype(entity) != "LWPOLYLINE":
+            continue
+        segments = _lwpolyline_segments(entity)
+        if len(segments) < 2:
+            continue
+        on_x_edge = False
+        for x0, y0, x1, y1 in segments:
+            edge_lines.append((x0, y0, x1, y1))
+            if not on_x_edge and any(_line_on_x_box_edge(x0, y0, x1, y1, cross) for cross in crosses):
+                on_x_edge = True
+        if on_x_edge:
             chosen.add(id(entity))
     promoted = sum(
         1

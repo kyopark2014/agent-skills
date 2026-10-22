@@ -45,6 +45,7 @@ from correct._rules import (
     open_waiting_room_top_door, promote_aligned_door_mates, promote_aligned_wall_gaps,
     promote_angled_door_flanks, promote_angled_end_door_jambs,
     promote_bathroom_label_walls, promote_bay_window_outlines,
+    promote_orthogonal_bay_windows,
     promote_bottom_column_run, promote_butt_partitions, promote_capped_triple_walls,
     promote_capped_windows, promote_closed_square_columns,
     promote_concentric_double_square_columns, promote_round_columns,
@@ -53,7 +54,8 @@ from correct._rules import (
     promote_collinear_wall_continuations, promote_column_adjacent_wall_pairs,
     promote_control_booth_bottom, promote_corner_wall_squares,
     promote_corridor_door_flanks, promote_corridor_walls, promote_crossed_x_walls,
-    promote_curved_corner_walls, promote_diagonal_strip_windows,
+    promote_curved_corner_walls, promote_diagonal_hatch_walls,
+    promote_diagonal_strip_windows,
     promote_diagonal_wall_turns,     promote_door_opening_flanks,
     promote_door_side_corner_runs, promote_door_side_doubles,
     promote_wall_between_adjacent_doors,
@@ -601,6 +603,8 @@ def apply_corrections(
     n_promoted += n_diag_strip_window + n_diag_strip_wall
     n_mullion_window, n_mullion_wall = promote_mullion_strip_windows(msp)
     n_promoted += n_mullion_window + n_mullion_wall
+    # 직교 베이: WINDOW 사이 갭의 return·바깥면. 창 레이어 분리 뒤에 올린다.
+    n_promoted += promote_orthogonal_bay_windows(msp)
     # 문 가상 닫힘으로 생긴 사각 슬리브(문옆 기둥)도 H/슬리브 규칙으로 올린다.
     if do_column_promote:
         n_column_promoted += promote_hbeam_columns(msp)
@@ -623,6 +627,7 @@ def apply_corrections(
     n_promoted += promote_diagonal_wall_turns(msp)
     n_promoted += promote_mullion_diagonal_walls(msp)
     n_promoted += promote_capped_triple_walls(msp)
+    n_promoted += promote_diagonal_hatch_walls(msp)
     n_promoted += promote_wall_end_returns(msp)
     n_promoted += promote_crossed_x_walls(msp)
     n_promoted += promote_x_cover_squares(msp)

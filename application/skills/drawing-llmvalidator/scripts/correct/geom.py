@@ -23,6 +23,7 @@ from correct._rules import (  # noqa: F401
     promote_x_cover_squares,
     promote_triple_diagonal_walls,
     promote_capped_triple_walls,
+    promote_diagonal_hatch_walls,
     promote_wall_end_returns,
     promote_mullion_diagonal_walls,
     promote_collinear_wall_continuations,

@@ -117,6 +117,30 @@ class XCoverSquareTests(unittest.TestCase):
         for entity in (diag_a, diag_b, bot, top, left, right):
             self.assertEqual(entity.dxf.layer, "WALL")
 
+    def test_zigzag_polyline_x_square_becomes_wall(self):
+        """오송클리닉처럼 지그재그 LWPOLYLINE X와 감싼 네모도 올린다."""
+        doc = ezdxf.new()
+        msp = doc.modelspace()
+        # 두 칸 옆 샤프트를 한 폴리선으로 이은 X (실제 sheet_01 형태)
+        zig_a = msp.add_lwpolyline(
+            [(0, 100), (600, 700), (1200, 100), (1800, 700)],
+            dxfattribs={"layer": "BASE"},
+        )
+        zig_b = msp.add_lwpolyline(
+            [(600, 100), (1200, 700), (1800, 100)],
+            dxfattribs={"layer": "BASE"},
+        )
+        left = _rect(msp, 600, 100, 1200, 700)
+        right = _rect(msp, 1200, 100, 1800, 700)
+
+        promoted = lib_llm_correct.promote_x_cover_squares(msp)
+
+        self.assertGreaterEqual(promoted, 4)
+        self.assertEqual(zig_a.dxf.layer, "WALL")
+        self.assertEqual(zig_b.dxf.layer, "WALL")
+        self.assertEqual(left.dxf.layer, "WALL")
+        self.assertEqual(right.dxf.layer, "WALL")
+
 
 if __name__ == "__main__":
     unittest.main()

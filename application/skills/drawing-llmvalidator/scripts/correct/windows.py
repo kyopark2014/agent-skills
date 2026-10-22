@@ -16,4 +16,5 @@ from correct._rules import (  # noqa: F401
     promote_diagonal_strip_windows,
     promote_mullion_strip_windows,
     promote_bay_window_outlines,
+    promote_orthogonal_bay_windows,
 )
