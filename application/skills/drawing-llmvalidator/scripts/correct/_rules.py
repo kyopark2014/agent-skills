@@ -22166,7 +22166,8 @@ def _find_diagonal_swing_doors(msp) -> list[dict]:
     힌지에서 반지름만큼 나간 문짝과 끝의 짧은 막이는 문이다.
     문짝이 호 끝 각도의 반대쪽에 있어도 같은 문이다.
     문 밖으로 이어진 경사 벽면과 문 끝의 벽 두께는 벽이다.
-    MRI3 모서리가 그 예다.
+    열린 문짝의 반대 호 끝은 닫힌 현(close)으로 개구를 막는다.
+    MRI3 모서리·전남대 예대 CNC실 단열도어가 그 예다.
     """
     swings: list[dict] = []
     lines: list[dict] = []
@@ -22184,12 +22185,14 @@ def _find_diagonal_swing_doors(msp) -> list[dict]:
             if not (700.0 <= radius <= 1500.0 and 70.0 <= sweep <= 110.0):
                 continue
             ends: list[tuple[float, float]] = []
+            primary_ends: list[tuple[float, float]] = []
             cardinal = 0
             for angle in (start_angle, end_angle):
                 rad = math.radians(angle)
                 ux, uy = math.cos(rad), math.sin(rad)
                 if abs(ux) >= 0.98 or abs(uy) >= 0.98:
                     cardinal += 1
+                primary_ends.append((ux, uy))
                 # 문짝이 호 끝의 반대편에 그려져도 같은 축이다.
                 ends.append((ux, uy))
                 ends.append((-ux, -uy))
@@ -22201,6 +22204,7 @@ def _find_diagonal_swing_doors(msp) -> list[dict]:
                 "hy": float(center.y),
                 "radius": radius,
                 "ends": ends,
+                "primary_ends": primary_ends,
             })
             continue
         if kind != "LINE":
@@ -22232,6 +22236,7 @@ def _find_diagonal_swing_doors(msp) -> list[dict]:
         door: list = []
         wall: list = []
         seen: set[int] = set()
+        leaf_primaries: list[tuple[float, float]] = []
         for ux, uy in swing["ends"]:
             px, py = -uy, ux
             parallel: list[dict] = []
@@ -22261,6 +22266,12 @@ def _find_diagonal_swing_doors(msp) -> list[dict]:
                 leaves.append(seg)
             if not leaves:
                 continue
+            for pux, puy in swing["primary_ends"]:
+                if abs(ux * pux + uy * puy) < 0.98:
+                    continue
+                if not any(abs(pux - ax) + abs(puy - ay) < 0.5 for ax, ay in leaf_primaries):
+                    leaf_primaries.append((pux, puy))
+                break
             side_lo = min(min(seg["s0"], seg["s1"]) for seg in leaves)
             side_hi = max(max(seg["s0"], seg["s1"]) for seg in leaves)
             far = max(seg["hi"] for seg in leaves)
@@ -22300,6 +22311,16 @@ def _find_diagonal_swing_doors(msp) -> list[dict]:
                     wall.append(seg["entity"])
         if not door:
             continue
+        close: tuple[float, float, float, float] | None = None
+        if len(leaf_primaries) == 1:
+            other = [
+                end
+                for end in swing["primary_ends"]
+                if abs(end[0] - leaf_primaries[0][0]) + abs(end[1] - leaf_primaries[0][1]) > 0.5
+            ]
+            if len(other) == 1:
+                cux, cuy = other[0]
+                close = (hx, hy, hx + radius * cux, hy + radius * cuy)
         found.append({
             "hx": hx,
             "hy": hy,
@@ -22307,6 +22328,7 @@ def _find_diagonal_swing_doors(msp) -> list[dict]:
             "arc": swing["arc"],
             "door": door,
             "wall": wall,
+            "close": close,
         })
     return found
 
@@ -22527,9 +22549,50 @@ def separate_partial_arc_radial_swing_doors(msp) -> tuple[int, int]:
 
 
 def separate_diagonal_swing_doors(msp) -> tuple[int, int]:
-    """경사진 1/4 스윙의 문짝은 문으로 내리고, 문 밖 경사벽은 올린다."""
+    """경사진 1/4 스윙의 문짝은 문으로 내리고, 문 밖 경사벽·닫힌 현은 올린다.
+
+    호 끝이 둘 다 대각이면 add_swing_closed_chords 가 건너뛰므로
+    여기서 열린 문짝 반대 방향으로 개구를 WALL 로 막는다.
+    """
     n_demote = 0
     n_promote = 0
+    edges: list[tuple] = []
+    for entity in _entities(msp):
+        layer = getattr(entity.dxf, "layer", None)
+        if layer not in (WALL_LAYER, BASE_LAYER):
+            continue
+        if _dxftype(entity) != "LINE":
+            continue
+        try:
+            x0, y0, x1, y1 = _line_xy(entity)
+        except Exception:  # noqa: BLE001
+            continue
+        if math.hypot(x1 - x0, y1 - y0) >= 80.0:
+            edges.append((x0, y0, x1, y1, layer, entity))
+
+    def _covered(x0: float, y0: float, x1: float, y1: float) -> bool:
+        for ax, ay, bx, by, layer, _ent in edges:
+            if layer != WALL_LAYER:
+                continue
+            if math.hypot(ax - x0, ay - y0) < 8.0 and math.hypot(bx - x1, by - y1) < 8.0:
+                return True
+            if math.hypot(ax - x1, ay - y1) < 8.0 and math.hypot(bx - x0, by - y0) < 8.0:
+                return True
+            vx, vy = bx - ax, by - ay
+            length2 = vx * vx + vy * vy
+            if length2 < 1.0:
+                continue
+
+            def _on(px: float, py: float) -> bool:
+                t = ((px - ax) * vx + (py - ay) * vy) / length2
+                if t < -0.02 or t > 1.02:
+                    return False
+                return math.hypot(px - (ax + t * vx), py - (ay + t * vy)) <= 8.0
+
+            if _on(x0, y0) and _on(x1, y1):
+                return True
+        return False
+
     for swing in _find_diagonal_swing_doors(msp):
         arc = swing["arc"]
         if getattr(arc.dxf, "layer", None) != DOOR_LAYER:
@@ -22542,6 +22605,23 @@ def separate_diagonal_swing_doors(msp) -> tuple[int, int]:
         for entity in swing["wall"]:
             if _paint_layer(entity, WALL_LAYER, WALL_COLOR):
                 n_promote += 1
+        close = swing.get("close")
+        if not close:
+            continue
+        x0, y0, x1, y1 = close
+        if not _covered(x0, y0, x1, y1):
+            line = msp.add_line(
+                (x0, y0),
+                (x1, y1),
+                dxfattribs={"layer": WALL_LAYER, "color": WALL_COLOR},
+            )
+            edges.append((x0, y0, x1, y1, WALL_LAYER, line))
+            n_promote += 1
+        n_promote += _close_parallel_door_pack_faces(
+            msp, edges, x0, y0, x1, y1, is_covered=_covered
+        )
+        n_promote += _promote_swing_opening_side_flanks(msp, edges, x0, y0, x1, y1)
+        n_promote += _promote_closed_door_flanks(msp, edges, x0, y0, x1, y1)
     return n_demote, n_promote
 
 

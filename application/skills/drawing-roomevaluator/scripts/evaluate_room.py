@@ -1546,25 +1546,47 @@ def _swing_doors(msp, lines: list[LineString], origin: tuple[float, float], pad:
         for angle in (start_angle, end_angle):
             rad = math.radians(angle)
             ux, uy = math.cos(rad), math.sin(rad)
+            nx, ny = -uy, ux
             ray = LineString(
                 [(hx - ux * 800.0, hy - uy * 800.0), (hx + ux * (radius + 200.0), hy + uy * (radius + 200.0))]
             )
-            inter = walls.intersection(ray)
+            # 격자 스냅·대각 닫힌 현은 선-선 교차가 비는 경우가 있어
+            # 얇은 밴드로 벽면을 받는다 (전남대 예대 CNC 단열도어 등).
+            tol = 10.0
+            inter = walls.intersection(ray.buffer(tol, cap_style=2))
             if inter.is_empty:
                 continue
             geoms = list(inter.geoms) if hasattr(inter, "geoms") else [inter]
             alongs: list[float] = []
+
+            def _add_coords(coords: list[tuple[float, float]]) -> None:
+                for x, y in coords:
+                    x, y = float(x), float(y)
+                    if abs((x - hx) * nx + (y - hy) * ny) > tol + 1.0:
+                        continue
+                    alongs.append((x - hx) * ux + (y - hy) * uy)
+
             for geom in geoms:
-                coords: list[tuple[float, float]] = []
                 if geom.geom_type == "Point":
-                    coords = [(float(geom.x), float(geom.y))]
-                elif geom.geom_type == "LineString":
-                    coords = [(float(x), float(y)) for x, y in geom.coords]
+                    _add_coords([(float(geom.x), float(geom.y))])
+                elif geom.geom_type in ("LineString", "LinearRing"):
+                    _add_coords([(float(x), float(y)) for x, y in geom.coords])
                 elif geom.geom_type == "MultiLineString":
                     for part in geom.geoms:
-                        coords.extend((float(x), float(y)) for x, y in part.coords)
-                for x, y in coords:
-                    alongs.append((x - hx) * ux + (y - hy) * uy)
+                        _add_coords([(float(x), float(y)) for x, y in part.coords])
+                elif geom.geom_type == "Polygon":
+                    _add_coords([(float(x), float(y)) for x, y in geom.exterior.coords])
+                elif geom.geom_type == "MultiPolygon":
+                    for part in geom.geoms:
+                        _add_coords([(float(x), float(y)) for x, y in part.exterior.coords])
+                elif geom.geom_type == "GeometryCollection":
+                    for part in geom.geoms:
+                        if part.geom_type == "Point":
+                            _add_coords([(float(part.x), float(part.y))])
+                        elif part.geom_type in ("LineString", "LinearRing"):
+                            _add_coords([(float(x), float(y)) for x, y in part.coords])
+                        elif part.geom_type == "Polygon":
+                            _add_coords([(float(x), float(y)) for x, y in part.exterior.coords])
             behind = [value for value in alongs if -700.0 <= value <= -30.0]
             ahead = [value for value in alongs if radius * 0.75 <= value <= radius + 180.0]
             if not behind or not ahead:
