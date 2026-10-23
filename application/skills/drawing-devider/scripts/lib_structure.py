@@ -68,11 +68,14 @@ def drop_off_layer_hidden(doc: Drawing, entities: list) -> tuple[list, int]:
 
 # 구조 축선·버블·축치수. 'A-ST-AXIS-CEN', 'A-ST-AXIS-BUB', 'AXIS-DIM', 단독 'CEN' 등.
 # 단독 CEN은 CENTER* 격자 축선(예: 전남대 예술대). G-CEN·*_CEN 벽 중심선은 제외.
+# N-CNTL / N-CNTL-CEN* / N-CNTL-AXIS / GRID: CEN linetype 구조 축(예: 중화5구역 부대시설).
 _AXIS_LAYER = re.compile(
     r"(?:^|[^A-Za-z0-9])(?:A[_-]?)?ST[_-]?AXIS|"
     r"AXIS[_-]?(?:CEN|CENTER|BUB|BUBBLE|DIM)(?:$|[^A-Za-z0-9])|"
     r"축선|축버블|구조축|"
-    r"^CEN$",
+    r"^CEN$|"
+    r"(?:^|[^A-Za-z0-9])N-CNTL(?:-CEN\d*|-AXIS)?(?:$|[^A-Za-z0-9])|"
+    r"(?:^|\$0\$)GRID$",
     re.IGNORECASE,
 )
 
@@ -82,9 +85,216 @@ def is_axis_layer(name: str) -> bool:
     return bool(_AXIS_LAYER.search(name or ""))
 
 
-def drop_axis_layers(entities: list) -> tuple[list, int]:
-    """floor_original에서 구조 축 레이어 엔티티를 뺀다."""
-    kept = []
+# 이름 미매칭 축: CEN/CENTER* linetype + 긴 직교 격자(피치 1.5–12 m).
+# Continuous 외벽 장축은 지우지 않는다. G-CEN·ARCH_*_CEN 벽 중심선은 제외.
+_CENTER_LINETYPE = re.compile(
+    r"(?:^|\$0\$|[^A-Za-z0-9])(?:CENTER(?:X?2|X?5)?|CENN|CEN)(?:$|[^A-Za-z0-9])",
+    re.IGNORECASE,
+)
+_KEEP_CENTERLINE_LAYER = re.compile(
+    r"(?:^|[^A-Za-z0-9])G-CEN(?:$|[^A-Za-z0-9])|ARCH[_-].*CEN",
+    re.IGNORECASE,
+)
+
+AXIS_TRAIT_MIN_LEN_MM = 10000.0
+AXIS_TRAIT_MIN_COUNT = 3
+AXIS_TRAIT_PITCH_MIN_MM = 1500.0
+AXIS_TRAIT_PITCH_MAX_MM = 12000.0
+AXIS_TRAIT_OVERLAP_RATIO = 0.50
+AXIS_TRAIT_SPAN_RATIO = 0.40
+AXIS_TRAIT_ORTHO_TOL_MM = 1.0
+
+
+def is_center_linetype(name: str) -> bool:
+    """CENTER / CENTER2 / CEN 등 중심선(축) 선종류."""
+    token = (name or "").split("$")[-1].strip()
+    if not token:
+        return False
+    return _CENTER_LINETYPE.search(token) is not None or token.upper() in {
+        "CEN",
+        "CENN",
+        "CENTER",
+        "CENTER2",
+        "CENTERX2",
+        "CENTER5",
+        "CENTERX5",
+    }
+
+
+def is_keep_centerline_layer(name: str) -> bool:
+    """벽 중심선 레이어. 특성 탐지로 지우지 않는다."""
+    return bool(_KEEP_CENTERLINE_LAYER.search(name or ""))
+
+
+def _entity_ortho_segs(entity) -> list[tuple[float, float, float, float, float, bool, bool]]:
+    """(x0,y0,x1,y1,length,is_h,is_v). 직교 선분만."""
+    out: list[tuple[float, float, float, float, float, bool, bool]] = []
+    tol = AXIS_TRAIT_ORTHO_TOL_MM
+    dxftype = entity.dxftype()
+    if dxftype == "LINE":
+        pairs = [(entity.dxf.start.x, entity.dxf.start.y, entity.dxf.end.x, entity.dxf.end.y)]
+    elif dxftype == "LWPOLYLINE":
+        pts = list(entity.get_points("xy"))
+        pairs = []
+        for i in range(len(pts) - 1):
+            pairs.append((pts[i][0], pts[i][1], pts[i + 1][0], pts[i + 1][1]))
+        if getattr(entity, "closed", False) and len(pts) >= 2:
+            pairs.append((pts[-1][0], pts[-1][1], pts[0][0], pts[0][1]))
+    else:
+        return out
+    for x0, y0, x1, y1 in pairs:
+        dx, dy = x1 - x0, y1 - y0
+        length = math.hypot(dx, dy)
+        if length < 1.0:
+            continue
+        is_h = abs(dy) <= tol
+        is_v = abs(dx) <= tol
+        if is_h or is_v:
+            out.append((float(x0), float(y0), float(x1), float(y1), float(length), is_h, is_v))
+    return out
+
+
+def _entities_span(entities: list) -> tuple[float, float] | None:
+    """전체 기하 bbox → (width_mm, height_mm)."""
+    min_x = min_y = math.inf
+    max_x = max_y = -math.inf
+    found = False
+    for entity in entities:
+        for x0, y0, x1, y1, _length, _h, _v in _entity_ortho_segs(entity):
+            found = True
+            min_x = min(min_x, x0, x1)
+            max_x = max(max_x, x0, x1)
+            min_y = min(min_y, y0, y1)
+            max_y = max(max_y, y0, y1)
+        if entity.dxftype() in {"CIRCLE", "ARC", "TEXT", "MTEXT", "LWPOLYLINE", "LINE"}:
+            try:
+                center = entity_centroid(entity)
+            except Exception:  # noqa: BLE001
+                center = None
+            if center is not None:
+                found = True
+                min_x = min(min_x, center[0])
+                max_x = max(max_x, center[0])
+                min_y = min(min_y, center[1])
+                max_y = max(max_y, center[1])
+    if not found or not math.isfinite(min_x):
+        return None
+    return (max_x - min_x, max_y - min_y)
+
+
+def _parallel_axis_grid(
+    segs: list[tuple[float, float, float, float, float, bool, bool]],
+    *,
+    vertical: bool,
+    min_len_mm: float,
+) -> bool:
+    """같은 방향 긴 선이 축 피치로 3줄 이상이면 True."""
+    long = [s for s in segs if s[4] >= min_len_mm and (s[6] if vertical else s[5])]
+    if len(long) < AXIS_TRAIT_MIN_COUNT:
+        return False
+    need = AXIS_TRAIT_MIN_COUNT - 1
+    for s in long:
+        ortho = (s[0] + s[2]) * 0.5 if vertical else (s[1] + s[3]) * 0.5
+        a0 = min(s[1], s[3]) if vertical else min(s[0], s[2])
+        a1 = max(s[1], s[3]) if vertical else max(s[0], s[2])
+        peers = 0
+        for other in long:
+            if other is s:
+                continue
+            other_ortho = (other[0] + other[2]) * 0.5 if vertical else (other[1] + other[3]) * 0.5
+            pitch = abs(other_ortho - ortho)
+            if not (AXIS_TRAIT_PITCH_MIN_MM <= pitch <= AXIS_TRAIT_PITCH_MAX_MM):
+                continue
+            b0 = min(other[1], other[3]) if vertical else min(other[0], other[2])
+            b1 = max(other[1], other[3]) if vertical else max(other[0], other[2])
+            overlap = max(0.0, min(a1, b1) - max(a0, b0))
+            if overlap >= AXIS_TRAIT_OVERLAP_RATIO * min(s[4], other[4]):
+                peers += 1
+                if peers >= need:
+                    return True
+    return False
+
+
+def layer_has_axis_grid(
+    doc: Drawing,
+    entities: list,
+    layer_name: str,
+    *,
+    span: tuple[float, float] | None = None,
+) -> bool:
+    """한 레이어가 CEN/CENTER 축 격자인지."""
+    if is_axis_layer(layer_name) or is_keep_centerline_layer(layer_name):
+        return False
+    layer_ents = [
+        e for e in entities if str(getattr(e.dxf, "layer", "") or "") == layer_name
+    ]
+    if not layer_ents:
+        return False
+    try:
+        layer_lt = str(doc.layers.get(layer_name).dxf.linetype or "")
+    except Exception:  # noqa: BLE001
+        layer_lt = ""
+    segs: list[tuple[float, float, float, float, float, bool, bool]] = []
+    center_long = 0
+    for entity in layer_ents:
+        lt = _effective_linetype(doc, entity)
+        if not is_center_linetype(lt) and not is_center_linetype(layer_lt):
+            continue
+        for seg in _entity_ortho_segs(entity):
+            segs.append(seg)
+            if seg[4] >= AXIS_TRAIT_MIN_LEN_MM:
+                center_long += 1
+    if center_long < AXIS_TRAIT_MIN_COUNT:
+        return False
+    if span is None:
+        span = _entities_span(entities)
+    min_len_v = AXIS_TRAIT_MIN_LEN_MM
+    min_len_h = AXIS_TRAIT_MIN_LEN_MM
+    if span is not None:
+        width, height = span
+        min_len_v = max(AXIS_TRAIT_MIN_LEN_MM, height * AXIS_TRAIT_SPAN_RATIO)
+        min_len_h = max(AXIS_TRAIT_MIN_LEN_MM, width * AXIS_TRAIT_SPAN_RATIO)
+    return _parallel_axis_grid(segs, vertical=True, min_len_mm=min_len_v) or _parallel_axis_grid(
+        segs, vertical=False, min_len_mm=min_len_h
+    )
+
+
+def discover_axis_layers(doc: Drawing, entities: list) -> list[str]:
+    """이름에 안 걸려도 CEN/CENTER 긴 직교 격자인 레이어를 찾는다.
+
+    1) 층에 축 격자 기하가 있는지 보고
+    2) 그 기하가 속한 레이어를 모아 반환한다.
+    """
+    if not entities:
+        return []
+    span = _entities_span(entities)
+    candidates: set[str] = set()
+    for entity in entities:
+        layer = str(getattr(entity.dxf, "layer", "") or "")
+        if not layer or is_axis_layer(layer) or is_keep_centerline_layer(layer):
+            continue
+        if layer in candidates:
+            continue
+        candidates.add(layer)
+    found = [
+        name
+        for name in sorted(candidates)
+        if layer_has_axis_grid(doc, entities, name, span=span)
+    ]
+    return found
+
+
+def drop_axis_layers(
+    entities: list,
+    doc: Drawing | None = None,
+) -> tuple[list, int, dict]:
+    """이름 패턴 축 레이어를 빼고, 남아 있는 CEN/CENTER 축 격자 레이어도 뺀다.
+
+    Returns:
+        (kept, skipped_count, info)
+        info["trait_layers"]: 특성으로 추가 제거한 레이어 이름
+    """
+    kept: list = []
     skipped = 0
     for entity in entities:
         layer = str(getattr(entity.dxf, "layer", "") or "")
@@ -92,7 +302,25 @@ def drop_axis_layers(entities: list) -> tuple[list, int]:
             skipped += 1
             continue
         kept.append(entity)
-    return kept, skipped
+
+    info: dict = {"trait_layers": []}
+    if doc is None or not kept:
+        return kept, skipped, info
+
+    trait_layers = discover_axis_layers(doc, kept)
+    if not trait_layers:
+        return kept, skipped, info
+
+    drop = set(trait_layers)
+    kept2: list = []
+    for entity in kept:
+        layer = str(getattr(entity.dxf, "layer", "") or "")
+        if layer in drop:
+            skipped += 1
+            continue
+        kept2.append(entity)
+    info["trait_layers"] = trait_layers
+    return kept2, skipped, info
 
 
 def is_arch_layer(name: str) -> bool:

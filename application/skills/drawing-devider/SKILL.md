@@ -155,28 +155,24 @@ echo "PID=$! LOG=$LOG"
 성공 시 `floors/12F/floor_original.dxf` / `.png` / `_meta.json`이 생긴다. 같은 파일이 있으면 덮어쓴다.  
 도곽 안에 건축 레이어(`ARCH`, `*_BG`·`*_CEN` 제외)가 있으면 그 선·실명과 문 스윙만 남긴다. 그 레이어의 창선은 벽과 같이 남긴다. 가구·카세트 배관·등고선은 넣지 않는다. 다만 제목에 `냉난방`·`배관`·`전열` 등이 있거나 INSERT 접미로만 보완한 설비 시트는 ARCH 필터를 쓰지 않고 도곽 안 전체 기하를 남긴다. 이 결과도 파일명은 `floor_original.png` 이다. 제목 TEXT가 없는 큰 Defpoints 도곽은 `BASEMENT FLOOR PLAN` 등 INSERT 접미로 `B1F` 등을 보완한다. 전 층 재추출 시 이번 목록에 없는 옛 `sheet_XX` 폴더는 지운다.  
 꺼진 레이어 위의 숨은선(`HIDDEN`, `HID2`, `HID` 등)은 뺀다. 켜진 레이어의 점선과 실선은 남긴다.  
-구조 축 레이어(`A-ST-AXIS-CEN`, `A-ST-AXIS-BUB`, `A-ST-AXIS-DIM`, `축선`, 단독 `CEN` 등)는 `floor_original`에서 뺀다 (`lib_structure.is_axis_layer` / `drop_axis_layers`).  
-이름 패턴에 안 걸려도 **축선이 PNG에 남으면** 원본 DXF 레이어를 **특성으로 검토**한 뒤, 후보를 `is_axis_layer`에 반영하고 해당 층을 재추출한다. 이름만 보고 추측해 벽을 지우지 않는다.  
+구조 축 레이어는 `floor_original`에서 뺀다 (`lib_structure.drop_axis_layers`). 추출 시 아래 순서로 **자동** 처리한다.
+
+1. **이름 패턴** (`is_axis_layer`): `A-ST-AXIS-*`, `축선`, 단독 `CEN`, `N-CNTL`/`N-CNTL-CEN*`/`N-CNTL-AXIS`, `GRID` 등.
+2. **축 기하·레이어 특성** (`discover_axis_layers`): 이름에 안 걸려도 층에 **긴 직교 격자**가 남아 있고, 그 레이어가 `CEN`/`CENTER*` linetype이며 축 피치(1.5–12 m)·3줄 이상이면 해당 레이어 전체를 제거. 로그에 `axis layers by traits: [...]` 로 남는다.
+3. `G-CEN`·`ARCH_*_CEN`·`Continuous` 외벽 장축은 특성 제거 대상이 아니다. 이름만 보고 벽을 지우지 않는다.
+
+이름·특성 둘 다 놓친 축이 PNG에 남으면 원본 레이어를 검토한 뒤 `is_axis_layer` 패턴(및 테스트·`reference.md`)을 **세 레포에 같이** 확장하고 재추출한다. 일회성 삭제는 금지.
+
 다층이면 **멈추지 말고** 다음 층을 바로 추출한다. 사용자 허락을 받지 않는다.  
 포그라운드로 `python3 …extract_2d.py`를 붙잡고 기다리지 않는다(에이전트 bash ~3600초 timeout이어도 대용량은 백그라운드).
 
-#### 축선 레이어 특성 검토 (이름 미매칭 시)
+#### 축선 레이어 신호 (자동 탐지·수동 보완)
 
-`floor_original.png`에 기둥을 관통하는 긴 직교 격자선이 보이거나, 추출 로그에 `axis layers skipped: 0`인데도 격자가 있으면 아래를 **원본 DXF**(또는 해당 층 `floor_original.dxf`)로 확인한다.
-
-| 신호 | 축선(제거 후보) | 벽·중심선(유지) |
-|------|-----------------|-----------------|
-| 레이어 이름 | `*AXIS*`, `축선`, `축버블`, `구조축`, 단독 `CEN`(이미 `is_axis_layer` 매칭) | `G-CEN`, `ARCH_*_CEN`, `*_CEN`이지만 짧은 벽 중심선 |
-| linetype | `CENTER` / `CENTER2` / `CENTER5` 등 | `Continuous`, `HIDDEN*` |
-| 기하 | 층 span에 가까운 **긴 직교 LINE**, x/y가 **규칙 간격**(예: 6000·6300 mm) | 짧은 선분·닫힌 폴리·벽 두께 쌍 |
-| 레이어 상태 | frozen·잠금인 경우 많음(필수는 아님) | 보통 켜짐 |
-
-검토 절차:
-
-1. 레이어 표에서 이름·`CENTER*` linetype·frozen 후보를 모은다.
-2. 후보 레이어의 LINE이 긴 직교·규칙 간격인지, 엔티티가 거의 LINE뿐인지 본다.
-3. **축선으로 확정되면** `lib_structure.is_axis_layer` 패턴(및 테스트·`reference.md`)을 **세 레포 스킬에 같이** 고친 뒤 해당 `drawing_id` 층을 재추출한다. 일회성 스크립트로만 지우지 않는다.
-4. `G-CEN`·짧은 `*_CEN` 벽 중심선은 축선이 아니다. 단독 `CEN` + `CENTER*` + 긴 격자일 때만 축선으로 본다.
+| 신호 | 축선(제거) | 벽·중심선(유지) |
+|------|------------|-----------------|
+| 레이어 이름 | `*AXIS*`, `축선`, `N-CNTL*`, `GRID`, 단독 `CEN` | `G-CEN`, `ARCH_*_CEN` |
+| linetype | `CENTER` / `CENTER2` / `CEN` 등 (**특성 탐지 필수**) | `Continuous`, `HIDDEN*` |
+| 기하 | 층 span의 긴 직교 LINE, 피치 1.5–12 m, 3줄 이상 | 짧은 선분·벽 두께 쌍 |
 
 ### 층 구분 (블록 이름 → 도곽)
 
@@ -381,7 +377,7 @@ $ARTIFACTS_DIR/
 - [ ] 여러 층은 `extract_2d.py` 한 번(`--floor all` 또는 쉼표 층)인가. `for` 루프는 없는가
 - [ ] `extract_2d.py`를 `nohup … > /tmp/<id>_extract.log 2>&1 &` 백그라운드로 돌렸는가. 포그라운드 대기는 아닌가
 - [ ] 미리보기로 `floor_structure.*` / `floor_*_2d.png` / `floor_overview.*`를 쓰지 않는가 (`floor_original.png`만)
-- [ ] `floor_original.png`에 기둥을 관통하는 격자(축선)가 있으면 원본 DXF에서 이름·`CENTER*` linetype·긴 직교·규칙 간격으로 레이어를 검토했는가. 미매칭이면 `is_axis_layer`를 고치고 재추출했는가
+- [ ] `floor_original.png`에 기둥을 관통하는 격자(축선)가 있으면 추출 로그의 `axis layers skipped` / `axis layers by traits`를 확인했는가. 둘 다 놓쳤으면 `is_axis_layer`를 확장하고 재추출했는가
 - [ ] `drawing_list.json` 각 도면에 원본 DXF `source_filename`을 `floors`보다 앞에 넣었는가
 
 ---
@@ -400,7 +396,7 @@ $ARTIFACTS_DIR/
 | `TimeoutExpired` (extract) | `--floor all` 은 유지한다. 동시에 너무 많으면 `--workers` 를 줄인다. `for` 루프로 나누지 않는다 |
 | bash/Shell `timed out after 3600s` (extract) | 포그라운드 대기가 원인이다. `nohup … > /tmp/<id>_extract.log 2>&1 &` 로 재실행하고 로그·`extract_summary.json`을 폴링한다. timeout을 키워 포그라운드로 붙잡지 않는다 |
 | PNG에 도면이 좌·우 둘 | primary 클러스터(LINE 많은 쪽)만 bbox — `extract_2d` 공통 |
-| PNG에 기둥을 관통하는 긴 직교 격자(축선)가 남음 | 이름 패턴만으로 판단하지 않는다. 원본 레이어의 `CENTER*` linetype·긴 직교 LINE·규칙 간격·단독 `CEN` 여부를 검토한다. 축선이면 `is_axis_layer`를 확장하고 재추출. `G-CEN`/짧은 벽 중심선은 유지 |
+| PNG에 기둥을 관통하는 긴 직교 격자(축선)가 남음 | `drop_axis_layers`가 이름·`discover_axis_layers`(CEN/CENTER*+긴 격자)로 자동 제거한다. 그래도 남으면 원본 레이어를 검토해 `is_axis_layer`를 확장하고 재추출. `G-CEN`/Continuous 외벽은 유지 |
 | 치수 없음 | `--with-dims`, PNG 오버레이 + DXF `DIMS` 레이어 |
 | 원본 277MB 로드 실패 | 층별 `floor_original.dxf`를 먼저 만든 뒤 후속 스킬 |
 | `floor_structure.*` / `floor_*_2d.png` / `floor_overview.*` | 생성 금지 산출물 — `floors/<F>/floor_original.png`만 확인 |

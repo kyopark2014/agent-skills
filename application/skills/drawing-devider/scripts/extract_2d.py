@@ -901,9 +901,11 @@ def extract_floor(
     entities, skipped_hidden = drop_off_layer_hidden(doc, entities)
     if skipped_hidden:
         print(f"  off-layer hidden skipped: {skipped_hidden}")
-    entities, skipped_axis = drop_axis_layers(entities)
+    entities, skipped_axis, axis_info = drop_axis_layers(entities, doc=doc)
     if skipped_axis:
         print(f"  axis layers skipped: {skipped_axis}")
+    if axis_info.get("trait_layers"):
+        print(f"  axis layers by traits: {axis_info['trait_layers']}")
 
     raw_count = len(entities)
     # 필터는 항상 fresh 좌표의 코어 클러스터 기준 (조경 확장)
@@ -1141,9 +1143,11 @@ def extract_sheet_floor(
     entities, skipped_hidden = drop_off_layer_hidden(doc, entities)
     if skipped_hidden:
         print(f"  off-layer hidden skipped: {skipped_hidden}")
-    entities, skipped_axis = drop_axis_layers(entities)
+    entities, skipped_axis, axis_info = drop_axis_layers(entities, doc=doc)
     if skipped_axis:
         print(f"  axis layers skipped: {skipped_axis}")
+    if axis_info.get("trait_layers"):
+        print(f"  axis layers by traits: {axis_info['trait_layers']}")
 
     if not any(e.dxftype() in GEOM_TYPES for e in entities):
         raise RuntimeError(f"{floor}: 도곽 안에 기하가 없습니다 ({sheet.title})")
