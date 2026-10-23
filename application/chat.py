@@ -2511,12 +2511,27 @@ async def _run_langgraph_agent_impl(
             stop_reason = reason
             logger.info(f"[stop_reason] {stop_reason}")
 
-    async for stream in app.astream(inputs, agent_config, stream_mode="messages"):
+    # "custom" carries bash keepalive pings while a long shell command is quiet.
+    async for stream in app.astream(
+        inputs, agent_config, stream_mode=["messages", "custom"]
+    ):
         if session_id and run_cancel.is_cancelled(session_id):
             cancelled = True
             logger.info(f"Cancel detected for session {session_id}; stopping astream")
             break
 
+        if (
+            isinstance(stream, tuple)
+            and len(stream) == 2
+            and stream[0] in ("messages", "custom")
+        ):
+            mode, custom_payload = stream
+            if mode == "custom":
+                if isinstance(custom_payload, dict) and custom_payload.get("ping"):
+                    if notification_queue is not None and hasattr(notification_queue, "ping"):
+                        notification_queue.ping()
+                continue
+            stream = custom_payload
         chunk = stream[0] if isinstance(stream, (list, tuple)) and stream else stream
 
         if isinstance(chunk, AIMessageChunk):

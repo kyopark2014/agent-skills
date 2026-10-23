@@ -58,6 +58,7 @@ from correct._rules import (
     promote_diagonal_strip_windows,
     promote_diagonal_wall_turns,     promote_door_opening_flanks,
     promote_door_side_corner_runs, promote_door_side_doubles,
+    promote_thin_door_panel_sides,
     promote_wall_between_adjacent_doors,
     promote_double_sash_windows, promote_elevator_enclosure_walls,
     promote_end_wall_columns, promote_equipment_store_walls,
@@ -622,6 +623,7 @@ def apply_corrections(
     n_promoted += promote_door_opening_flanks(msp)
     n_promoted += promote_wall_between_adjacent_doors(msp)
     n_promoted += promote_door_side_doubles(msp)
+    n_promoted += promote_thin_door_panel_sides(msp)
     n_promoted += promote_door_side_corner_runs(msp)
     n_promoted += promote_service_core_walls(msp)
     n_promoted += promote_sanitary_fixtures(msp)

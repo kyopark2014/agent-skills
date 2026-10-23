@@ -1187,7 +1187,7 @@ def entity_wall_fraction(
 
 
 def _swing_door_leaves(entities: list[DXFEntity]) -> list[dict]:
-    """여닫이문 잎. 두께 20–80 mm, 폭 0.65–1.45 m 인 닫힌 얇은 사각형."""
+    """여닫이·얇은 미닫이 잎. 두께 15–80 mm, 폭 0.65–1.45 m 인 닫힌 얇은 사각형."""
     leaves: list[dict] = []
     for ei, entity in enumerate(entities):
         if entity.dxftype() != "LWPOLYLINE" or not entity.closed:
@@ -1199,7 +1199,8 @@ def _swing_door_leaves(entities: list[DXFEntity]) -> list[dict]:
         ys = [p[1] for p in pts]
         width, height = max(xs) - min(xs), max(ys) - min(ys)
         short, long = min(width, height), max(width, height)
-        if not (20.0 <= short <= 80.0 and 650.0 <= long <= 1450.0):
+        # 15: 오송클리닉 포켓 문짝(~19 mm)도 통과.
+        if not (15.0 <= short <= 80.0 and 650.0 <= long <= 1450.0):
             continue
         vertical = height >= width
         leaves.append(

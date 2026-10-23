@@ -22962,7 +22962,7 @@ def _axis_rect_bbox(entity) -> tuple[float, float, float, float] | None:
 
 
 def _oriented_thin_rect_panel(entity) -> dict | None:
-    """얇은 직사각 문짝(축정렬·사선). 두께 20–140 mm, 길이 600–1600 mm.
+    """얇은 직사각 문짝(축정렬·사선). 두께 20–140 mm, 길이 600–2000 mm.
 
     클럽하우스 1F 서비스동선 사선 미닫이(70×1500, ~45°)처럼 기울어진 닫힌
     사각도 문짝으로 본다. 대변 길이가 같고 이웃 변이 거의 직교해야 한다.
@@ -22998,7 +22998,7 @@ def _oriented_thin_rect_panel(entity) -> dict | None:
     else:
         long_len, short_len = lengths[1], lengths[0]
         long_edge = edges[1]
-    if not (600.0 <= long_len <= 1600.0 and 20.0 <= short_len <= 140.0):
+    if not (600.0 <= long_len <= 2000.0 and 20.0 <= short_len <= 140.0):
         return None
     _, x0, y0, x1, y1 = long_edge
     ux, uy = (x1 - x0) / long_len, (y1 - y0) / long_len
@@ -23073,11 +23073,12 @@ def _lr_hook_arrow_from_points(
 def _find_lr_arrow_sliding_doors(msp) -> list[dict]:
     """좌·우(또는 상·하) 화살표가 가리키는 축정렬 미닫이.
 
-    샤프트 0.5–1.6 m, 미늘 0.12–0.5 m, 꺾임 20–55°인 축정렬 3점 폴리선과,
+    샤프트 0.5–2.0 m, 미늘 0.12–0.5 m, 꺾임 20–55°인 축정렬 3점 폴리선과,
     샤프트 0.25–0.7 m·미늘 25–120 mm·팁 15–80 mm인 4점 훅 화살표(→)가
-    화살표다. 클럽하우스 PDR 열·1F 유리 베이·방풍실처럼 벽 두께 안의 얇은
-    직사각 문짝(또는 간격 12–50 mm 이중 LINE)과 화살표는 DOOR, 같은 벽면의
-    양옆·사이 구간은 WALL이다. 벽 이중면(≈80 mm)은 문짝으로 보지 않는다.
+    화살표다. 클럽하우스 PDR 열·1F 유리 베이·방풍실·계단실 DN 옆처럼 벽
+    두께 안의 얇은 직사각 문짝(또는 간격 12–50 mm 이중 LINE)과 화살표는
+    DOOR, 같은 벽면의 양옆·사이 구간은 WALL이다. 벽 이중면(≈80 mm)은
+    문짝으로 보지 않는다.
     """
     arrows: list[dict] = []
     for entity in _entities(msp):
@@ -23101,8 +23102,8 @@ def _find_lr_arrow_sliding_doors(msp) -> list[dict]:
         first = math.hypot(bx - ax, by - ay)
         second = math.hypot(cx - bx, cy - by)
         longer, shorter = max(first, second), min(first, second)
-        # 방풍실 미닫이 화살표는 샤프트 ~0.58 m (기존 0.7 m 하한보다 짧다).
-        if not (500.0 <= longer <= 1600.0 and 120.0 <= shorter <= 500.0):
+        # 방풍실 ~0.58 m, 계단실 DN 옆 세로 미닫이 ~1.82 m.
+        if not (500.0 <= longer <= 2000.0 and 120.0 <= shorter <= 500.0):
             continue
         if first >= second:
             sx0, sy0, sx1, sy1 = ax, ay, bx, by
@@ -23147,7 +23148,7 @@ def _find_lr_arrow_sliding_doors(msp) -> list[dict]:
         x0, y0, x1, y1 = box
         width, height = x1 - x0, y1 - y0
         long, short = max(width, height), min(width, height)
-        if not (600.0 <= long <= 1600.0 and 20.0 <= short <= 140.0):
+        if not (600.0 <= long <= 2000.0 and 20.0 <= short <= 140.0):
             continue
         horizontal = width >= height
         panels.append({
@@ -23178,7 +23179,7 @@ def _find_lr_arrow_sliding_doors(msp) -> list[dict]:
             continue
         dx, dy = abs(x1 - x0), abs(y1 - y0)
         length = math.hypot(dx, dy)
-        if not (600.0 <= length <= 1600.0):
+        if not (600.0 <= length <= 2000.0):
             continue
         if dx <= 2.0 and dy >= 0.95 * length:
             leaf_lines.append({
@@ -23349,13 +23350,13 @@ def _find_lr_arrow_sliding_doors(msp) -> list[dict]:
                 overlap = min(along1, open1) - max(along0, open0)
                 # 같은 벽면의 다른 문짝도 DOOR. 양옆·사이 두꺼운 면만 WALL.
                 panel_like = (
-                    600.0 <= along_span <= 1600.0
+                    600.0 <= along_span <= 2000.0
                     and 20.0 <= perp_span <= 140.0
                 )
                 # 이중 LINE 문짝의 짝·같은 개구의 다른 단도 DOOR.
                 line_leaf_like = (
                     kind == "LINE"
-                    and 600.0 <= along_span <= 1600.0
+                    and 600.0 <= along_span <= 2000.0
                     and perp_span <= 2.0
                     and face0 - 20.0 <= perp_mid <= face1 + 20.0
                     and overlap >= 0.5 * along_span
@@ -25127,6 +25128,106 @@ def promote_door_side_doubles(msp) -> int:
                     if _paint_layer(entity, WALL_LAYER, WALL_COLOR):
                         painted.add(id(entity))
                         n += 1
+    return n
+
+
+def promote_thin_door_panel_sides(msp) -> int:
+    """얇은 닫힌 DOOR 문짝 양옆 면과, 그 벽면으로 이어진 두께 띠는 WALL.
+
+    ARC 없이 얇은 직사각 문짝(15–90 mm)만 있는 여닫이에서, 문짝 두께 방향
+    바로 옆의 얇은 면(3–40 mm)과 문 끝에서 이어진 80–350 mm 벽 띠를 올린다.
+    스윙 열린 문짝(사선 직사각)은 올리지 않는다.
+    클럽하우스 1F 창고 스윙문 옆이 그 예다.
+    """
+    doors: list[dict] = []
+    bars: list[dict] = []
+    for entity in _entities(msp):
+        if _dxftype(entity) != "LWPOLYLINE":
+            continue
+        closed = bool(getattr(entity, "closed", False))
+        try:
+            pts = [(float(x), float(y)) for x, y in entity.get_points("xy")]
+        except Exception:  # noqa: BLE001
+            continue
+        if len(pts) >= 2 and math.hypot(pts[0][0] - pts[-1][0], pts[0][1] - pts[-1][1]) <= 1.0:
+            pts = pts[:-1]
+            closed = True
+        if not closed or len(pts) != 4:
+            continue
+        # 축정렬 사각만. 스윙 열린 사선 문짝은 제외.
+        axis = True
+        for index in range(4):
+            x0, y0 = pts[index]
+            x1, y1 = pts[(index + 1) % 4]
+            if min(abs(x1 - x0), abs(y1 - y0)) > 2.0:
+                axis = False
+                break
+        if not axis:
+            continue
+        xs = [p[0] for p in pts]
+        ys = [p[1] for p in pts]
+        x0, x1 = min(xs), max(xs)
+        y0, y1 = min(ys), max(ys)
+        width, height = x1 - x0, y1 - y0
+        thin, long = min(width, height), max(width, height)
+        horizontal = width >= height
+        layer = getattr(entity.dxf, "layer", None)
+        rec = {
+            "entity": entity,
+            "horizontal": horizontal,
+            "thin": thin,
+            "long": long,
+            "face0": y0 if horizontal else x0,
+            "face1": y1 if horizontal else x1,
+            "a0": x0 if horizontal else y0,
+            "a1": x1 if horizontal else y1,
+            "layer": layer,
+        }
+        if layer == DOOR_LAYER and 15.0 <= thin <= 90.0 and 500.0 <= long <= 2000.0:
+            doors.append(rec)
+        elif layer == BASE_LAYER and (
+            (3.0 <= thin <= 40.0 and 400.0 <= long <= 2500.0)
+            or (80.0 <= thin <= 350.0 and 700.0 <= long <= 12000.0)
+        ):
+            bars.append(rec)
+    if not doors or not bars:
+        return 0
+
+    painted: set[int] = set()
+    n = 0
+    for door in doors:
+        for bar in bars:
+            if id(bar["entity"]) in painted:
+                continue
+            if bar["horizontal"] != door["horizontal"]:
+                continue
+            # 문짝 두께 띠와 겹치거나 바로 옆(면 간격 ≤ 40 mm).
+            face_overlap = min(bar["face1"], door["face1"]) - max(bar["face0"], door["face0"])
+            face_gap = max(bar["face0"], door["face0"]) - min(bar["face1"], door["face1"])
+            if face_overlap < -40.0 and face_gap > 40.0:
+                continue
+            along_overlap = min(bar["a1"], door["a1"]) - max(bar["a0"], door["a0"])
+            # (1) 얇은 문틀 면: 문짝과 길이 대부분 겹침.
+            thin_jamb = (
+                bar["thin"] <= 40.0
+                and along_overlap >= 0.55 * min(bar["long"], door["long"])
+                and face_gap <= 40.0
+            )
+            # (2) 벽 두께 띠: 문 끝에서 같은 벽면으로 이어짐(끊김 ≤ 250 mm).
+            wall_bar = (
+                bar["thin"] >= 80.0
+                and face_overlap >= 0.5 * door["thin"]
+                and (
+                    (0.0 <= door["a0"] - bar["a1"] <= 250.0)
+                    or (0.0 <= bar["a0"] - door["a1"] <= 250.0)
+                    or along_overlap >= 80.0
+                )
+            )
+            if not (thin_jamb or wall_bar):
+                continue
+            if _paint_layer(bar["entity"], WALL_LAYER, WALL_COLOR):
+                painted.add(id(bar["entity"]))
+                n += 1
     return n
 
 

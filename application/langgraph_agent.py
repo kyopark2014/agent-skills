@@ -1005,6 +1005,9 @@ def upload_file_to_s3(filepath: str) -> str:
         return f"Upload failed: {str(e)}"
 
 _BASH_TIMEOUT_SECONDS = 3600
+# Keep the app↔agent SSE / ALB idle timer alive during long silent commands.
+BASH_HEARTBEAT_SECONDS = 60
+
 
 
 def _bash_cancel_key() -> str | None:
@@ -1030,6 +1033,17 @@ def _kill_bash_group(pgid: int) -> None:
             return
 
 
+
+def _bash_stream_writer():
+    """LangGraph custom stream writer, or None outside a graph run."""
+    try:
+        from langgraph.config import get_stream_writer
+
+        return get_stream_writer()
+    except Exception:
+        return None
+
+
 @tool
 def bash(command: str) -> str:
     """Execute a bash command and return the result.
@@ -1047,6 +1061,8 @@ def bash(command: str) -> str:
     _ensure_user_site_on_sys_path()
     _ensure_node_path()
     cancel_key = _bash_cancel_key()
+    writer = _bash_stream_writer()
+    last_emit = time.monotonic()
     # start_new_session: this shell is its own process-group leader, so Stop
     # and the timeout can signal the shell and the children together.
     proc = subprocess.Popen(
@@ -1078,6 +1094,13 @@ def bash(command: str) -> str:
                 stdout, stderr = proc.communicate(timeout=min(remaining, 0.25))
                 break
             except subprocess.TimeoutExpired:
+                now = time.monotonic()
+                if writer is not None and now - last_emit >= BASH_HEARTBEAT_SECONDS:
+                    last_emit = now
+                    try:
+                        writer({"ping": True})
+                    except Exception:
+                        logger.debug("bash keepalive write failed", exc_info=True)
                 continue
     finally:
         if proc.poll() is None:

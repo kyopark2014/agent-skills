@@ -29,7 +29,7 @@ const RATING_OPTIONS: Array<{ value: DrawingRating; label: string }> = [
   { value: "bad", label: "나쁨" },
   { value: "review", label: "검토" },
   { value: "confirmed", label: "확인" },
-  { value: "retest", label: "다시" },
+  { value: "retest", label: "제외" },
 ];
 
 function normalizeRating(value: string | undefined | null): DrawingRating {
@@ -313,6 +313,7 @@ export function DrawingView({ drawingId, initialFloor, onMenuClick, onBack }: Pr
   const [labelData, setLabelData] = useState<DrawingFloorLabels | null>(null);
   const [labelError, setLabelError] = useState<string | null>(null);
   const [legendHidden, setLegendHidden] = useState(false);
+  const [labelsHidden, setLabelsHidden] = useState(false);
   const [selectedLabels, setSelectedLabels] = useState<Set<string>>(() => new Set());
   const [legendPos, setLegendPos] = useState<{ left: number; top: number } | null>(null);
   const [legendDragging, setLegendDragging] = useState(false);
@@ -430,6 +431,7 @@ export function DrawingView({ drawingId, initialFloor, onMenuClick, onBack }: Pr
     setLabelError(null);
     setSelectedLabels(new Set());
     setLegendHidden(false);
+    setLabelsHidden(false);
     setLegendPos(null);
     setRectDrawMode(false);
     setExcludeDrawMode(false);
@@ -1191,6 +1193,20 @@ export function DrawingView({ drawingId, initialFloor, onMenuClick, onBack }: Pr
                   {legendHidden ? "범례 보이기" : "범례 숨기기"}
                 </button>
               ) : null}
+              {kind === "summary" && legendActive && (labelData || labelError) ? (
+                <button
+                  type="button"
+                  className="drawing-legend-toggle"
+                  onClick={() => setLabelsHidden((value) => !value)}
+                  title={
+                    labelsHidden
+                      ? "면적 위 라벨 텍스트를 다시 표시"
+                      : "면적 위 라벨 텍스트를 숨겨 색칠된 영역만 보기"
+                  }
+                >
+                  {labelsHidden ? "라벨 보이기" : "라벨 숨기기"}
+                </button>
+              ) : null}
               {canAddLabel ? (
                 <button
                   type="button"
@@ -1386,20 +1402,22 @@ export function DrawingView({ drawingId, initialFloor, onMenuClick, onBack }: Pr
                         />
                       ));
                     })}
-                    {overlayLabels.map((item) => {
-                      if (!selectedLabels.has(item.label)) return null;
-                      const fontSize = tagFontSize(
-                        labelData?.overlay?.width || naturalRef.current.width || 2000,
-                      );
-                      return (item.tags ?? []).map((tag, index) => (
-                        <SummaryLabelTag
-                          key={`${item.label}-tag-${index}`}
-                          tag={tag}
-                          color={item.color}
-                          fontSize={fontSize}
-                        />
-                      ));
-                    })}
+                    {!labelsHidden
+                      ? overlayLabels.map((item) => {
+                          if (!selectedLabels.has(item.label)) return null;
+                          const fontSize = tagFontSize(
+                            labelData?.overlay?.width || naturalRef.current.width || 2000,
+                          );
+                          return (item.tags ?? []).map((tag, index) => (
+                            <SummaryLabelTag
+                              key={`${item.label}-tag-${index}`}
+                              tag={tag}
+                              color={item.color}
+                              fontSize={fontSize}
+                            />
+                          ));
+                        })
+                      : null}
                     {rectDraft ? (
                       <rect
                         x={Math.min(rectDraft.x0, rectDraft.x1)}

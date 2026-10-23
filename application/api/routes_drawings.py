@@ -1393,7 +1393,7 @@ def set_drawing_rating(artifacts: Path, drawing_id: str, rating: str) -> dict:
         raise HTTPException(status_code=400, detail="Invalid drawing id")
     normalized = _normalize_rating(rating)
     if str(rating or "").strip().lower() not in _RATING_VALUES:
-        raise HTTPException(status_code=400, detail="평가는 대기, 좋음, 중립, 나쁨, 검토, 확인, 다시 중 하나여야 합니다.")
+        raise HTTPException(status_code=400, detail="평가는 대기, 좋음, 중립, 나쁨, 검토, 확인, 제외 중 하나여야 합니다.")
     catalog = load_drawing_catalog(artifacts)
     entry = _find_entry(catalog, drawing_id)
     if entry is None:

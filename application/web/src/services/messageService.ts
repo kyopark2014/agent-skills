@@ -1,5 +1,5 @@
 import { randomUUID } from "../randomUUID";
-import type { Message } from "../types";
+import type { Message, TaskRun, ToolEvent } from "../types";
 
 /** Keep optimistic `pending-*` ids when server rows match, to avoid remount flicker. */
 export function stabilizeMessageKeys(prev: Message[], next: Message[]): Message[] {
@@ -84,4 +84,53 @@ export function shouldAppendAssistantMessage(
   } | null | undefined,
 ): boolean {
   return Boolean(final && (final.content || final.tool_events.length > 0));
+}
+
+/**
+ * Merge a live /run draft into the open thread without re-fetching /messages.
+ * Used during refresh recovery while the agent is still running.
+ */
+export function applyRunDraftToMessages(
+  prev: Message[],
+  taskId: string,
+  run: Pick<TaskRun, "content" | "images" | "tool_events">,
+): Message[] {
+  const content = run.content || "";
+  const images = run.images || [];
+  const toolEvents: ToolEvent[] = run.tool_events || [];
+  if (!content && images.length === 0 && toolEvents.length === 0) {
+    return prev;
+  }
+
+  const last = prev[prev.length - 1];
+  if (last?.role === "assistant" && last.status === "streaming") {
+    return [
+      ...prev.slice(0, -1),
+      {
+        ...last,
+        content,
+        images,
+        tool_events: toolEvents,
+        status: "streaming",
+      },
+    ];
+  }
+
+  if (last?.role === "user") {
+    return [
+      ...prev,
+      {
+        id: `recovery-assistant-${taskId}`,
+        task_id: taskId,
+        role: "assistant",
+        content,
+        images,
+        tool_events: toolEvents,
+        status: "streaming",
+        created_at: new Date().toISOString(),
+      },
+    ];
+  }
+
+  return prev;
 }

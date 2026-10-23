@@ -16,7 +16,7 @@ const RATING_OPTIONS: Array<{ value: DrawingRating; label: string }> = [
   { value: "bad", label: "나쁨" },
   { value: "review", label: "검토" },
   { value: "confirmed", label: "확인" },
-  { value: "retest", label: "다시" },
+  { value: "retest", label: "제외" },
 ];
 
 function normalizeRating(value: string | undefined | null): DrawingRating {

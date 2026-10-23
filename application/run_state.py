@@ -22,6 +22,7 @@ from application import chat
 from application import run_registry
 from application import task_store
 from application.task_store_persistence import flush_persist
+from application.tool_events_slim import slim_tool_events
 
 logger = logging.getLogger("run_state")
 
@@ -384,6 +385,9 @@ def query_task_run(task_id: str, user_id: str) -> dict[str, Any]:
     if reg and reg.get("status") == "running":
         draft_content = (last.get("content") or "") if last_streaming and last else ""
         draft_images = list(last.get("images") or []) if last_streaming and last else []
+        live_events = list(reg.get("tool_events") or [])
+        if not live_events and last_streaming and last:
+            live_events = list(last.get("tool_events") or [])
         return {
             "task_id": task_id,
             "status": "running",
@@ -392,6 +396,7 @@ def query_task_run(task_id: str, user_id: str) -> dict[str, Any]:
             "error": None,
             "source": "registry" if not last_streaming else "messages",
             "hydrated": False,
+            "tool_events": slim_tool_events(live_events),
         }
 
     if reg and reg.get("status") in ("done", "error"):

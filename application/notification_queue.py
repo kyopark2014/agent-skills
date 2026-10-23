@@ -23,6 +23,10 @@ class QueueNotificationSink:
         self._streaming_slot = None
         self._q.put({"type": "info", "data": message})
 
+    def ping(self):
+        """Reset stream idle timers without changing the visible transcript."""
+        self._q.put({"type": "ping"})
+
     def respond(self, message: str):
         self._streaming_slot = None
         self._q.put({"type": "markdown", "data": message})

@@ -128,4 +128,5 @@ export interface TaskRun {
   error?: string | null;
   source?: "messages" | "registry" | "checkpoint" | null;
   hydrated: boolean;
+  tool_events?: ToolEvent[];
 }

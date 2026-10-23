@@ -710,6 +710,9 @@ def chat_stream(task_id: str, body: ChatRequest, request: Request):
                 # Progress received — extend idle window.
                 deadline = time.monotonic() + AGENT_STREAM_TIMEOUT_SECONDS
 
+                if isinstance(item, dict) and item.get("type") == "ping":
+                    continue
+
                 streamed_text, events_to_emit = _consume_queue_item(
                     item,
                     tool_events=tool_events,

@@ -135,9 +135,9 @@ class LrArrowSlidingDoorTests(unittest.TestCase):
         """클럽하우스 1F 방풍실: 짧은 3점 화살표 + 이중 LINE 문짝 → DOOR."""
         doc = ezdxf.new()
         msp = doc.modelspace()
-        # 문 위·아래 플랭크(문짝 후보 길이 600–1600 밖인 위쪽 1800 mm 포함).
-        wall_above_a = msp.add_line((0.0, 1200.0), (0.0, 3000.0), dxfattribs={"layer": "BASE"})
-        wall_above_b = msp.add_line((80.0, 1200.0), (80.0, 3000.0), dxfattribs={"layer": "BASE"})
+        # 문 위·아래 플랭크(문짝 후보 길이 600–2000 밖인 위쪽 2500 mm 포함).
+        wall_above_a = msp.add_line((0.0, 1200.0), (0.0, 3700.0), dxfattribs={"layer": "BASE"})
+        wall_above_b = msp.add_line((80.0, 1200.0), (80.0, 3700.0), dxfattribs={"layer": "BASE"})
         wall_below_a = msp.add_line((0.0, -1000.0), (0.0, 0.0), dxfattribs={"layer": "BASE"})
         wall_below_b = msp.add_line((80.0, -1000.0), (80.0, 0.0), dxfattribs={"layer": "BASE"})
         leaf_a = msp.add_line((28.0, 50.0), (28.0, 1100.0), dxfattribs={"layer": "BASE"})
@@ -167,6 +167,31 @@ class LrArrowSlidingDoorTests(unittest.TestCase):
         lib_llm_correct.promote_line_sash_windows(msp)
         self.assertEqual(leaf_a.dxf.layer, "DOOR")
         self.assertEqual(leaf_b.dxf.layer, "DOOR")
+
+    def test_tall_vertical_arrow_panel_becomes_door(self):
+        """클럽하우스 1F 계단실 DN 옆: 긴 세로 --> + 70×1900 문짝 → DOOR."""
+        doc = ezdxf.new()
+        msp = doc.modelspace()
+        wall_above = _rect(msp, 0, 2000, 150, 3500)
+        panel = _rect(msp, 40, 50, 110, 1950)
+        wall_below = _rect(msp, 0, -1200, 150, 0)
+        # 상→하 화살표 (샤프트 1817, 미늘 449, 꺾임 ~37°)
+        arrow = msp.add_lwpolyline(
+            [(-400.0, 1950.0), (-400.0, 133.0), (-669.0, 492.0)],
+            dxfattribs={"layer": "BASE"},
+        )
+        arrow.closed = False
+        far = _rect(msp, 20000, 0, 20150, 1900)
+
+        demoted, promoted = lib_llm_correct.separate_lr_arrow_sliding_doors(msp)
+
+        self.assertGreaterEqual(demoted, 2)
+        self.assertGreaterEqual(promoted, 1)
+        self.assertEqual(panel.dxf.layer, "DOOR")
+        self.assertEqual(arrow.dxf.layer, "DOOR")
+        self.assertEqual(wall_above.dxf.layer, "WALL")
+        self.assertEqual(wall_below.dxf.layer, "WALL")
+        self.assertEqual(far.dxf.layer, "BASE")
 
 
 if __name__ == "__main__":

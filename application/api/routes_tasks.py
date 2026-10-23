@@ -140,7 +140,10 @@ def get_messages(task_id: str, request: Request):
     task = task_store.get_task_refreshing(task_id, user_id)
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
-    return {"messages": task_store.list_messages(task_id, user_id)}
+    from application.tool_events_slim import slim_messages_for_api
+
+    messages = task_store.list_messages(task_id, user_id)
+    return {"messages": slim_messages_for_api(messages)}
 
 
 @router.get("/{task_id}/run")
