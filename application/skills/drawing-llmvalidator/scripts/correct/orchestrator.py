@@ -47,7 +47,8 @@ from correct._rules import (
     promote_bathroom_label_walls, promote_bay_window_outlines,
     promote_orthogonal_bay_windows,
     promote_bottom_column_run, promote_butt_partitions, promote_capped_triple_walls,
-    promote_capped_windows, promote_closed_square_columns,
+    promote_capped_windows, promote_cavity_glass_windows, promote_window_side_piers,
+    promote_closed_square_columns,
     promote_concentric_double_square_columns, promote_round_columns,
     find_round_column_rings,
     promote_collinear_room_walls, promote_collinear_swing_sides,
@@ -56,7 +57,7 @@ from correct._rules import (
     promote_corridor_door_flanks, promote_corridor_walls, promote_crossed_x_walls,
     promote_curved_corner_walls, promote_diagonal_hatch_walls,
     promote_diagonal_strip_windows,
-    promote_diagonal_wall_turns,     promote_door_opening_flanks,
+    promote_diagonal_wall_turns, promote_door_opening_flanks,
     promote_door_side_corner_runs, promote_door_side_doubles,
     promote_thin_door_panel_sides, close_thin_door_panel_flank_gaps,
     promote_wall_between_adjacent_doors,
@@ -91,6 +92,7 @@ from correct._rules import (
     remove_swing_squares, review_demote_keep_ids, review_demote_ids,
     separate_arrow_sliding_doors,
     separate_diagonal_observation_windows, separate_diagonal_pocket_face_doors,
+    separate_sawtooth_diagonal_windows,
     separate_diagonal_swing_doors, separate_locker_entrance_doors,
     separate_partial_arc_radial_swing_doors,
     separate_lr_arrow_sliding_doors, separate_observation_windows,
@@ -616,6 +618,10 @@ def apply_corrections(
     n_promoted += n_diag_strip_window + n_diag_strip_wall
     n_mullion_window, n_mullion_wall = promote_mullion_strip_windows(msp)
     n_promoted += n_mullion_window + n_mullion_wall
+    n_cav_window, n_cav_wall = promote_cavity_glass_windows(msp)
+    n_promoted += n_cav_window + n_cav_wall
+    n_pier_window, n_pier_wall = promote_window_side_piers(msp)
+    n_promoted += n_pier_window + n_pier_wall
     # 직교 베이: WINDOW 사이 갭의 return·바깥면. 창 레이어 분리 뒤에 올린다.
     n_promoted += promote_orthogonal_bay_windows(msp)
     # 문 가상 닫힘으로 생긴 사각 슬리브(문옆 기둥)도 H/슬리브 규칙으로 올린다.
@@ -648,6 +654,9 @@ def apply_corrections(
     n_promoted += promote_x_cover_squares(msp)
     n_promoted += promote_triple_diagonal_walls(msp)
     n_promoted += promote_slanted_double_walls(msp)
+    # 톱니 외벽 긴 사선은 창. 기울어진 이중선 승격이 벽으로 올린 뒤 되돌린다.
+    n_saw_window, n_saw_wall = separate_sawtooth_diagonal_windows(msp)
+    n_promoted += n_saw_window + n_saw_wall
     # 곡선 모서리는 양끝이 WALL에 닿아야 한다. 기울어진 이중선 승격 뒤에 올린다.
     n_promoted += promote_curved_corner_walls(msp)
     # 앞선 문 처리가 가로·세로가 아닌 양개문은 닫지 않는다. 마지막에 힌지 사이를 잇는다.

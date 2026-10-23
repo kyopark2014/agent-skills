@@ -9,7 +9,10 @@ from __future__ import annotations
 from correct._rules import (  # noqa: F401
     separate_observation_windows,
     separate_diagonal_observation_windows,
+    separate_sawtooth_diagonal_windows,
     promote_capped_windows,
+    promote_cavity_glass_windows,
+    promote_window_side_piers,
     promote_double_sash_windows,
     promote_line_sash_windows,
     promote_strip_windows,

@@ -24822,6 +24822,193 @@ def separate_diagonal_observation_windows(msp) -> tuple[int, int]:
     return n_window, n_wall
 
 
+def _find_sawtooth_diagonal_windows(msp) -> list[dict]:
+    """톱니 외벽의 긴 사선 유리면과 창 사이 연결면을 찾는다.
+
+    길이 1.8–3.0 m 사선이 15–45 mm 이중선이고, 양끝에 연결면이 있으면
+    긴 면은 창이다. 창 끝에 닿은 연결면(직교 return·67° 접힘)과, 그
+    연결에 이어진 짧은 유리 방향 팁은 벽이다. 양쪽 창 사이 삼각 접합이
+    그 예다. 만성초 일반교실·복도 옆 톱니 외벽이 해당한다.
+    """
+    axis_limit = math.radians(8.0)
+    records: list[dict] = []
+    for entity in _entities(msp):
+        if _dxftype(entity) != "LINE":
+            continue
+        if getattr(entity.dxf, "layer", None) not in (
+            WALL_LAYER,
+            BASE_LAYER,
+            WINDOW_LAYER,
+        ):
+            continue
+        try:
+            x0, y0, x1, y1 = _line_xy(entity)
+        except Exception:  # noqa: BLE001
+            continue
+        length = math.hypot(x1 - x0, y1 - y0)
+        if length < 80.0:
+            continue
+        ang = math.atan2(y1 - y0, x1 - x0)
+        if ang < 0.0 or ang >= math.pi:
+            x0, y0, x1, y1 = x1, y1, x0, y0
+            ang = math.atan2(y1 - y0, x1 - x0)
+            length = math.hypot(x1 - x0, y1 - y0)
+        ux, uy = math.cos(ang), math.sin(ang)
+        records.append(
+            {
+                "entity": entity,
+                "x0": x0,
+                "y0": y0,
+                "x1": x1,
+                "y1": y1,
+                "length": length,
+                "ux": ux,
+                "uy": uy,
+                "nx": -uy,
+                "ny": ux,
+                "ang": ang,
+                "layer": entity.dxf.layer,
+            }
+        )
+
+    def _along(origin: dict, x: float, y: float) -> float:
+        return (x - origin["x0"]) * origin["ux"] + (y - origin["y0"]) * origin["uy"]
+
+    def _perp(origin: dict, x: float, y: float) -> float:
+        return (x - origin["x0"]) * origin["nx"] + (y - origin["y0"]) * origin["ny"]
+
+    def _end_hits(face: dict, ex: float, ey: float) -> list[dict]:
+        """창 끝에 닿은 연결면. 직교뿐 아니라 접힘(약 67°)도 포함한다."""
+        hits: list[dict] = []
+        for rec in records:
+            if rec is face:
+                continue
+            if not (80.0 <= rec["length"] <= 2000.0):
+                continue
+            parallel = abs(rec["ux"] * face["ux"] + rec["uy"] * face["uy"]) >= 0.995
+            # 유리 짝(같은 길이 평행선)은 연결면이 아니다.
+            if parallel and abs(rec["length"] - face["length"]) < 200.0:
+                continue
+            d0 = math.hypot(rec["x0"] - ex, rec["y0"] - ey)
+            d1 = math.hypot(rec["x1"] - ex, rec["y1"] - ey)
+            if min(d0, d1) > 160.0:
+                continue
+            hits.append(rec)
+        return hits
+
+    def _tip_faces(face: dict, walls: list[dict]) -> list[dict]:
+        """창 사이 삼각 팁. 연결면에 이어진 짧은 유리 방향 선."""
+        if not walls:
+            return []
+        ends: list[tuple[float, float]] = []
+        for wall in walls:
+            ends.append((wall["x0"], wall["y0"]))
+            ends.append((wall["x1"], wall["y1"]))
+        tips: list[dict] = []
+        for rec in records:
+            if rec is face or rec["layer"] not in (BASE_LAYER, WALL_LAYER):
+                continue
+            if not (500.0 <= rec["length"] <= 1100.0):
+                continue
+            if abs(rec["ux"] * face["ux"] + rec["uy"] * face["uy"]) < 0.995:
+                continue
+            if abs(rec["length"] - face["length"]) < 200.0:
+                continue
+            for ex, ey in ends:
+                d0 = math.hypot(rec["x0"] - ex, rec["y0"] - ey)
+                d1 = math.hypot(rec["x1"] - ex, rec["y1"] - ey)
+                if min(d0, d1) <= 400.0:
+                    tips.append(rec)
+                    break
+        return tips
+
+    cands = [
+        rec
+        for rec in records
+        if 1800.0 <= rec["length"] <= 3000.0
+        and rec["ang"] >= axis_limit
+        and rec["ang"] <= math.pi - axis_limit
+        and abs(rec["ang"] - math.pi / 2.0) >= axis_limit
+        and rec["layer"] in (WALL_LAYER, BASE_LAYER, WINDOW_LAYER)
+    ]
+    found: list[dict] = []
+    used_glass: set[int] = set()
+    for index, left in enumerate(cands):
+        if id(left["entity"]) in used_glass:
+            continue
+        for right in cands[index + 1 :]:
+            if id(right["entity"]) in used_glass:
+                continue
+            if left["ux"] * right["ux"] + left["uy"] * right["uy"] < 0.995:
+                continue
+            mx = (right["x0"] + right["x1"]) * 0.5
+            my = (right["y0"] + right["y1"]) * 0.5
+            sep = abs(_perp(left, mx, my))
+            if not (15.0 <= sep <= 45.0):
+                continue
+            lo = max(
+                0.0,
+                min(_along(left, right["x0"], right["y0"]), _along(left, right["x1"], right["y1"])),
+            )
+            hi = min(
+                left["length"],
+                max(_along(left, right["x0"], right["y0"]), _along(left, right["x1"], right["y1"])),
+            )
+            if hi - lo < 0.85 * min(left["length"], right["length"]):
+                continue
+            side_a = _end_hits(left, left["x0"], left["y0"])
+            side_b = _end_hits(left, left["x1"], left["y1"])
+            if not side_a or not side_b:
+                continue
+            glass = [left, right]
+            used_glass.add(id(left["entity"]))
+            used_glass.add(id(right["entity"]))
+            wall_recs = list(side_a) + list(side_b)
+            wall_recs.extend(_tip_faces(left, wall_recs))
+            walls: list = []
+            seen_wall: set[int] = set()
+            for side in wall_recs:
+                entity = side["entity"]
+                if id(entity) in seen_wall or id(entity) in used_glass:
+                    continue
+                seen_wall.add(id(entity))
+                walls.append(entity)
+            found.append(
+                {
+                    "glass": [rec["entity"] for rec in glass],
+                    "wall": walls,
+                }
+            )
+            break
+    return found
+
+
+def separate_sawtooth_diagonal_windows(msp) -> tuple[int, int]:
+    """톱니 외벽의 긴 사선 유리면은 창이고, 창 사이 연결·접힘은 벽이다.
+
+    기울어진 이중선 승격이 유리면을 벽으로 올린 뒤에 되돌린다.
+    양쪽 창 사이 삼각 접합(복도-4 옆)도 WALL로 올린다.
+    만성초 일반교실 옆 톱니 외벽이 그 예다.
+    """
+    n_window = 0
+    n_wall = 0
+    painted: set[int] = set()
+    for window in _find_sawtooth_diagonal_windows(msp):
+        for entity in window["glass"]:
+            if id(entity) in painted:
+                continue
+            painted.add(id(entity))
+            if _mark_window(entity):
+                n_window += 1
+        for entity in window["wall"]:
+            if id(entity) in painted:
+                continue
+            painted.add(id(entity))
+            if _paint_layer(entity, WALL_LAYER, WALL_COLOR):
+                n_wall += 1
+    return n_window, n_wall
+
+
 def separate_observation_windows(msp) -> tuple[int, int]:
     """관찰창 유리도 벽으로 올리고, 양옆 벽과 끝막이도 벽으로 둔다."""
     n_window = 0
@@ -30673,6 +30860,219 @@ def promote_mullion_strip_windows(msp) -> tuple[int, int]:
             if _paint_layer(entity, WALL_LAYER, WALL_COLOR):
                 n_wall += 1
             painted.add(id(entity))
+    return n_window, n_wall
+
+
+def promote_cavity_glass_windows(msp) -> tuple[int, int]:
+    """이중벽 면 사이 한가운데 평행 유리선은 창이다.
+
+    벽 두께(80–350 mm) 이중 WALL 면 사이에 놓인 길이 0.6–2.5 m BASE 평행선을
+    WINDOW로 올린다(면적 경계는 벽처럼 읽는다). 유리 양끝에서 면을 막는
+    짧은 직교선은 WALL로 둔다. 만성초 1F 홀-5 옆 방풍 상단 외창이 그 예다.
+    """
+    walls: list[tuple[object, str, float, float, float, float]] = []
+    bases: list[tuple[object, str, float, float, float, float]] = []
+    for entity in _entities(msp):
+        axis = _axis_line(entity)
+        if axis is None:
+            continue
+        ori, coord, a0, a1, length = axis
+        layer = getattr(entity.dxf, "layer", None)
+        if layer == WALL_LAYER and length >= 800.0:
+            walls.append((entity, ori, coord, a0, a1, length))
+        elif layer in (BASE_LAYER, WINDOW_LAYER) and 600.0 <= length <= 2500.0:
+            bases.append((entity, ori, coord, a0, a1, length))
+    if len(walls) < 2 or not bases:
+        return (0, 0)
+
+    def _overlap(a0: float, a1: float, b0: float, b1: float) -> float:
+        return max(0.0, min(a1, b1) - max(a0, b0))
+
+    cavities: list[tuple[str, float, float, float, float]] = []
+    seen_cav: set[tuple] = set()
+    for i, (_ea, ori_a, ca, a0, a1, _la) in enumerate(walls):
+        for _eb, ori_b, cb, b0, b1, _lb in walls[i + 1 :]:
+            if ori_a != ori_b:
+                continue
+            gap = abs(ca - cb)
+            if not (80.0 <= gap <= 350.0):
+                continue
+            ov = _overlap(a0, a1, b0, b1)
+            if ov < 800.0:
+                continue
+            lo, hi = min(ca, cb), max(ca, cb)
+            span0, span1 = max(a0, b0), min(a1, b1)
+            key = (ori_a, round(lo / 10.0), round(hi / 10.0), round(span0 / 50.0))
+            if key in seen_cav:
+                continue
+            seen_cav.add(key)
+            cavities.append((ori_a, lo, hi, span0, span1))
+    if not cavities:
+        return (0, 0)
+
+    n_window = 0
+    n_wall = 0
+    painted: set[int] = set()
+    glass_spans: list[tuple[str, float, float, float, float]] = []
+    for entity, ori, coord, a0, a1, length in bases:
+        if id(entity) in painted:
+            continue
+        for cav_ori, lo, hi, span0, span1 in cavities:
+            if ori != cav_ori:
+                continue
+            if not (lo + 8.0 <= coord <= hi - 8.0):
+                continue
+            if _overlap(a0, a1, span0, span1) < 0.7 * length:
+                continue
+            if _mark_window(entity):
+                n_window += 1
+            painted.add(id(entity))
+            glass_spans.append((ori, lo, hi, a0, a1))
+            break
+
+    for entity in _entities(msp):
+        if id(entity) in painted:
+            continue
+        axis = _axis_line(entity)
+        if axis is None:
+            continue
+        if getattr(entity.dxf, "layer", None) not in (BASE_LAYER, WALL_LAYER, WINDOW_LAYER):
+            continue
+        ori, coord, a0, a1, length = axis
+        if not (40.0 <= length <= 400.0):
+            continue
+        for glass_ori, lo, hi, g0, g1 in glass_spans:
+            if ori == glass_ori:
+                continue
+            depth = hi - lo
+            if not (depth - 25.0 <= length <= depth + 25.0):
+                continue
+            if not (lo - 15.0 <= a0 and a1 <= hi + 15.0):
+                continue
+            if min(abs(coord - g0), abs(coord - g1)) > 40.0:
+                continue
+            if _paint_layer(entity, WALL_LAYER, WALL_COLOR):
+                n_wall += 1
+            painted.add(id(entity))
+            break
+    return n_window, n_wall
+
+
+def promote_window_side_piers(msp) -> tuple[int, int]:
+    """창문 유리 양옆(기둥 사이) 짧은 이중선은 벽이다.
+
+    간격 40–100 mm·길이 0.8–1.5 m 평행 이중선은 유리(WINDOW).
+    그 개구 양끝에서 같은 외벽 두께(간격 120–180 mm)로 이어진
+    짧은 이중선(250–550 mm)은 WALL. 유리가 외벽 면 사이에 끼고
+    피어가 유리 끝에 닿을 때만 올린다. 만성초 3F 실내체육관 상부
+    OPEN 오른쪽·과학준비실-1 아래가 그 예다.
+    """
+    segs: list[tuple[object, str, float, float, float, float]] = []
+    for entity in _entities(msp):
+        axis = _axis_line(entity)
+        if axis is None:
+            continue
+        if getattr(entity.dxf, "layer", None) not in (
+            WALL_LAYER, BASE_LAYER, DOOR_LAYER, WINDOW_LAYER,
+        ):
+            continue
+        ori, coord, a0, a1, length = axis
+        segs.append((entity, ori, coord, a0, a1, length))
+    if len(segs) < 4:
+        return (0, 0)
+
+    def _overlap(a0: float, a1: float, b0: float, b1: float) -> float:
+        return max(0.0, min(a1, b1) - max(a0, b0))
+
+    def _pairs(
+        gap_lo: float,
+        gap_hi: float,
+        len_lo: float,
+        len_hi: float,
+    ) -> list[tuple[str, float, float, float, float, object, object]]:
+        out: list[tuple[str, float, float, float, float, object, object]] = []
+        seen: set[tuple] = set()
+        for i, (ea, ori_a, ca, a0, a1, la) in enumerate(segs):
+            if not (len_lo <= la <= len_hi):
+                continue
+            for eb, ori_b, cb, b0, b1, lb in segs[i + 1 :]:
+                if ori_a != ori_b or ea is eb:
+                    continue
+                if not (len_lo <= lb <= len_hi):
+                    continue
+                gap = abs(ca - cb)
+                if not (gap_lo <= gap <= gap_hi):
+                    continue
+                shorter = min(la, lb)
+                if _overlap(a0, a1, b0, b1) < 0.85 * shorter:
+                    continue
+                lo, hi = min(ca, cb), max(ca, cb)
+                span0, span1 = max(a0, b0), min(a1, b1)
+                key = (ori_a, round(lo), round(hi), round(span0 / 20.0), round(span1 / 20.0))
+                if key in seen:
+                    continue
+                seen.add(key)
+                out.append((ori_a, lo, hi, span0, span1, ea, eb))
+        return out
+
+    glass_pairs = _pairs(40.0, 100.0, 800.0, 1500.0)
+    pier_pairs = _pairs(120.0, 180.0, 250.0, 550.0)
+    if not glass_pairs or not pier_pairs:
+        return (0, 0)
+
+    def _paint_face_runs(
+        ori: str,
+        coord: float,
+        a0: float,
+        a1: float,
+        as_window: bool,
+    ) -> int:
+        """같은 면·구간의 중복 선까지 함께 올린다."""
+        n = 0
+        span = a1 - a0
+        for entity, s_ori, s_coord, s0, s1, length in segs:
+            if s_ori != ori or abs(s_coord - coord) > 2.0:
+                continue
+            if id(entity) in painted:
+                continue
+            if _overlap(s0, s1, a0, a1) < 0.85 * min(length, span):
+                continue
+            if as_window:
+                if _mark_window(entity):
+                    n += 1
+            elif _paint_layer(entity, WALL_LAYER, WALL_COLOR):
+                n += 1
+            painted.add(id(entity))
+        return n
+
+    n_window = 0
+    n_wall = 0
+    painted: set[int] = set()
+    for g_ori, g_lo, g_hi, g0, g1, eg_a, eg_b in glass_pairs:
+        matched_piers: list[tuple[float, float, float, float]] = []
+        for p_ori, p_lo, p_hi, p0, p1, _ep_a, _ep_b in pier_pairs:
+            if p_ori != g_ori:
+                continue
+            # 유리는 외벽 면 안쪽에 끼인다(면과 같은 긴 외곽선은 유리가 아님).
+            if abs(g_lo - p_lo) <= 2.0 or abs(g_hi - p_hi) <= 2.0:
+                continue
+            if not (g_lo >= p_lo + 8.0 and g_hi <= p_hi - 8.0):
+                continue
+            if abs((p_hi - p_lo) - (g_hi - g_lo)) < 20.0:
+                continue
+            end_gap = min(abs(p1 - g0), abs(p0 - g1), abs(p0 - g0), abs(p1 - g1))
+            if end_gap > 80.0:
+                continue
+            if _overlap(p0, p1, g0, g1) > 40.0:
+                continue
+            matched_piers.append((p_lo, p_hi, p0, p1))
+        if not matched_piers:
+            continue
+        n_window += _paint_face_runs(g_ori, g_lo, g0, g1, as_window=True)
+        n_window += _paint_face_runs(g_ori, g_hi, g0, g1, as_window=True)
+        for p_lo, p_hi, p0, p1 in matched_piers:
+            n_wall += _paint_face_runs(g_ori, p_lo, p0, p1, as_window=False)
+            n_wall += _paint_face_runs(g_ori, p_hi, p0, p1, as_window=False)
     return n_window, n_wall
 
 

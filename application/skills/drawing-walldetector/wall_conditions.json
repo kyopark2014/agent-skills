@@ -81,6 +81,43 @@
           "overlap_ratio_of_shorter_gte": 0.9
         }
       }
+    ],
+    "manseongcho": [
+      {
+        "match": ["manseongcho", "만성초"],
+        "note": "3F 과학준비실-1 아래처럼 기둥·창문 사이 짧은 이중선. 간격 150 mm, 짧은 쪽 300–500 mm.",
+        "candidate": {
+          "min_length_mm": 290,
+          "max_length_mm": 520,
+          "gap_mm": { "min": 145, "max": 155 },
+          "overlap_mm_min": 260,
+          "overlap_ratio_of_shorter": 0.9
+        },
+        "long_double_wall": {
+          "gap_mm": { "min": 145, "max": 155 },
+          "shorter_length_mm_gte": 290,
+          "overlap_ratio_of_shorter_gte": 0.9,
+          "long_neighbor_count_gte": 99,
+          "same_face_shorter_length_mm_gte": 290
+        }
+      },
+      {
+        "note": "상담실 위쪽 가로면·이어진 L자 세로면. 간격 200 mm, 짧은 쪽 1.17–1.75 m. L면은 겹침이 약 84%라 0.9면 빠진다. common은 2.2 m부터라 빠진다.",
+        "candidate": {
+          "min_length_mm": 1150,
+          "max_length_mm": 1775,
+          "gap_mm": { "min": 195, "max": 210 },
+          "overlap_mm_min": 1000,
+          "overlap_ratio_of_shorter": 0.8
+        },
+        "long_double_wall": {
+          "gap_mm": { "min": 195, "max": 210 },
+          "shorter_length_mm_gte": 1150,
+          "overlap_ratio_of_shorter_gte": 0.8,
+          "long_neighbor_count_gte": 99,
+          "same_face_shorter_length_mm_gte": 1150
+        }
+      }
     ]
   }
 }
