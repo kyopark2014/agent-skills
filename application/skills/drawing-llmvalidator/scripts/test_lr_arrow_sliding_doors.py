@@ -131,6 +131,43 @@ class LrArrowSlidingDoorTests(unittest.TestCase):
         self.assertEqual(wall_right.dxf.layer, "WALL")
         self.assertEqual(thin_u.dxf.layer, "BASE")
 
+    def test_short_vertical_arrow_double_line_panel_becomes_door(self):
+        """클럽하우스 1F 방풍실: 짧은 3점 화살표 + 이중 LINE 문짝 → DOOR."""
+        doc = ezdxf.new()
+        msp = doc.modelspace()
+        # 문 위·아래 플랭크(문짝 후보 길이 600–1600 밖인 위쪽 1800 mm 포함).
+        wall_above_a = msp.add_line((0.0, 1200.0), (0.0, 3000.0), dxfattribs={"layer": "BASE"})
+        wall_above_b = msp.add_line((80.0, 1200.0), (80.0, 3000.0), dxfattribs={"layer": "BASE"})
+        wall_below_a = msp.add_line((0.0, -1000.0), (0.0, 0.0), dxfattribs={"layer": "BASE"})
+        wall_below_b = msp.add_line((80.0, -1000.0), (80.0, 0.0), dxfattribs={"layer": "BASE"})
+        leaf_a = msp.add_line((28.0, 50.0), (28.0, 1100.0), dxfattribs={"layer": "BASE"})
+        leaf_b = msp.add_line((52.0, 50.0), (52.0, 1100.0), dxfattribs={"layer": "BASE"})
+        # 상→하 화살표 (샤프트 584, 미늘 224, 꺾임 ~37°)
+        arrow = msp.add_lwpolyline(
+            [(-100.0, 1100.0), (-100.0, 516.0), (-235.0, 696.0)],
+            dxfattribs={"layer": "BASE"},
+        )
+        arrow.closed = False
+        far = msp.add_line((20000.0, 0.0), (20000.0, 1100.0), dxfattribs={"layer": "BASE"})
+
+        demoted, promoted = lib_llm_correct.separate_lr_arrow_sliding_doors(msp)
+
+        self.assertGreaterEqual(demoted, 3)
+        self.assertGreaterEqual(promoted, 1)
+        self.assertEqual(leaf_a.dxf.layer, "DOOR")
+        self.assertEqual(leaf_b.dxf.layer, "DOOR")
+        self.assertEqual(arrow.dxf.layer, "DOOR")
+        self.assertEqual(wall_above_a.dxf.layer, "WALL")
+        self.assertEqual(wall_above_b.dxf.layer, "WALL")
+        self.assertEqual(wall_below_a.dxf.layer, "WALL")
+        self.assertEqual(wall_below_b.dxf.layer, "WALL")
+        self.assertEqual(far.dxf.layer, "BASE")
+
+        # 이후 두 단 미서기창 규칙이 DOOR 이중선을 WINDOW로 되돌리지 않는다.
+        lib_llm_correct.promote_line_sash_windows(msp)
+        self.assertEqual(leaf_a.dxf.layer, "DOOR")
+        self.assertEqual(leaf_b.dxf.layer, "DOOR")
+
 
 if __name__ == "__main__":
     unittest.main()

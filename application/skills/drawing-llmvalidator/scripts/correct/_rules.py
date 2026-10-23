@@ -22707,17 +22707,19 @@ def separate_diagonal_pocket_face_doors(msp) -> tuple[int, int]:
 
 
 def _find_arrow_sliding_doors(msp) -> list[dict]:
-    """화살표가 붙은 사선 미닫이를 찾는다.
+    """화살표(-->)가 붙은 사선 미닫이를 찾는다.
 
-    샤프트 약 0.45 m, 미늘 약 0.24 m 인 화살표가 두께 12–90 mm 인
-    사선 쌍 위에 있으면 그 쌍은 문짝이다. 같은 방향으로 끝이 400 mm
-    안에 이어진 얇은 쌍과, 문짝 끝을 닫는 짧은 선도 문이다.
-    벽 옆에만 있는 화살표는 문이 아니다.
+    샤프트 0.3–1.6 m·미늘 0.12–0.5 m·꺾임 10–55°인 3점 화살표가
+    두께 12–90 mm 사선 쌍(닫힌 얇은 직사각 포함) 옆(수직 ≤0.5 m)에
+    있으면 그 쌍은 문짝이다. 같은 방향으로 끝이 400 mm 안에 이어진
+    얇은 쌍과, 문짝 끝을 닫는 짧은 선도 문이다.
+    클럽하우스 1F 서비스동선–Drop-off 사선 출입구가 그 예다.
+    벽 옆에만 있는 화살표(얇은 문짝 없음)는 문이 아니다.
     """
     segments: list[dict] = []
     for entity in _entities(msp):
         layer = getattr(entity.dxf, "layer", None)
-        if layer not in (BASE_LAYER, WALL_LAYER):
+        if layer not in (BASE_LAYER, WALL_LAYER, DOOR_LAYER):
             continue
         kind = _dxftype(entity)
         parts: list[tuple[float, float, float, float]] = []
@@ -22759,7 +22761,7 @@ def _find_arrow_sliding_doors(msp) -> list[dict]:
     for entity in _entities(msp):
         if _dxftype(entity) != "LWPOLYLINE" or entity.closed:
             continue
-        if getattr(entity.dxf, "layer", None) != BASE_LAYER:
+        if getattr(entity.dxf, "layer", None) not in (BASE_LAYER, DOOR_LAYER, WALL_LAYER):
             continue
         try:
             points = [(float(x), float(y)) for x, y in entity.get_points("xy")]
@@ -22772,7 +22774,8 @@ def _find_arrow_sliding_doors(msp) -> list[dict]:
         second = math.hypot(cx - bx, cy - by)
         longer = max(first, second)
         shorter = min(first, second)
-        if not (300.0 <= longer <= 700.0 and 150.0 <= shorter <= 400.0):
+        # 클럽하우스 1F 사선 --> : 샤프트 ~1.17 m, 미늘 ~0.45 m, 꺾임 ~37°.
+        if not (300.0 <= longer <= 1600.0 and 120.0 <= shorter <= 500.0):
             continue
         if first >= second:
             ux, uy = (bx - ax) / first, (by - ay) / first
@@ -22786,7 +22789,7 @@ def _find_arrow_sliding_doors(msp) -> list[dict]:
         u1y = (by - ay) / first if first else 0.0
         turn = math.degrees(math.acos(max(-1.0, min(1.0, u1x * u2x + u1y * u2y))))
         barb = min(turn, 180.0 - turn)
-        if not (10.0 <= barb <= 28.0):
+        if not (10.0 <= barb <= 55.0):
             continue
         arrows.append({
             "entity": entity,
@@ -22805,7 +22808,7 @@ def _find_arrow_sliding_doors(msp) -> list[dict]:
 
     leaves = [
         seg for seg in segments
-        if seg["layer"] == BASE_LAYER
+        if seg["layer"] in (BASE_LAYER, WALL_LAYER, DOOR_LAYER)
         and 700.0 <= seg["length"] <= 4500.0
         and abs(seg["x1"] - seg["x0"]) > 40.0
         and abs(seg["y1"] - seg["y0"]) > 40.0
@@ -22850,7 +22853,8 @@ def _find_arrow_sliding_doors(msp) -> list[dict]:
                 for side in (double["a"], double["b"])
             )
             span0, span1 = _along_span(double, arrow["mx"], arrow["my"], arrow["ux"], arrow["uy"])
-            if near <= 160.0 and span0 - 250.0 <= 0.0 <= span1 + 250.0:
+            # 클럽하우스 사선 --> 는 문짝에서 ~0.33–0.40 m 떨어져 있다.
+            if near <= 500.0 and span0 - 250.0 <= 0.0 <= span1 + 250.0:
                 hosts.append(double)
         if not hosts:
             continue
@@ -22957,6 +22961,69 @@ def _axis_rect_bbox(entity) -> tuple[float, float, float, float] | None:
     return min(xs), min(ys), max(xs), max(ys)
 
 
+def _oriented_thin_rect_panel(entity) -> dict | None:
+    """얇은 직사각 문짝(축정렬·사선). 두께 20–140 mm, 길이 600–1600 mm.
+
+    클럽하우스 1F 서비스동선 사선 미닫이(70×1500, ~45°)처럼 기울어진 닫힌
+    사각도 문짝으로 본다. 대변 길이가 같고 이웃 변이 거의 직교해야 한다.
+    """
+    if _dxftype(entity) != "LWPOLYLINE":
+        return None
+    pts = _polyline_xy(entity)
+    if len(pts) >= 2 and math.hypot(pts[0][0] - pts[-1][0], pts[0][1] - pts[-1][1]) <= 1.0:
+        pts = pts[:-1]
+    if len(pts) != 4:
+        return None
+    edges: list[tuple[float, float, float, float, float]] = []
+    for index in range(4):
+        x0, y0 = pts[index]
+        x1, y1 = pts[(index + 1) % 4]
+        length = math.hypot(x1 - x0, y1 - y0)
+        if length < 1.0:
+            return None
+        edges.append((length, x0, y0, x1, y1))
+    lengths = [edge[0] for edge in edges]
+    if abs(lengths[0] - lengths[2]) > 8.0 or abs(lengths[1] - lengths[3]) > 8.0:
+        return None
+    for index in range(4):
+        length0, x0, y0, x1, y1 = edges[index]
+        length1, _, _, x2, y2 = edges[(index + 1) % 4]
+        ux0, uy0 = (x1 - x0) / length0, (y1 - y0) / length0
+        ux1, uy1 = (x2 - x1) / length1, (y2 - y1) / length1
+        if abs(ux0 * ux1 + uy0 * uy1) > 0.12:
+            return None
+    if lengths[0] >= lengths[1]:
+        long_len, short_len = lengths[0], lengths[1]
+        long_edge = edges[0]
+    else:
+        long_len, short_len = lengths[1], lengths[0]
+        long_edge = edges[1]
+    if not (600.0 <= long_len <= 1600.0 and 20.0 <= short_len <= 140.0):
+        return None
+    _, x0, y0, x1, y1 = long_edge
+    ux, uy = (x1 - x0) / long_len, (y1 - y0) / long_len
+    xs = [p[0] for p in pts]
+    ys = [p[1] for p in pts]
+    cx, cy = (min(xs) + max(xs)) * 0.5, (min(ys) + max(ys)) * 0.5
+    axis_aligned = abs(ux) <= 0.08 or abs(uy) <= 0.08
+    return {
+        "entity": entity,
+        "mates": [],
+        "diagonal": not axis_aligned,
+        "horizontal": abs(uy) <= 0.08 if axis_aligned else None,
+        "ux": ux,
+        "uy": uy,
+        "long": long_len,
+        "short": short_len,
+        "a0": -0.5 * long_len,
+        "a1": 0.5 * long_len,
+        "p0": -0.5 * short_len,
+        "p1": 0.5 * short_len,
+        "cx": cx,
+        "cy": cy,
+    }
+
+
 def _lr_hook_arrow_from_points(
     points: list[tuple[float, float]],
 ) -> dict | None:
@@ -23006,10 +23073,11 @@ def _lr_hook_arrow_from_points(
 def _find_lr_arrow_sliding_doors(msp) -> list[dict]:
     """좌·우(또는 상·하) 화살표가 가리키는 축정렬 미닫이.
 
-    샤프트 0.7–1.6 m, 미늘 0.12–0.5 m, 꺾임 20–55°인 축정렬 3점 폴리선과,
+    샤프트 0.5–1.6 m, 미늘 0.12–0.5 m, 꺾임 20–55°인 축정렬 3점 폴리선과,
     샤프트 0.25–0.7 m·미늘 25–120 mm·팁 15–80 mm인 4점 훅 화살표(→)가
-    화살표다. 클럽하우스 PDR 열·1F 유리 베이처럼 벽 두께 안의 얇은 직사각
-    문짝과 화살표는 DOOR, 같은 벽면의 양옆·사이 구간은 WALL이다.
+    화살표다. 클럽하우스 PDR 열·1F 유리 베이·방풍실처럼 벽 두께 안의 얇은
+    직사각 문짝(또는 간격 12–50 mm 이중 LINE)과 화살표는 DOOR, 같은 벽면의
+    양옆·사이 구간은 WALL이다. 벽 이중면(≈80 mm)은 문짝으로 보지 않는다.
     """
     arrows: list[dict] = []
     for entity in _entities(msp):
@@ -23033,7 +23101,8 @@ def _find_lr_arrow_sliding_doors(msp) -> list[dict]:
         first = math.hypot(bx - ax, by - ay)
         second = math.hypot(cx - bx, cy - by)
         longer, shorter = max(first, second), min(first, second)
-        if not (700.0 <= longer <= 1600.0 and 120.0 <= shorter <= 500.0):
+        # 방풍실 미닫이 화살표는 샤프트 ~0.58 m (기존 0.7 m 하한보다 짧다).
+        if not (500.0 <= longer <= 1600.0 and 120.0 <= shorter <= 500.0):
             continue
         if first >= second:
             sx0, sy0, sx1, sy1 = ax, ay, bx, by
@@ -23070,7 +23139,7 @@ def _find_lr_arrow_sliding_doors(msp) -> list[dict]:
     panels: list[dict] = []
     for entity in _entities(msp):
         layer = getattr(entity.dxf, "layer", None)
-        if layer not in (BASE_LAYER, DOOR_LAYER, WALL_LAYER):
+        if layer not in (BASE_LAYER, DOOR_LAYER, WALL_LAYER, WINDOW_LAYER):
             continue
         box = _axis_rect_bbox(entity)
         if box is None:
@@ -23083,6 +23152,7 @@ def _find_lr_arrow_sliding_doors(msp) -> list[dict]:
         horizontal = width >= height
         panels.append({
             "entity": entity,
+            "mates": [],
             "horizontal": horizontal,
             "x0": x0, "y0": y0, "x1": x1, "y1": y1,
             "a0": x0 if horizontal else y0,
@@ -23093,6 +23163,78 @@ def _find_lr_arrow_sliding_doors(msp) -> list[dict]:
             "cy": (y0 + y1) * 0.5,
         })
 
+    # 닫힌 사각 없이 이중 LINE만으로 그린 문짝(클럽하우스 1F 방풍실).
+    leaf_lines: list[dict] = []
+    for entity in _entities(msp):
+        if _dxftype(entity) != "LINE":
+            continue
+        if getattr(entity.dxf, "layer", None) not in (
+            BASE_LAYER, DOOR_LAYER, WALL_LAYER, WINDOW_LAYER,
+        ):
+            continue
+        try:
+            x0, y0, x1, y1 = _line_xy(entity)
+        except Exception:  # noqa: BLE001
+            continue
+        dx, dy = abs(x1 - x0), abs(y1 - y0)
+        length = math.hypot(dx, dy)
+        if not (600.0 <= length <= 1600.0):
+            continue
+        if dx <= 2.0 and dy >= 0.95 * length:
+            leaf_lines.append({
+                "entity": entity,
+                "horizontal": False,
+                "coord": (x0 + x1) * 0.5,
+                "a0": min(y0, y1),
+                "a1": max(y0, y1),
+            })
+        elif dy <= 2.0 and dx >= 0.95 * length:
+            leaf_lines.append({
+                "entity": entity,
+                "horizontal": True,
+                "coord": (y0 + y1) * 0.5,
+                "a0": min(x0, x1),
+                "a1": max(x0, x1),
+            })
+    paired_leaves: set[int] = set()
+    for index, left in enumerate(leaf_lines):
+        if id(left["entity"]) in paired_leaves:
+            continue
+        for right in leaf_lines[index + 1:]:
+            if id(right["entity"]) in paired_leaves:
+                continue
+            if left["horizontal"] != right["horizontal"]:
+                continue
+            gap = abs(left["coord"] - right["coord"])
+            # 유리 문짝 이중선(~24 mm). 벽 이중면(~80 mm)은 제외.
+            if not (12.0 <= gap <= 50.0):
+                continue
+            overlap = min(left["a1"], right["a1"]) - max(left["a0"], right["a0"])
+            if overlap < 0.7 * min(left["a1"] - left["a0"], right["a1"] - right["a0"]):
+                continue
+            paired_leaves.add(id(left["entity"]))
+            paired_leaves.add(id(right["entity"]))
+            a0 = min(left["a0"], right["a0"])
+            a1 = max(left["a1"], right["a1"])
+            p0 = min(left["coord"], right["coord"])
+            p1 = max(left["coord"], right["coord"])
+            panels.append({
+                "entity": left["entity"],
+                "mates": [right["entity"]],
+                "horizontal": left["horizontal"],
+                "x0": a0 if left["horizontal"] else p0,
+                "y0": p0 if left["horizontal"] else a0,
+                "x1": a1 if left["horizontal"] else p1,
+                "y1": p1 if left["horizontal"] else a1,
+                "a0": a0,
+                "a1": a1,
+                "p0": p0,
+                "p1": p1,
+                "cx": (a0 + a1) * 0.5 if left["horizontal"] else (p0 + p1) * 0.5,
+                "cy": (p0 + p1) * 0.5 if left["horizontal"] else (a0 + a1) * 0.5,
+            })
+            break
+
     found: list[dict] = []
     used_panels: set[int] = set()
     for arrow in arrows:
@@ -23102,17 +23244,22 @@ def _find_lr_arrow_sliding_doors(msp) -> list[dict]:
                 continue
             if id(panel["entity"]) in used_panels:
                 continue
+            if any(id(mate) in used_panels for mate in panel.get("mates", [])):
+                continue
             if arrow["horizontal"]:
-                along_gap = max(0.0, max(panel["a0"], arrow["a0"]) - min(panel["a1"], arrow["a1"]))
-                # 화살표가 문짝과 반대로 겹치면 gap=0. 조금 어긋나도 허용.
-                if along_gap > 200.0 and not (
+                along_overlap = min(panel["a1"], arrow["a1"]) - max(panel["a0"], arrow["a0"])
+                along_gap = max(0.0, -along_overlap)
+                # 화살표가 문짝과 축으로 겹치거나, 중심이 문짝 구간에 들어와야 한다.
+                # (벽 이중선이 문 밖에서 80 mm 떨어져 오탐되지 않게 한다.)
+                if along_gap > 40.0 and not (
                     panel["a0"] - 250.0 <= arrow["mx"] <= panel["a1"] + 250.0
                 ):
                     continue
                 perp_dist = abs(arrow["my"] - panel["cy"])
             else:
-                along_gap = max(0.0, max(panel["a0"], arrow["a0"]) - min(panel["a1"], arrow["a1"]))
-                if along_gap > 200.0 and not (
+                along_overlap = min(panel["a1"], arrow["a1"]) - max(panel["a0"], arrow["a0"])
+                along_gap = max(0.0, -along_overlap)
+                if along_gap > 40.0 and not (
                     panel["a0"] - 250.0 <= arrow["my"] <= panel["a1"] + 250.0
                 ):
                     continue
@@ -23122,22 +23269,29 @@ def _find_lr_arrow_sliding_doors(msp) -> list[dict]:
             hosts.append(panel)
         if not hosts:
             continue
-        hosts.sort(
-            key=lambda panel: abs(panel["cy"] - arrow["my"])
-            if arrow["horizontal"]
-            else abs(panel["cx"] - arrow["mx"])
-        )
+        # 축 겹침이 큰 문짝을 우선하고, 같으면 화살표에 가까운 면을 고른다.
+        def _host_key(panel: dict) -> tuple[float, float]:
+            overlap = min(panel["a1"], arrow["a1"]) - max(panel["a0"], arrow["a0"])
+            if arrow["horizontal"]:
+                return (-overlap, abs(panel["cy"] - arrow["my"]))
+            return (-overlap, abs(panel["cx"] - arrow["mx"]))
+
+        hosts.sort(key=_host_key)
         panel = hosts[0]
         used_panels.add(id(panel["entity"]))
+        for mate in panel.get("mates", []):
+            used_panels.add(id(mate))
         open0, open1 = panel["a0"], panel["a1"]
         face0, face1 = panel["p0"] - 100.0, panel["p1"] + 100.0
-        door_entities = [arrow["entity"], panel["entity"]]
+        door_entities = [arrow["entity"], panel["entity"], *panel.get("mates", [])]
         wall_entities: list = []
         for entity in _entities(msp):
             if entity is arrow["entity"] or entity is panel["entity"]:
                 continue
+            if entity in panel.get("mates", []):
+                continue
             layer = getattr(entity.dxf, "layer", None)
-            if layer not in (BASE_LAYER, WALL_LAYER, DOOR_LAYER):
+            if layer not in (BASE_LAYER, WALL_LAYER, DOOR_LAYER, WINDOW_LAYER):
                 continue
             kind = _dxftype(entity)
             boxes: list[tuple[float, float, float, float]] = []
@@ -23178,12 +23332,18 @@ def _find_lr_arrow_sliding_doors(msp) -> list[dict]:
                 else:
                     along0, along1 = by0, by1
                     perp0, perp1 = bx0, bx1
-                if min(perp1, face1) - max(perp0, face0) < 20.0:
+                perp_mid = (perp0 + perp1) * 0.5
+                # 두께 0인 LINE 벽면은 면 대역 안 좌표만 보면 된다.
+                if perp1 - perp0 <= 2.0:
+                    if not (face0 - 5.0 <= perp_mid <= face1 + 5.0):
+                        continue
+                elif min(perp1, face1) - max(perp0, face0) < 20.0:
                     continue
                 along_span = along1 - along0
                 perp_span = perp1 - perp0
                 # 도곽·넓은 AABB는 한 변이 벽 두께(≤250)가 아니다.
-                if min(along_span, perp_span) > 250.0:
+                # 두께 0 LINE은 min==0 이라 이 검사에서 제외한다.
+                if perp_span > 2.0 and min(along_span, perp_span) > 250.0:
                     continue
                 length = max(along_span, perp_span)
                 overlap = min(along1, open1) - max(along0, open0)
@@ -23192,7 +23352,15 @@ def _find_lr_arrow_sliding_doors(msp) -> list[dict]:
                     600.0 <= along_span <= 1600.0
                     and 20.0 <= perp_span <= 140.0
                 )
-                if panel_like:
+                # 이중 LINE 문짝의 짝·같은 개구의 다른 단도 DOOR.
+                line_leaf_like = (
+                    kind == "LINE"
+                    and 600.0 <= along_span <= 1600.0
+                    and perp_span <= 2.0
+                    and face0 - 20.0 <= perp_mid <= face1 + 20.0
+                    and overlap >= 0.5 * along_span
+                )
+                if panel_like or line_leaf_like:
                     if entity not in door_entities:
                         door_entities.append(entity)
                     continue
@@ -29137,8 +29305,9 @@ def promote_line_sash_windows(msp) -> tuple[int, int]:
         axis = _axis_line(entity)
         if axis is None:
             continue
+        # 화살표 미닫이로 이미 DOOR인 이중선은 두 단 미서기창으로 다시 올리지 않는다.
         if getattr(entity.dxf, "layer", None) not in (
-            WALL_LAYER, BASE_LAYER, DOOR_LAYER, WINDOW_LAYER,
+            WALL_LAYER, BASE_LAYER, WINDOW_LAYER,
         ):
             continue
         ori, coord, a0, a1, length = axis
@@ -29239,7 +29408,7 @@ def promote_line_sash_windows(msp) -> tuple[int, int]:
         if axis is None:
             continue
         if getattr(entity.dxf, "layer", None) not in (
-            WALL_LAYER, BASE_LAYER, DOOR_LAYER, WINDOW_LAYER,
+            WALL_LAYER, BASE_LAYER, WINDOW_LAYER,
         ):
             continue
         seg_ori, coord, a0, a1, _length = axis
@@ -29252,6 +29421,9 @@ def promote_line_sash_windows(msp) -> tuple[int, int]:
     def _as_window(entity: object) -> None:
         nonlocal n_window
         if id(entity) in painted:
+            return
+        if getattr(entity.dxf, "layer", None) == DOOR_LAYER:
+            painted.add(id(entity))
             return
         if _mark_window(entity):
             n_window += 1
