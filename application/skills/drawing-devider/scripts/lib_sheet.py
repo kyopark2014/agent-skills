@@ -109,7 +109,7 @@ _FLOOR_HEAD = (
     r"|(?:제\s*)?(?P<bf>B\s*\d+)\s*F?"
     r"|(?:제\s*)?(?P<n>\d+)\s*(?:층|F))"
 )
-_PLAN_TAIL = r"(?:평면도|평면|PLAN|FLOOR|배치도|배치)"
+_PLAN_TAIL = r"(?:평면도|평면|PLAN|FLOOR|배치도|배치|공조조닝도|조닝도)"
 _TRAIL_PAREN = r"(?:\s*\([^)]{0,20}\))?"
 
 
@@ -170,7 +170,10 @@ def _strip_equipment_prefix(raw: str) -> str:
 
 
 _DRAWING_NUMBER = re.compile(r"^[A-Za-z]{2,6}-\d{2,4}$")
-_PLAN_WORD = re.compile(r"평면도|단면도|입면도|배치도|\bPLAN\b|\bSECTION\b|\bELEVATION\b", re.I)
+_PLAN_WORD = re.compile(
+    r"평면도|단면도|입면도|배치도|공조조닝도|조닝도|\bPLAN\b|\bSECTION\b|\bELEVATION\b",
+    re.I,
+)
 _REPEATED_FLOOR_NOTE = 8
 _SHEET_INSERT_NAME = re.compile(
     r"(?:^|[^A-Za-z0-9])(?:ooa[_-]?)?sheet(?:$|[^A-Za-z0-9])|"
@@ -683,7 +686,11 @@ def _hits_for_rect(rect, texts: list[_TextHit], rects) -> list[_TextHit]:
 
 
 def _title_score(hit: _TextHit) -> float:
-    bonus = 3.0 if re.search(r"평면|단면|입면|PLAN|FLOOR|SECTION|배치", hit.text, re.I) else 1.0
+    bonus = (
+        3.0
+        if re.search(r"평면|단면|입면|PLAN|FLOOR|SECTION|배치|조닝|공조", hit.text, re.I)
+        else 1.0
+    )
     return max(hit.height, 1.0) * bonus
 
 

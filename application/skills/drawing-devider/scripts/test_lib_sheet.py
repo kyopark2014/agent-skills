@@ -26,6 +26,9 @@ class ParseFloorLabelTests(unittest.TestCase):
             "EHP 지붕층 냉난방 철거 평면도": "RF",
             "1층 냉난방 배관평면도": "1F",
             "지붕층 냉난방 배관평면도": "RF",
+            "지상1층 공조조닝도": "1F",
+            "지상7층 공조조닝도": "7F",
+            "3층 조닝도": "3F",
             "지하1층": "B1F",
             "제2층": "2F",
             "B1F": "B1F",
@@ -72,6 +75,19 @@ class ParseFloorLabelTests(unittest.TestCase):
         frames = lib_sheet._frames_from([rect], hits, warnings)
         self.assertEqual([frame.floor for frame in frames], ["1F"])
         self.assertEqual(warnings, [])
+
+    def test_side_by_side_zoning_titles_split_one_sheet(self):
+        """한 도곽에 지상N층 공조조닝도가 좌우로 있으면 영역을 나눈다."""
+        rect = (336_400.0, 0.0, 504_600.0, 119_200.0)
+        hits = [
+            lib_sheet._TextHit("지상3층 공조조닝도", "3F", 379_807.0, 6_377.0, 500.0),
+            lib_sheet._TextHit("지상4층 공조조닝도", "4F", 451_168.0, 6_377.0, 500.0),
+        ]
+        warnings: list[str] = []
+        frames = lib_sheet._frames_from([rect], hits, warnings)
+        self.assertEqual([frame.floor for frame in frames], ["3F", "4F"])
+        self.assertEqual(warnings, [])
+        self.assertLess(frames[0].bbox[2], frames[1].bbox[0] + 1.0)
 
 
 class FacilityPlanSheetTests(unittest.TestCase):
