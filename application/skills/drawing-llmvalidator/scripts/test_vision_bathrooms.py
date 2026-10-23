@@ -56,6 +56,78 @@ class VisionBathroomTests(unittest.TestCase):
         self.assertEqual(promoted, 0)
         self.assertEqual(line.dxf.layer, "BASE")
 
+    def test_oversized_bathroom_bbox_is_skipped(self):
+        """객실까지 덮는 과대 화장실 상자는 버리고 가구를 WALL로 올리지 않는다."""
+        doc = ezdxf.new()
+        msp = doc.modelspace()
+        furniture = msp.add_lwpolyline(
+            [
+                (97560.0, 25187.5),
+                (97160.0, 24887.5),
+                (97160.0, 23367.5),
+                (97110.0, 23317.5),
+                (97060.0, 23267.5),
+                (97060.0, 21937.5),
+                (97310.0, 21687.5),
+                (97560.0, 21687.5),
+            ],
+            close=True,
+            dxfattribs={"layer": "BASE", "color": 8},
+        )
+        stall = msp.add_line(
+            (94000.0, 27000.0),
+            (94000.0, 28500.0),
+            dxfattribs={"layer": "BASE"},
+        )
+
+        promoted = lib_llm_correct.promote_vision_bathrooms(
+            msp,
+            [
+                {
+                    "label": "화장실",
+                    "xmin": 93103.4,
+                    "ymin": 22953.8,
+                    "xmax": 107409.9,
+                    "ymax": 28958.9,
+                }
+            ],
+        )
+
+        self.assertEqual(promoted, 0)
+        self.assertEqual(furniture.dxf.layer, "BASE")
+        self.assertEqual(stall.dxf.layer, "BASE")
+
+    def test_closet_outline_inside_oversized_bathroom_bbox_stays_base(self):
+        """화장실 Vision 상자가 객실까지 커져도 옷장 윤곽은 WALL로 올리지 않는다."""
+        doc = ezdxf.new()
+        msp = doc.modelspace()
+        stall = msp.add_line((1000, 0), (1000, 1800), dxfattribs={"layer": "BASE"})
+        closet = msp.add_lwpolyline(
+            [
+                (1000.0, 2500.0),
+                (2700.0, 2500.0),
+                (2700.0, 1900.0),
+                (1000.0, 1900.0),
+                (1000.0, 2550.0),
+                (2000.0, 2550.0),
+            ],
+            close=True,
+            dxfattribs={"layer": "BASE", "color": 8},
+        )
+        msp.add_text(
+            "옷장",
+            dxfattribs={"layer": "BASE", "insert": (1850.0, 2200.0), "height": 100.0},
+        )
+
+        promoted = lib_llm_correct.promote_vision_bathrooms(
+            msp,
+            [{"label": "화장실", "xmin": 0, "ymin": 0, "xmax": 3200, "ymax": 2800}],
+        )
+
+        self.assertEqual(stall.dxf.layer, "WALL")
+        self.assertEqual(closet.dxf.layer, "BASE")
+        self.assertGreaterEqual(promoted, 1)
+
     def test_line_mostly_outside_bathroom_stays_base(self):
         """중점만 화장실 상자에 걸치고 밖으로 길게 빠진 선은 벽이 아니다."""
         doc = ezdxf.new()

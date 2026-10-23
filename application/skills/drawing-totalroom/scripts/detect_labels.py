@@ -89,6 +89,7 @@ FILL_SKIP_REVIEW_X_LABELS = ("X", "샤프트")
 FILL_SKIP_REVIEW_LABELS = FILL_SKIP_REVIEW_AREA_LABELS + FILL_SKIP_REVIEW_X_LABELS
 # 세면대 심볼 → 화장실로 보고 무명 제외.
 # 이중 닫힌 LWPOLYLINE(세면기 외곽·내곽) + 배수 CIRCLE, 또는 동심 CIRCLE 타원 세면기.
+# 외곽은 llmvalidator 가 WALL 로 올릴 수 있어 BASE/0/WALL 모두 본다.
 SINK_DRAIN_R_MIN_MM = 10.0
 SINK_DRAIN_R_MAX_MM = 45.0
 SINK_OUTER_LONG_MM = (700.0, 950.0)
@@ -104,6 +105,8 @@ SINK_OVAL_ARC_R_MM = (120.0, 260.0)
 SINK_OVAL_ARC_NEAR_MM = 180.0
 SINK_OVAL_ARC_MIN = 10
 SINK_DEDUPE_MM = 200.0
+# WALL 세면기 노치와 칸 사이 틈(경주 부티크 호텔 201호 ≈22 mm).
+SINK_NEAR_POLY_MM = 100.0
 # 칸 안 TEXT 에 있으면 화장실로 보고 라벨을 붙이지 않음(집기 표기 포함).
 FILL_BATHROOM_TEXT = ("세면대", "세면", "화장실", "WC", "W.C", "변기")
 # 교차 대각선(X) — drawing-llmvalidator promote_x_cover_squares 와 같은 범위.
@@ -809,8 +812,33 @@ def load_skip_bboxes_from_review(
                 continue
             if xmax <= xmin or ymax <= ymin:
                 continue
+            # Vision 문 개구·문짝 X 는 무명 제외에 쓰지 않는다.
+            x_tokens = tuple(room.norm_name(token) for token in FILL_SKIP_REVIEW_X_LABELS)
+            if any(token in label for token in x_tokens):
+                if _is_door_x_review_bbox(xmin, ymin, xmax, ymax):
+                    continue
             out.append((xmin, ymin, xmax, ymax))
     return out
+
+
+def _is_door_x_review_bbox(
+    xmin: float, ymin: float, xmax: float, ymax: float
+) -> bool:
+    """문 개구 얇은 X·문짝 정사각 X. llmvalidator door X 제외와 동일."""
+    width = abs(float(xmax) - float(xmin))
+    height = abs(float(ymax) - float(ymin))
+    thick, span = min(width, height), max(width, height)
+    if thick <= 0.0 or span <= 0.0:
+        return False
+    if (
+        X_DOOR_THICK_MIN_MM <= thick <= X_DOOR_THICK_MAX_MM
+        and X_DOOR_SPAN_MIN_MM <= span <= X_DOOR_SPAN_MAX_MM
+        and thick / span <= X_DOOR_ASPECT_MAX
+    ):
+        return True
+    if 400.0 <= thick <= 650.0 and 400.0 <= span <= 650.0:
+        return True
+    return False
 
 
 def _bboxes_confirmed_by_geom(
@@ -946,11 +974,14 @@ def _is_sink_inner(width: float, height: float) -> bool:
     )
 
 
-def find_sink_centers(msp) -> list[tuple[float, float]]:
-    """세면대 심볼 중심(mm).
+def find_sink_centers(
+    msp,
+) -> list[tuple[float, float, float, float, float, float]]:
+    """세면대 심볼 (cx, cy, x0, y0, x1, y1) mm.
 
-    1) BASE/0 이중 닫힌 LWPOLYLINE(세면기 외곽·내곽) + 배수 CIRCLE
-    2) 동심 CIRCLE 쌍(r 200–250) + 주변 ARC ≥10 (타원 세면기)
+    1) BASE/0/WALL 이중 닫힌 LWPOLYLINE(세면기 외곽·내곽) + 배수 CIRCLE
+       (llmvalidator 가 외곽을 WALL 로 올려도 동일). x0..y1 은 외곽 bbox.
+    2) 동심 CIRCLE 쌍(r 200–250) + 주변 ARC ≥10 (타원 세면기). bbox 는 원 직경.
     """
     rects: list[tuple[float, float, float, float]] = []
     circles: list[tuple[float, float, float]] = []
@@ -960,7 +991,7 @@ def find_sink_centers(msp) -> list[tuple[float, float]]:
         layer = str(getattr(entity.dxf, "layer", "") or "")
         try:
             if kind == "LWPOLYLINE":
-                if layer not in ("BASE", "0"):
+                if layer not in ("BASE", "0", "WALL"):
                     continue
                 if not bool(entity.closed):
                     continue
@@ -973,7 +1004,7 @@ def find_sink_centers(msp) -> list[tuple[float, float]]:
                     (float(center.x), float(center.y), float(entity.dxf.radius))
                 )
             elif kind == "ARC":
-                if layer not in ("BASE", "0"):
+                if layer not in ("BASE", "0", "WALL"):
                     continue
                 center = entity.dxf.center
                 arcs.append(
@@ -993,8 +1024,8 @@ def find_sink_centers(msp) -> list[tuple[float, float]]:
     inners = [
         (x, y, w, h) for x, y, w, h in rects if _is_sink_inner(w, h)
     ]
-    sinks: list[tuple[float, float]] = []
-    for ox, oy, _ow, _oh in outers:
+    sinks: list[tuple[float, float, float, float, float, float]] = []
+    for ox, oy, ow, oh in outers:
         for ix, iy, _iw, _ih in inners:
             if math.hypot(ox - ix, oy - iy) > SINK_NEST_CENTER_MM:
                 continue
@@ -1003,7 +1034,11 @@ def find_sink_centers(msp) -> list[tuple[float, float]]:
                 for dx, dy in drains
             ):
                 continue
-            sinks.append(((ox + ix) * 0.5, (oy + iy) * 0.5))
+            cx = (ox + ix) * 0.5
+            cy = (oy + iy) * 0.5
+            sinks.append(
+                (cx, cy, ox - ow * 0.5, oy - oh * 0.5, ox + ow * 0.5, oy + oh * 0.5)
+            )
             break
 
     for index, (x, y, radius) in enumerate(circles):
@@ -1029,21 +1064,40 @@ def find_sink_centers(msp) -> list[tuple[float, float]]:
             and SINK_OVAL_ARC_R_MM[0] <= ar <= SINK_OVAL_ARC_R_MM[1]
         )
         if oval_arcs >= SINK_OVAL_ARC_MIN:
-            sinks.append((x, y))
+            sinks.append((x, y, x - radius, y - radius, x + radius, y + radius))
 
-    uniq: list[tuple[float, float]] = []
-    for x, y in sinks:
-        if any(math.hypot(x - ux, y - uy) <= SINK_DEDUPE_MM for ux, uy in uniq):
+    uniq: list[tuple[float, float, float, float, float, float]] = []
+    for hit in sinks:
+        if any(math.hypot(hit[0] - u[0], hit[1] - u[1]) <= SINK_DEDUPE_MM for u in uniq):
             continue
-        uniq.append((x, y))
+        uniq.append(hit)
     return uniq
 
 
-def _poly_has_sink(poly: Polygon, sinks: list[tuple[float, float]]) -> bool:
-    """세면대 중심이 칸 안에 있으면 True."""
+def _poly_has_sink(
+    poly: Polygon,
+    sinks: list[tuple[float, float] | tuple[float, float, float, float, float, float]],
+) -> bool:
+    """세면대 중심이 칸 안에 있거나, 세면기 외곽이 칸과 겹치·근접하면 True.
+
+    WALL 로 올라간 세면기 외곽은 fill 래스터에서 빠져 중심이 칸 밖(노치)에
+    남을 수 있어, 외곽 bbox 교집합·``SINK_NEAR_POLY_MM`` 이내 거리로도
+    화장실로 본다(경주 부티크 호텔 201호 무명_013).
+    """
     if not sinks or poly.is_empty:
         return False
-    return any(poly.covers(Point(x, y)) for x, y in sinks)
+    for hit in sinks:
+        cx, cy = float(hit[0]), float(hit[1])
+        center = Point(cx, cy)
+        if poly.covers(center) or poly.distance(center) <= SINK_NEAR_POLY_MM:
+            return True
+        if len(hit) >= 6:
+            vanity = box(float(hit[2]), float(hit[3]), float(hit[4]), float(hit[5]))
+            if vanity.is_empty:
+                continue
+            if poly.intersects(vanity) or poly.distance(vanity) <= SINK_NEAR_POLY_MM:
+                return True
+    return False
 
 
 def _poly_has_bathroom_text(msp, poly: Polygon) -> bool:
@@ -2034,8 +2088,11 @@ def detect(
                 "(review X only when it overlaps a geometric X), "
                 "pockets mostly inside a named label's axis-aligned bbox "
                 "(furniture WALL notches left out of the named face), "
-                "and bathroom wall cells (nested vanity LWPOLYLINE+drain CIRCLE, "
-                "concentric oval CIRCLE sinks, or 세면/화장실/WC/변기 TEXT); "
+                "and bathroom wall cells (nested vanity BASE/0/WALL "
+                "LWPOLYLINE+drain CIRCLE — vanity within 100 mm of the face "
+                "counts even when a WALL notch leaves a gap — "
+                "concentric oval CIRCLE sinks, "
+                "or 세면/화장실/WC/변기 TEXT); "
                 "--sample-mm is raster cell size; validated DXF is not modified"
             ),
         },

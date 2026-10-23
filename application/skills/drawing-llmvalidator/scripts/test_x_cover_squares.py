@@ -55,6 +55,36 @@ class XCoverSquareTests(unittest.TestCase):
         walls = [entity for entity in msp if entity.dxftype() == "LINE" and entity.dxf.layer == "WALL"]
         self.assertEqual(walls, [])
 
+    def test_square_door_x_inside_furniture_stays_base(self):
+        """501호처럼 ~500×500 문 X가 가구 다점 윤곽 안에 있어도 올리지 않는다."""
+        doc = ezdxf.new()
+        msp = doc.modelspace()
+        # 가구 아랫 칸의 정사각 DOOR X
+        msp.add_line((0, 0), (500, 500), dxfattribs={"layer": "DOOR"})
+        msp.add_line((500, 0), (0, 500), dxfattribs={"layer": "DOOR"})
+        pocket = _rect(msp, 0, 0, 500, 500)
+        # 지그재그 옷장/단차 윤곽(~500×3500) — X 변에 걸치면 통째 승격되던 형태
+        furniture = msp.add_lwpolyline(
+            [
+                (500.0, 3500.0),
+                (100.0, 3200.0),
+                (100.0, 1680.0),
+                (50.0, 1630.0),
+                (0.0, 1580.0),
+                (0.0, 250.0),
+                (250.0, 0.0),
+                (500.0, 0.0),
+            ],
+            close=True,
+            dxfattribs={"layer": "BASE", "color": 8},
+        )
+
+        promoted = lib_llm_correct.promote_x_cover_squares(msp)
+
+        self.assertEqual(promoted, 0)
+        self.assertEqual(pocket.dxf.layer, "BASE")
+        self.assertEqual(furniture.dxf.layer, "BASE")
+
     def test_bare_x_gets_a_virtual_square(self):
         doc = ezdxf.new()
         msp = doc.modelspace()

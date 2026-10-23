@@ -527,6 +527,127 @@ class FillUnlabeledTest(unittest.TestCase):
         self.assertLess(abs(sinks[0][0] - 2000.0), 1.0)
         self.assertLess(abs(sinks[0][1] - 2000.0), 1.0)
 
+    def test_find_sink_centers_when_outer_promoted_to_wall(self):
+        """llmvalidator 가 세면기 외곽을 WALL 로 올려도 화장실로 잡는다."""
+        doc = ezdxf.new()
+        msp = doc.modelspace()
+        cx, cy = 2000.0, 2000.0
+        outer = msp.add_lwpolyline(
+            [
+                (cx - 400.0, cy - 250.0),
+                (cx + 400.0, cy - 250.0),
+                (cx + 400.0, cy + 250.0),
+                (cx - 400.0, cy + 250.0),
+            ],
+            dxfattribs={"layer": "WALL"},
+        )
+        outer.closed = True
+        inner = msp.add_lwpolyline(
+            [
+                (cx - 250.0, cy - 190.0),
+                (cx + 250.0, cy - 190.0),
+                (cx + 250.0, cy + 190.0),
+                (cx - 250.0, cy + 190.0),
+            ],
+            dxfattribs={"layer": "BASE"},
+        )
+        inner.closed = True
+        msp.add_circle((cx, cy), 17.5, dxfattribs={"layer": "BASE"})
+        sinks = labels.find_sink_centers(msp)
+        self.assertEqual(len(sinks), 1)
+        self.assertLess(abs(sinks[0][0] - cx), 1.0)
+        self.assertLess(abs(sinks[0][1] - cy), 1.0)
+        # 외곽 bbox 포함
+        self.assertLess(abs(sinks[0][2] - (cx - 400.0)), 1.0)
+        self.assertLess(abs(sinks[0][5] - (cy + 250.0)), 1.0)
+
+    def test_poly_has_sink_when_vanity_carves_notch(self):
+        """WALL 세면기 때문에 fill 칸에 노치가 생겨 중심이 밖이어도 외곽 교차로 잡는다."""
+        from shapely.geometry import Polygon
+
+        # 301호 화장실 무명_016 과 같은 노치 형태
+        poly = Polygon(
+            [
+                (0.0, 1750.0),
+                (850.0, 1750.0),
+                (850.0, 1235.4),
+                (1638.1, 1235.4),
+                (1638.1, 1750.0),
+                (2325.0, 1750.0),
+                (2325.0, 0.0),
+                (0.0, 0.0),
+            ]
+        )
+        # 세면기 중심은 노치 안(칸 밖), 외곽은 칸과 맞닿음
+        cx, cy = 1238.1, 1485.4
+        sinks = [(cx, cy, cx - 400.0, cy - 250.0, cx + 400.0, cy + 250.0)]
+        self.assertFalse(poly.covers(__import__("shapely.geometry", fromlist=["Point"]).Point(cx, cy)))
+        self.assertTrue(labels._poly_has_sink(poly, sinks))
+
+    def test_poly_has_sink_when_vanity_notch_has_gap(self):
+        """세면기 외곽이 칸과 ~22 mm 떨어져도 근접으로 화장실로 본다(201호 무명_013)."""
+        from shapely.geometry import Polygon, Point
+
+        poly = Polygon(
+            [
+                (94000.0, 28050.0),
+                (94000.0, 26550.0),
+                (96100.0, 26550.0),
+                (96200.0, 28050.0),
+                (95600.0, 28050.0),
+                (95500.0, 27550.0),
+                (94700.0, 27550.0),
+                (94600.0, 28050.0),
+            ]
+        )
+        cx, cy = 95103.068, 27917.5
+        sinks = [(cx, cy, 94703.068, 27677.5, 95503.068, 28177.5)]
+        self.assertFalse(poly.covers(Point(cx, cy)))
+        self.assertFalse(poly.intersects(__import__("shapely.geometry", fromlist=["box"]).box(*sinks[0][2:])))
+        self.assertTrue(labels._poly_has_sink(poly, sinks))
+
+    def test_skips_room_with_wall_layer_vanity_sink(self):
+        """WALL 외곽 세면대가 있는 칸은 무명 fill 대상이 아니다."""
+        doc = ezdxf.new()
+        msp = doc.modelspace()
+        _wall_room(msp, [(0.0, 0.0), (4000.0, 0.0), (4000.0, 4000.0), (0.0, 4000.0)])
+        cx, cy = 2000.0, 2000.0
+        outer = msp.add_lwpolyline(
+            [
+                (cx - 400.0, cy - 250.0),
+                (cx + 400.0, cy - 250.0),
+                (cx + 400.0, cy + 250.0),
+                (cx - 400.0, cy + 250.0),
+            ],
+            dxfattribs={"layer": "WALL"},
+        )
+        outer.closed = True
+        inner = msp.add_lwpolyline(
+            [
+                (cx - 250.0, cy - 190.0),
+                (cx + 250.0, cy - 190.0),
+                (cx + 250.0, cy + 190.0),
+                (cx - 250.0, cy + 190.0),
+            ],
+            dxfattribs={"layer": "BASE"},
+        )
+        inner.closed = True
+        msp.add_circle((cx, cy), 17.5, dxfattribs={"layer": "BASE"})
+        boxes = labels.room.column_boxes(msp)
+        segs = labels.room.wall_segments(msp, boxes)
+        detected, _skipped = labels.fill_unlabeled_rooms(
+            msp,
+            boxes,
+            segs,
+            [],
+            [],
+            "close",
+            {"xmin": -500.0, "ymin": -500.0, "xmax": 4500.0, "ymax": 4500.0},
+            sample_mm=100.0,
+        )
+        synth = [inst for inst in detected if inst.get("synthetic")]
+        self.assertEqual(synth, [])
+
     def test_keeps_fill_component_above_one_m2(self):
         """fill 최소 면적은 1 m². 1–2 m² 진입 공간도 무명으로 남긴다."""
         doc = ezdxf.new()

@@ -429,8 +429,64 @@ def normalize_bbox_list(items: Any, *, field: str = "bboxes") -> list[dict[str, 
                 continue
         if isinstance(raw, dict) and raw.get("label"):
             got["label"] = str(raw["label"])
+        # 화장실 promote 상자가 객실·붙박이까지 덮으면 skip
+        # (경주 부티크 호텔 2F 14×6 m → 201호 가구 WALL 오탐)
+        if field == "promote_bboxes" and _is_bathroom_label(str(got.get("label") or "")):
+            w_m = (got["xmax"] - got["xmin"]) / 1000.0
+            h_m = (got["ymax"] - got["ymin"]) / 1000.0
+            if w_m > 10.0 or h_m > 10.0 or w_m * h_m > 50.0:
+                print(
+                    f"[warn] promote_bboxes[{i}] 화장실 상자 너무 큼 "
+                    f"({w_m:.1f}×{h_m:.1f} m) → skip (칸 단위 ≤10 m·50 m²)",
+                    file=sys.stderr,
+                )
+                continue
+        # Vision 이 문 개구·문짝 X 를 label=X 로 넣어도 promote 하지 않는다.
+        if field == "promote_bboxes" and _is_vision_x_label(str(got.get("label") or "")):
+            if _is_door_x_bbox(
+                got["xmin"], got["ymin"], got["xmax"], got["ymax"]
+            ):
+                w_m = (got["xmax"] - got["xmin"]) / 1000.0
+                h_m = (got["ymax"] - got["ymin"]) / 1000.0
+                print(
+                    f"[warn] promote_bboxes[{i}] 문 X 상자 "
+                    f"({w_m:.2f}×{h_m:.2f} m) → skip (문 개구·문짝 X)",
+                    file=sys.stderr,
+                )
+                continue
         out.append(got)
     return out
+
+
+def _is_vision_x_label(label: str) -> bool:
+    """Vision promote label 이 교차 대각선 X·샤프트인지."""
+    folded = label.replace(" ", "").upper()
+    if folded == "X":
+        return True
+    return any(token in folded for token in ("샤프트", "SHAFT", "VOID"))
+
+
+def _is_door_x_bbox(xmin: float, ymin: float, xmax: float, ymax: float) -> bool:
+    """문 개구 안 얇은 X·문짝 정사각 X 크기면 True.
+
+    promote_x_cover_squares / totalroom find_crossed_x_bboxes 문 X 제외와 같다.
+    """
+    width = abs(float(xmax) - float(xmin))
+    height = abs(float(ymax) - float(ymin))
+    thick, span = min(width, height), max(width, height)
+    if thick <= 0.0 or span <= 0.0:
+        return False
+    # 벽 두께 안 문 개구 X
+    if (
+        80.0 <= thick <= 360.0
+        and 650.0 <= span <= 1750.0
+        and thick / span <= 0.5
+    ):
+        return True
+    # 가구·개구 안 정사각 문 X (~0.4–0.65 m)
+    if 400.0 <= thick <= 650.0 and 400.0 <= span <= 650.0:
+        return True
+    return False
 
 
 @dataclass
@@ -21142,12 +21198,24 @@ def promote_leaf_jambs(msp) -> int:
     return promoted
 
 
+def _is_vanity_sink_outline(pts: list[tuple[float, float]]) -> bool:
+    """객실 세면기 외곽(약 0.7–0.95 × 0.4–0.6 m). 스윙 옆면 승격 오탐 방지."""
+    if len(pts) < 3:
+        return False
+    xs = [p[0] for p in pts]
+    ys = [p[1] for p in pts]
+    width, height = max(xs) - min(xs), max(ys) - min(ys)
+    long_side, short_side = max(width, height), min(width, height)
+    return 700.0 <= long_side <= 950.0 and 400.0 <= short_side <= 600.0
+
+
 def promote_swing_side_walls(msp) -> int:
     """스윙문에서 한쪽만 벽인 문틀과, 문 바깥으로 이어진 벽면을 올린다.
 
     문짝이 지나가는 구간은 두지 않는다.
     clubhouse 캐디휴게실·주방처럼 스윙 옆 복도 면이 2점 LWPOLY BASE로
     남아 있어도, 긴 WALL에 이어지면 올린다.
+    닫힌 세면기 외곽(약 800×500)은 올리지 않는다(경주 부티크 호텔 201호).
     """
     arcs: list[tuple[float, float, float]] = []
     records: list[dict] = []
@@ -21192,6 +21260,9 @@ def promote_swing_side_walls(msp) -> int:
             try:
                 pts = [(float(p[0]), float(p[1])) for p in _poly_xy(entity)]
             except Exception:  # noqa: BLE001
+                continue
+            # 세면기 외곽 닫힌 폴리는 변 길이만 맞아도 통째로 승격되지 않게 제외.
+            if entity.closed and _is_vanity_sink_outline(pts):
                 continue
             edges = list(zip(pts, pts[1:]))
             if entity.closed and len(pts) >= 2:
@@ -29168,6 +29239,11 @@ def promote_vision_bathrooms(msp, bboxes) -> int:
     문 스윙 호, 문 X, 승강기 샤프트 X, 계단 절단선은 그대로 둔다.
     선은 길이의 대부분이 상자 안에 있을 때만 올린다. 중점만 걸치고
     밖으로 길게 빠진 홀·복도 선은 벽으로 두지 않는다.
+    윤곽 bbox 안에 ``옷장`` 글자가 있는 닫힌 폴리는 올리지 않는다
+    (화장실 Vision 상자가 객실까지 커져 옷장을 벽으로 올리던 오탐,
+    경주 부티크 호텔 201호).
+    ``화장실`` 상자는 한 변 10 m·면적 50 m²를 넘으면
+    ``normalize_bbox_list`` 에서 버려 객실 가구 승격을 막는다.
     """
     boxes = [
         box
@@ -29177,11 +29253,25 @@ def promote_vision_bathrooms(msp, bboxes) -> int:
     if not boxes:
         return 0
 
+    closet_labels = [
+        (x, y)
+        for x, y, s in _iter_text_labels(msp)
+        if "옷장" in s.replace(" ", "")
+    ]
+
     def _inside(x: float, y: float) -> bool:
         return any(
             box["xmin"] <= x <= box["xmax"] and box["ymin"] <= y <= box["ymax"]
             for box in boxes
         )
+
+    def _is_closet_outline(points: list[tuple[float, float]]) -> bool:
+        if len(points) < 3 or not closet_labels:
+            return False
+        xs = [p[0] for p in points]
+        ys = [p[1] for p in points]
+        x0, x1, y0, y1 = min(xs), max(xs), min(ys), max(ys)
+        return any(x0 <= lx <= x1 and y0 <= ly <= y1 for lx, ly in closet_labels)
 
     n = 0
     for entity in _entities(msp):
@@ -29202,6 +29292,8 @@ def promote_vision_bathrooms(msp, bboxes) -> int:
             elif kind == "LWPOLYLINE":
                 points = _polyline_xy(entity)
                 if len(points) < 2:
+                    continue
+                if entity.closed and _is_closet_outline(points):
                     continue
                 xs = [point[0] for point in points]
                 ys = [point[1] for point in points]
@@ -30370,12 +30462,35 @@ def promote_nonarea_enclosures(msp) -> int:
     return n + _promote_room_enclosure(msp, room_anchors) + _promote_excluded_area_bounds(msp)
 
 
+def _is_bed_or_bay_panel_outline(pts: list[tuple[float, float]]) -> bool:
+    """객실 침대·베이 패널 닫힌 윤곽(약 1.5×2.0 m 또는 병원 침대 치수).
+
+    ``promote_collinear_wall_continuations`` 가 한 변만 맞아도 폴리 전체를
+    WALL 로 올리던 오탐을 막는다(경주 부티크 호텔 507호 1500×2000).
+    """
+    if len(pts) < 3:
+        return False
+    xs = [p[0] for p in pts]
+    ys = [p[1] for p in pts]
+    width, height = max(xs) - min(xs), max(ys) - min(ys)
+    short, long = min(width, height), max(width, height)
+    # 407호·507호 객실 위 패널/침대 (demote_bay_panel_sills 와 동일 치수)
+    if 1200.0 <= short <= 2200.0 and 1600.0 <= long <= 2500.0:
+        return True
+    # 병원 침대 닫힌 윤곽 (demote_hospital_beds outline 과 동일)
+    if 500.0 <= short <= 950.0 and 1400.0 <= long <= 2400.0:
+        return True
+    return False
+
+
 def promote_collinear_wall_continuations(msp) -> int:
     """벽에 끝으로 이어진 회색 이중선을 벽으로 올린다.
 
     아래층 실에서 이미 벽인 선이 다음 칸까지 같은 좌표로 이어진 경우다.
     간격 15–280 mm 의 평행선만 짝으로 보고, 외곽으로 길게 나간 선은 남긴다.
     LINE뿐 아니라 축정렬 LWPOLY 면도 이어진 복도 긴 면으로 올린다.
+    닫힌 침대·베이 패널 윤곽(약 1.5×2.0 m 등)은 한 변이 벽에 이어져도
+    올리지 않는다.
     """
     rows: list[tuple[str, float, float, float, float, str, object]] = []
 
@@ -30401,6 +30516,9 @@ def promote_collinear_wall_continuations(msp) -> int:
         try:
             pts = [(float(p[0]), float(p[1])) for p in _poly_xy(entity)]
         except Exception:  # noqa: BLE001
+            continue
+        # 침대/패널 닫힌 윤곽 변은 후보에서 제외(전체 승격 오탐 방지).
+        if entity.closed and _is_bed_or_bay_panel_outline(pts):
             continue
         edges = list(zip(pts, pts[1:]))
         if entity.closed and len(pts) >= 2:
@@ -31882,6 +32000,8 @@ def promote_x_cover_squares(msp) -> int:
     X가 기울어져 있으면 감싼 네모도 같은 각도의 OBB로 그린다(축정렬 AABB 금지).
     벽 두께 안에서 교차하는 문 X의 네모는 그대로 둔다.
     긴 덕트 X(짧은 변 ≥500 mm, 긴 변 ≤12 m)도 올린다.
+    가구·개구 안 정사각 문 X(~0.5×0.5 m)는 올리지 않는다(경주 부티크
+    호텔 501호 옷장 옆 DOOR X → 가구 윤곽 통째 승격 오탐).
     """
     diags: list[tuple[Any, float, float, float, float, float, bool]] = []
     for entity in _entities(msp):
@@ -31931,6 +32051,15 @@ def promote_x_cover_squares(msp) -> int:
             if thick < 499.0 or span > 12000.0:
                 continue
             if 80.0 <= thick <= 360.0 and 650.0 <= span <= 1750.0 and thick / span <= 0.5:
+                continue
+            # DOOR 레이어 정사각 문 X(~500×500). 가구 윤곽을 감싼 채 통째
+            # 승격하던 오탐(501호). BASE 샤프트 정사각 X는 그대로 둔다.
+            if (
+                span <= 800.0
+                and thick / max(span, 1.0) >= 0.75
+                and getattr(left[0].dxf, "layer", None) == DOOR_LAYER
+                and getattr(right[0].dxf, "layer", None) == DOOR_LAYER
+            ):
                 continue
             crosses.append(obb)
             cross_diag_ids.add(id(left[0]))

@@ -75,6 +75,32 @@ class SwingSideWallTests(unittest.TestCase):
         self.assertEqual(stub.dxf.layer, "WALL")
         self.assertEqual(inner.dxf.layer, "WALL")
 
+    def test_vanity_sink_outline_stays_base(self):
+        """세면기 외곽(800×500)은 스윙 옆면 규칙으로 WALL이 되지 않는다."""
+        doc = ezdxf.new()
+        msp = doc.modelspace()
+        hx, hy, radius = 95000.0, 26800.0, 900.0
+        msp.add_arc((hx, hy), radius, 0.0, 90.0, dxfattribs={"layer": "DOOR"})
+        # 힌지 근처 긴 WALL (세면기 옆면이 이어진 것처럼)
+        msp.add_line(
+            (94700.0, 27677.5),
+            (94700.0, 29000.0),
+            dxfattribs={"layer": "WALL", "color": 1},
+        )
+        vanity = msp.add_lwpolyline(
+            [
+                (94703.0, 27677.5),
+                (95503.0, 27677.5),
+                (95503.0, 28177.5),
+                (94703.0, 28177.5),
+            ],
+            close=True,
+            dxfattribs={"layer": "BASE", "color": 8},
+        )
+        n = lib_llm_correct.promote_swing_side_walls(msp)
+        self.assertEqual(vanity.dxf.layer, "BASE")
+        self.assertEqual(n, 0)
+
 
 if __name__ == "__main__":
     unittest.main()
