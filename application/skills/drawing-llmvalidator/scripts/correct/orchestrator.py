@@ -33,7 +33,7 @@ from correct._rules import (
     demote_bay_panel_sills, demote_bed_ward_interiors, demote_closed_furniture_boxes,
     demote_elevator_door_back_faces, demote_fitness_equipment, demote_hospital_beds,
     demote_in_bboxes, demote_landscape_walls, demote_meeting_room_interiors,
-    demote_seat_cushion_line_boxes,
+    demote_office_interiors, demote_seat_cushion_line_boxes,
     demote_open_hall_center_walls, demote_parallel_grid_axis_walls,
     demote_pictogram_columns, demote_serving_counter_walls,
     demote_swing_hinge_door_leaves, demote_thin_swing_leaf_lines, door_side_wall_ids,
@@ -58,7 +58,7 @@ from correct._rules import (
     promote_diagonal_strip_windows,
     promote_diagonal_wall_turns,     promote_door_opening_flanks,
     promote_door_side_corner_runs, promote_door_side_doubles,
-    promote_thin_door_panel_sides,
+    promote_thin_door_panel_sides, close_thin_door_panel_flank_gaps,
     promote_wall_between_adjacent_doors,
     promote_double_sash_windows, promote_elevator_enclosure_walls,
     promote_end_wall_columns, promote_equipment_store_walls,
@@ -171,6 +171,7 @@ def apply_corrections(
     if do_box_demote:
         furn_ids = demote_fitness_equipment(msp, segs, exclude_ids=hbeam_ids)
         furn_ids |= demote_meeting_room_interiors(msp, segs, exclude_ids=hbeam_ids)
+        furn_ids |= demote_office_interiors(msp, segs, exclude_ids=hbeam_ids)
         furn_ids |= demote_seat_cushion_line_boxes(
             msp, exclude_ids=hbeam_ids, layers=(WALL_LAYER, BASE_LAYER)
         )
@@ -211,6 +212,7 @@ def apply_corrections(
         furniture_box_demote = demote_closed_furniture_boxes(msp, exclude_ids=hbeam_ids)
         fitness_demote = demote_fitness_equipment(msp, segs, exclude_ids=hbeam_ids)
         fitness_demote |= demote_meeting_room_interiors(msp, segs, exclude_ids=hbeam_ids)
+        fitness_demote |= demote_office_interiors(msp, segs, exclude_ids=hbeam_ids)
         fitness_demote |= demote_seat_cushion_line_boxes(msp, exclude_ids=hbeam_ids)
         fitness_demote |= demote_bed_ward_interiors(msp, segs, exclude_ids=hbeam_ids)
         fitness_demote |= demote_hospital_beds(msp, exclude_ids=hbeam_ids)
@@ -327,6 +329,7 @@ def apply_corrections(
         post_furn = demote_closed_furniture_boxes(msp, exclude_ids=hbeam_ids)
         post_furn |= demote_fitness_equipment(msp, segs_after, exclude_ids=hbeam_ids)
         post_furn |= demote_meeting_room_interiors(msp, segs_after, exclude_ids=hbeam_ids)
+        post_furn |= demote_office_interiors(msp, segs_after, exclude_ids=hbeam_ids)
         post_furn |= demote_seat_cushion_line_boxes(msp, exclude_ids=hbeam_ids)
         post_furn |= demote_bed_ward_interiors(msp, segs_after, exclude_ids=hbeam_ids)
         post_furn |= demote_hospital_beds(msp, exclude_ids=hbeam_ids)
@@ -624,6 +627,7 @@ def apply_corrections(
     n_promoted += promote_wall_between_adjacent_doors(msp)
     n_promoted += promote_door_side_doubles(msp)
     n_promoted += promote_thin_door_panel_sides(msp)
+    n_promoted += close_thin_door_panel_flank_gaps(msp)
     n_promoted += promote_door_side_corner_runs(msp)
     n_promoted += promote_service_core_walls(msp)
     n_promoted += promote_sanitary_fixtures(msp)
@@ -655,6 +659,9 @@ def apply_corrections(
         segs_final_furn = iter_axis_segs(msp, min_len_mm=70.0)
         final_furn = demote_seat_cushion_line_boxes(msp, exclude_ids=hbeam_ids)
         final_furn |= demote_meeting_room_interiors(
+            msp, segs_final_furn, exclude_ids=hbeam_ids
+        )
+        final_furn |= demote_office_interiors(
             msp, segs_final_furn, exclude_ids=hbeam_ids
         )
         final_furn |= final_beds
