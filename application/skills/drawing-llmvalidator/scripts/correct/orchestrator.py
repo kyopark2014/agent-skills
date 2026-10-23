@@ -36,7 +36,8 @@ from correct._rules import (
     demote_office_interiors, demote_seat_cushion_line_boxes,
     demote_open_hall_center_walls, demote_parallel_grid_axis_walls,
     demote_pictogram_columns, demote_serving_counter_walls,
-    demote_swing_hinge_door_leaves, demote_thin_swing_leaf_lines, door_side_wall_ids,
+    demote_swing_hinge_door_leaves, demote_swing_open_wall_leaves,
+    demote_thin_swing_leaf_lines, door_side_wall_ids,
     filter_promote_away_from_elevator_doors, filter_promote_away_from_grid_axes,
     filter_promote_away_from_open_halls, find_demote_wall_entities,
     find_hbeam_column_entities, find_line_h_symbol_column_entities,
@@ -47,7 +48,10 @@ from correct._rules import (
     promote_bathroom_label_walls, promote_bay_window_outlines,
     promote_orthogonal_bay_windows,
     promote_bottom_column_run, promote_butt_partitions, promote_capped_triple_walls,
-    promote_capped_windows, promote_cavity_glass_windows, promote_window_side_piers,
+    promote_capped_windows, promote_cavity_glass_windows,
+    promote_diagonal_cavity_glass_windows, promote_window_side_piers,
+    promote_facade_bay_windows,
+    promote_diagonal_window_side_piers,
     promote_closed_square_columns,
     promote_concentric_double_square_columns, promote_round_columns,
     find_round_column_rings,
@@ -57,6 +61,7 @@ from correct._rules import (
     promote_corridor_door_flanks, promote_corridor_walls, promote_crossed_x_walls,
     promote_curved_corner_walls, promote_diagonal_hatch_walls,
     promote_diagonal_strip_windows,
+    promote_diagonal_thin_rect_windows,
     promote_diagonal_wall_turns, promote_door_opening_flanks,
     promote_door_side_corner_runs, promote_door_side_doubles,
     promote_thin_door_panel_sides, close_thin_door_panel_flank_gaps,
@@ -93,7 +98,8 @@ from correct._rules import (
     separate_arrow_sliding_doors,
     separate_diagonal_observation_windows, separate_diagonal_pocket_face_doors,
     separate_sawtooth_diagonal_windows,
-    separate_diagonal_swing_doors, separate_locker_entrance_doors,
+    separate_diagonal_swing_doors, separate_segmented_swing_doors,
+    separate_locker_entrance_doors,
     separate_partial_arc_radial_swing_doors,
     separate_lr_arrow_sliding_doors, separate_observation_windows,
     separate_pocket_face_doors, separate_short_staggered_doors,
@@ -574,6 +580,10 @@ def apply_corrections(
     n_diag_demote, n_diag_promote = separate_diagonal_swing_doors(msp)
     n_demoted += n_diag_demote
     n_promoted += n_diag_promote
+    # PDF→DXF 분절 호(ARC 없음) 1/4 스윙 — 바로유 한방병원 sheet_01 등.
+    n_seg_demote, n_seg_promote = separate_segmented_swing_doors(msp)
+    n_demoted += n_seg_demote
+    n_promoted += n_seg_promote
     n_pocket_face_demote, n_pocket_face_promote = separate_pocket_face_doors(msp)
     n_demoted += n_pocket_face_demote
     n_promoted += n_pocket_face_promote
@@ -616,12 +626,17 @@ def apply_corrections(
     n_promoted += n_strip_window + n_strip_wall
     n_diag_strip_window, n_diag_strip_wall = promote_diagonal_strip_windows(msp)
     n_promoted += n_diag_strip_window + n_diag_strip_wall
+    # 사선 외벽 얇은 닫힌 직사각 외창(바로유 sheet_01 화장실 옆 ~60×200).
+    n_promoted += promote_diagonal_thin_rect_windows(msp)
     n_mullion_window, n_mullion_wall = promote_mullion_strip_windows(msp)
     n_promoted += n_mullion_window + n_mullion_wall
     n_cav_window, n_cav_wall = promote_cavity_glass_windows(msp)
     n_promoted += n_cav_window + n_cav_wall
     n_pier_window, n_pier_wall = promote_window_side_piers(msp)
     n_promoted += n_pier_window + n_pier_wall
+    # 외벽 이중면 위 유리·피어 교차(미닫이 DOOR 회수 포함).
+    n_facade_window, n_facade_wall = promote_facade_bay_windows(msp)
+    n_promoted += n_facade_window + n_facade_wall
     # 직교 베이: WINDOW 사이 갭의 return·바깥면. 창 레이어 분리 뒤에 올린다.
     n_promoted += promote_orthogonal_bay_windows(msp)
     # 문 가상 닫힘으로 생긴 사각 슬리브(문옆 기둥)도 H/슬리브 규칙으로 올린다.
@@ -657,6 +672,12 @@ def apply_corrections(
     # 톱니 외벽 긴 사선은 창. 기울어진 이중선 승격이 벽으로 올린 뒤 되돌린다.
     n_saw_window, n_saw_wall = separate_sawtooth_diagonal_windows(msp)
     n_promoted += n_saw_window + n_saw_wall
+    # 사선 짧은 베이 유리 + 양옆 두꺼운 피어(시청각실 대각 외창).
+    n_diag_pier_window, n_diag_pier_wall = promote_diagonal_window_side_piers(msp)
+    n_promoted += n_diag_pier_window + n_diag_pier_wall
+    # 사선 이중벽 사이 유리(전남대 예대 3F 교수연구실 외창).
+    n_diag_cav_window, n_diag_cav_wall = promote_diagonal_cavity_glass_windows(msp)
+    n_promoted += n_diag_cav_window + n_diag_cav_wall
     # 곡선 모서리는 양끝이 WALL에 닿아야 한다. 기울어진 이중선 승격 뒤에 올린다.
     n_promoted += promote_curved_corner_walls(msp)
     # 앞선 문 처리가 가로·세로가 아닌 양개문은 닫지 않는다. 마지막에 힌지 사이를 잇는다.
@@ -717,6 +738,21 @@ def apply_corrections(
     n_inwall_demote, n_inwall_promote = separate_inwall_line_sliding_doors(msp)
     n_demoted += n_inwall_demote
     n_promoted += n_inwall_promote
+
+    # 후반 promote 가 스윙 열린 문짝을 다시 WALL로 올리면 레이어 분리 직전에 DOOR로 되돌린다.
+    # 닫힌 현 WALL 은 유지한다. 전남대 예대 3F 복도 여닫이(교수연구실5 등).
+    n_demoted += demote_swing_open_wall_leaves(msp)
+    # 분절 호 스윙도 후반 promote 뒤 한 번 더 DOOR로 둔다.
+    n_seg_demote2, n_seg_promote2 = separate_segmented_swing_doors(msp)
+    n_demoted += n_seg_demote2
+    n_promoted += n_seg_promote2
+
+    # 분절 스윙 닫힘·미닫이가 외창 유리를 WALL/DOOR로 덮을 수 있어 레이어 분리 직전 재승격.
+    n_facade_window2, n_facade_wall2 = promote_facade_bay_windows(msp)
+    n_promoted += n_facade_window2 + n_facade_wall2
+
+    # 후반 promote 가 기운 승강기 X 네모를 지우거나 AABB로 덮을 수 있어 OBB 네모를 다시 쌓는다.
+    n_promoted += promote_x_cover_squares(msp)
 
     marked = mark_doors_and_columns(msp)
 

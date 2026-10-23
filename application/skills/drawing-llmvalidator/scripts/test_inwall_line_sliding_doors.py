@@ -68,6 +68,34 @@ class InwallLineSlidingDoorTests(unittest.TestCase):
         self.assertEqual(promoted, 0)
         self.assertEqual(leaf.dxf.layer, WALL_LAYER)
 
+    def test_lwpolyline_capped_leaf_and_side_walls(self):
+        """PDF→DXF 2점 LWPOLY 문짝 + 양끝 턱 → DOOR, 양옆 BASE 면 → WALL."""
+        doc = ezdxf.new()
+        msp = doc.modelspace()
+        face_a = msp.add_lwpolyline(
+            [(0, -2000), (0, 4000)], dxfattribs={"layer": BASE_LAYER}
+        )
+        face_b = msp.add_lwpolyline(
+            [(150, -2000), (150, 4000)], dxfattribs={"layer": BASE_LAYER}
+        )
+        leaf_a = msp.add_lwpolyline(
+            [(55, 0), (55, 900)], dxfattribs={"layer": BASE_LAYER}
+        )
+        leaf_b = msp.add_lwpolyline(
+            [(95, 0), (95, 900)], dxfattribs={"layer": BASE_LAYER}
+        )
+        msp.add_lwpolyline([(55, 0), (95, 0)], dxfattribs={"layer": BASE_LAYER})
+        msp.add_lwpolyline([(55, 900), (95, 900)], dxfattribs={"layer": BASE_LAYER})
+
+        demoted, promoted = separate_inwall_line_sliding_doors(msp)
+
+        self.assertGreaterEqual(demoted, 2)
+        self.assertEqual(leaf_a.dxf.layer, DOOR_LAYER)
+        self.assertEqual(leaf_b.dxf.layer, DOOR_LAYER)
+        self.assertGreaterEqual(promoted, 1)
+        self.assertEqual(face_a.dxf.layer, WALL_LAYER)
+        self.assertEqual(face_b.dxf.layer, WALL_LAYER)
+
 
 if __name__ == "__main__":
     unittest.main()

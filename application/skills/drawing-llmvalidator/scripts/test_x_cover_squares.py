@@ -81,6 +81,64 @@ class XCoverSquareTests(unittest.TestCase):
         self.assertIn(((900, 800), (0, 800)), walls)
         self.assertIn(((0, 800), (0, 0)), walls)
 
+    def test_rotated_bare_x_gets_oriented_square(self):
+        """기운 승강기 X는 축정렬 AABB가 아니라 같은 각도의 네모를 그린다."""
+        import math
+
+        doc = ezdxf.new()
+        msp = doc.modelspace()
+        ang = math.radians(30.0)
+
+        def rot(x: float, y: float) -> tuple[float, float]:
+            return (
+                x * math.cos(ang) - y * math.sin(ang),
+                x * math.sin(ang) + y * math.cos(ang),
+            )
+
+        corners = [rot(x, y) for x, y in [(-850, -800), (850, -800), (850, 800), (-850, 800)]]
+        diag_a = msp.add_line(corners[0], corners[2], dxfattribs={"layer": "BASE"})
+        diag_b = msp.add_line(corners[1], corners[3], dxfattribs={"layer": "BASE"})
+        # 예전에 잘못 그린 축정렬 AABB 변이 있어도 지우고 OBB만 남긴다.
+        xs = [c[0] for c in corners]
+        ys = [c[1] for c in corners]
+        ax0, ax1, ay0, ay1 = min(xs), max(xs), min(ys), max(ys)
+        bad = [
+            msp.add_line((ax0, ay0), (ax1, ay0), dxfattribs={"layer": "WALL", "color": 1}),
+            msp.add_line((ax1, ay0), (ax1, ay1), dxfattribs={"layer": "WALL", "color": 1}),
+            msp.add_line((ax1, ay1), (ax0, ay1), dxfattribs={"layer": "WALL", "color": 1}),
+            msp.add_line((ax0, ay1), (ax0, ay0), dxfattribs={"layer": "WALL", "color": 1}),
+        ]
+
+        promoted = lib_llm_correct.promote_x_cover_squares(msp)
+
+        self.assertGreaterEqual(promoted, 6)
+        self.assertEqual(diag_a.dxf.layer, "WALL")
+        self.assertEqual(diag_b.dxf.layer, "WALL")
+        for entity in bad:
+            # 삭제됐거나 BASE로 내려감
+            try:
+                layer = entity.dxf.layer
+            except Exception:  # noqa: BLE001
+                continue
+            self.assertNotEqual(layer, "WALL")
+        side_angs = []
+        for entity in msp:
+            if entity.dxftype() != "LINE" or entity.dxf.layer != "WALL":
+                continue
+            x0, y0 = float(entity.dxf.start.x), float(entity.dxf.start.y)
+            x1, y1 = float(entity.dxf.end.x), float(entity.dxf.end.y)
+            length = math.hypot(x1 - x0, y1 - y0)
+            if length > 2000.0:
+                continue  # 대각선
+            ang_deg = math.degrees(math.atan2(y1 - y0, x1 - x0)) % 180.0
+            near_axis = min(abs(ang_deg - 0.0), abs(ang_deg - 90.0), abs(ang_deg - 180.0))
+            self.assertGreater(near_axis, 15.0, msg=f"AABB side left L={length:.0f} ang={ang_deg:.1f}")
+            side_angs.append(ang_deg)
+        self.assertGreaterEqual(len(side_angs), 4)
+        rounded = sorted(round(a / 5.0) * 5.0 for a in side_angs)
+        self.assertTrue(any(abs(a - 30.0) <= 5.0 for a in rounded))
+        self.assertTrue(any(abs(a - 120.0) <= 5.0 for a in rounded))
+
     def test_long_duct_x_line_box_becomes_wall(self):
         """DA 급배기덕트처럼 긴 X(~5.5 m)와 선 네 개 사각도 올린다."""
         doc = ezdxf.new()
