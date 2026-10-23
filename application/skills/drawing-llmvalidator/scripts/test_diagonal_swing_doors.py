@@ -127,6 +127,87 @@ class DiagonalSwingDoorTests(unittest.TestCase):
         msp.add_arc((hx, hy), r, 0.0, 90.0, dxfattribs=base)
         self.assertEqual(lib_llm_correct._find_diagonal_swing_doors(msp), [])
 
+    def test_polyline_l_swing_on_slanted_double_wall(self):
+        """ARC 없는 3점 L자 스윙: 문짝 DOOR, 이중면 양옆 WALL.
+
+        바로유 sheet_01 해칭 외벽처럼, 문 개구에서 평행 짝 overlap 이
+        음수여도 근처 이중면이면 벽으로 올린다.
+        """
+        doc = ezdxf.new()
+        msp = doc.modelspace()
+        base = {"layer": "BASE", "color": 8}
+        # 30° 이중면. 문 개구 기준으로 왼쪽·오른쪽 면이 어긋나 overlap 없음.
+        ang = math.radians(30.0)
+        ux, uy = math.cos(ang), math.sin(ang)
+        nx, ny = -uy, ux
+        gap = 199.0
+        # host face (오른쪽, 문 힌지 쪽)
+        hx0, hy0 = 40000.0, 53000.0
+        msp.add_line(
+            (hx0, hy0),
+            (hx0 + 953.0 * ux, hy0 + 953.0 * uy),
+            dxfattribs=base,
+        )
+        # mate face (왼쪽, 개구 너머 — overlap 음수)
+        mx0 = hx0 - 200.0 * ux + gap * nx
+        my0 = hy0 - 200.0 * uy + gap * ny
+        msp.add_line(
+            (mx0, my0),
+            (mx0 + 748.0 * ux, my0 + 748.0 * uy),
+            dxfattribs=base,
+        )
+        # 문 힌지가 붙는 벽 끝
+        wall_end = (hx0 + 20.0 * ux, hy0 + 20.0 * uy)
+        # 3점 L: 벽끝 → 열린 tip(≈90°) → 짧은 리턴
+        tip = (
+            wall_end[0] - 489.0 * math.cos(ang + math.pi / 2.0),
+            wall_end[1] - 489.0 * math.sin(ang + math.pi / 2.0),
+        )
+        ret = (
+            tip[0] + 205.0 * math.cos(ang + math.pi),
+            tip[1] + 205.0 * math.sin(ang + math.pi),
+        )
+        leaf = msp.add_lwpolyline(
+            [wall_end, tip, ret],
+            dxfattribs=base,
+        )
+        leaf.closed = False
+
+        found = lib_llm_correct._find_polyline_l_swing_doors(msp)
+        self.assertGreaterEqual(len(found), 1)
+        self.assertTrue(any(abs(s["hx"] - tip[0]) < 5.0 and abs(s["hy"] - tip[1]) < 5.0 for s in found))
+
+        n_demote, n_promote = lib_llm_correct.separate_diagonal_swing_doors(msp)
+        self.assertGreaterEqual(n_demote, 1)
+        self.assertGreaterEqual(n_promote, 2)
+        self.assertEqual(leaf.dxf.layer, "DOOR")
+        wall_lines = [e for e in msp.query("LINE") if e.dxf.layer == "WALL"]
+        self.assertGreaterEqual(len(wall_lines), 2)
+
+        # 분절 스윙이 WALL LWPOLYLINE 문옆 면을 해칭 가짜 호로 DOOR 덮지 않는다.
+        mate_poly = msp.add_lwpolyline(
+            [
+                (mx0, my0),
+                (mx0 + 748.0 * ux, my0 + 748.0 * uy),
+            ],
+            dxfattribs={"layer": "WALL", "color": 1},
+        )
+        mate_poly.closed = False
+        # 원주 위 짧은 해칭처럼 보이는 선
+        for k in range(6):
+            ang_h = ang + math.radians(20.0 + 10.0 * k)
+            rr = 748.0
+            cx = mx0 + rr * math.cos(ang_h)
+            cy = my0 + rr * math.sin(ang_h)
+            tx, ty = -math.sin(ang_h), math.cos(ang_h)
+            msp.add_line(
+                (cx - 40.0 * tx, cy - 40.0 * ty),
+                (cx + 40.0 * tx, cy + 40.0 * ty),
+                dxfattribs=base,
+            )
+        lib_llm_correct.separate_segmented_swing_doors(msp)
+        self.assertEqual(mate_poly.dxf.layer, "WALL")
+
 
 if __name__ == "__main__":
     unittest.main()

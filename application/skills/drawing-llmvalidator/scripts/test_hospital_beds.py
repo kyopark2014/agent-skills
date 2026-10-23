@@ -161,6 +161,44 @@ class HospitalBedTests(unittest.TestCase):
         self.assertIn(id(bed), demoted)
         self.assertIn(id(xmark), demoted)
 
+    def test_closet_outline_with_otjang_label_not_bed(self):
+        """객실 옷장(610×1700·옷장 라벨)은 침대가 아니며 옆 창 막이 WALL 유지."""
+        doc = ezdxf.new()
+        msp = doc.modelspace()
+        # 경주 부티크 호텔 301호 옷장과 같은 단차 닫힌 윤곽
+        x0, y0, length, depth = 0.0, 0.0, 1700.0, 610.0
+        closet = msp.add_lwpolyline(
+            [
+                (x0 + 1000.0, y0 + depth - 50.0),
+                (x0 + length, y0 + depth - 50.0),
+                (x0 + length, y0),
+                (x0, y0),
+                (x0, y0 + depth),
+                (x0 + 1000.0, y0 + depth),
+            ],
+            close=True,
+            dxfattribs={"layer": "BASE", "color": 8},
+        )
+        msp.add_text(
+            "옷장",
+            dxfattribs={
+                "layer": "BASE",
+                "insert": (x0 + length * 0.5, y0 + depth * 0.5),
+                "height": 100.0,
+            },
+        )
+        # 옷장 윗변에 붙은 창 막이·이중벽 짧은 면(pad 120에 걸리던 선)
+        jamb_l = _v(msp, 400.0, y0 + depth, y0 + depth + 150.0, "WALL")
+        jamb_r = _v(msp, 1500.0, y0 + depth, y0 + depth + 150.0, "WALL")
+        face = _h(msp, 0.0, 400.0, y0 + depth, "WALL")
+
+        demoted = lib_llm_correct.demote_hospital_beds(msp)
+
+        self.assertNotIn(id(closet), demoted)
+        self.assertNotIn(id(jamb_l), demoted)
+        self.assertNotIn(id(jamb_r), demoted)
+        self.assertNotIn(id(face), demoted)
+
     def test_open_rounded_frame_long_side_line_demoted(self):
         """모서리 둥근 열린 침대 프레임 + promote가 복제한 긴 옆 WALL LINE demote."""
         doc = ezdxf.new()

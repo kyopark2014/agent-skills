@@ -81,6 +81,8 @@ from correct._rules import (  # noqa: F401
     promote_wall_between_adjacent_doors,
     promote_door_side_doubles,
     promote_thin_door_panel_sides,
+    promote_pier_between_thin_door_panels,
+    promote_axis_door_pack_end_piers,
     close_thin_door_panel_flank_gaps,
     promote_door_side_corner_runs,
     add_paired_swing_walls,

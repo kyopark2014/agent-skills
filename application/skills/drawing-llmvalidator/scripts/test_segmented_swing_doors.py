@@ -109,6 +109,202 @@ class SegmentedSwingDoorTests(unittest.TestCase):
             virt += 1
         self.assertEqual(virt, 0, "tilted swing must not get virtual WALL close")
 
+    def test_diagonal_swing_promotes_existing_side_flank_walls(self):
+        """기울어진 스윙도 개구 밖 기존 BASE 이중면은 WALL로 올린다.
+
+        가상 닫힘선은 만들지 않는다. 바로유 sheet_01 화장실 옆 사선 문옆 벽.
+        """
+        doc = ezdxf.new()
+        msp = doc.modelspace()
+        hx, hy, r = 42085.0, 62790.0, 930.0
+        _add_segmented_quarter_swing(
+            msp,
+            hx,
+            hy,
+            r,
+            open_angle=210.0,
+            closed_angle=277.0,
+            n_arc=8,
+        )
+        found = lib_llm_correct._find_segmented_swing_doors(msp)
+        self.assertEqual(len(found), 1)
+        cx0, cy0, cx1, cy1 = found[0]["close"]
+        clen = math.hypot(cx1 - cx0, cy1 - cy0)
+        cux, cuy = (cx1 - cx0) / clen, (cy1 - cy0) / clen
+        nx, ny = -cuy, cux
+        # 개구 먼쪽(힌지 반대) 끝에서 밖으로 이어진 사선 이중면 (BASE)
+        tip_x, tip_y = cx1, cy1
+        flank_len = 520.0
+        thick = 150.0
+        flank0 = msp.add_lwpolyline(
+            [
+                (tip_x + 40.0 * cux, tip_y + 40.0 * cuy),
+                (tip_x + (40.0 + flank_len) * cux, tip_y + (40.0 + flank_len) * cuy),
+            ],
+            dxfattribs={"layer": "BASE", "color": 8},
+        )
+        flank1 = msp.add_lwpolyline(
+            [
+                (
+                    tip_x + 40.0 * cux + thick * nx,
+                    tip_y + 40.0 * cuy + thick * ny,
+                ),
+                (
+                    tip_x + (40.0 + flank_len) * cux + thick * nx,
+                    tip_y + (40.0 + flank_len) * cuy + thick * ny,
+                ),
+            ],
+            dxfattribs={"layer": "BASE", "color": 8},
+        )
+
+        _n_demote, n_promote = lib_llm_correct.separate_segmented_swing_doors(msp)
+
+        self.assertGreaterEqual(n_promote, 2)
+        self.assertEqual(flank0.dxf.layer, "WALL")
+        self.assertEqual(flank1.dxf.layer, "WALL")
+        # 가상 닫힘 LINE 은 여전히 없다.
+        virt = 0
+        for e in msp.query("LINE"):
+            if e.dxf.layer != "WALL":
+                continue
+            a, b = e.dxf.start, e.dxf.end
+            L = math.hypot(b.x - a.x, b.y - a.y)
+            if abs(L - r) > 80.0:
+                continue
+            if min(
+                math.hypot(a.x - hx, a.y - hy),
+                math.hypot(b.x - hx, b.y - hy),
+            ) > 80.0:
+                continue
+            virt += 1
+        self.assertEqual(virt, 0)
+
+    def test_diagonal_swing_promotes_host_wall_thickness_jamb(self):
+        """기울어진 닫힘 현과 각이 안 맞는 호스트 벽 두께 피어도 WALL.
+
+        바로유 sheet_01 복도 병실문: 닫힘 ~120° 인데 피어는 수직(~64×197 mm).
+        창 베이 맞은편·반대쪽 피어(~960 mm)·벽 상단 긴 BASE 면도 올린다.
+        """
+        doc = ezdxf.new()
+        msp = doc.modelspace()
+        hx, hy, r = 53285.0, 61381.0, 939.0
+        # 열린 문짝은 아래-오른쪽, 닫힘은 대각 (비축정렬).
+        _add_segmented_quarter_swing(
+            msp, hx, hy, r, open_angle=-30.0, closed_angle=-120.0, n_arc=8
+        )
+        # 힌지 왼쪽 위 호스트 벽 두께 피어 (수직 이중, 닫힘과 평행·수직 아님).
+        pier = msp.add_lwpolyline(
+            [
+                (53000.0, 61825.0),
+                (53000.0, 62022.0),
+                (52936.0, 62022.0),
+                (52936.0, 61825.0),
+                (53000.0, 61825.0),
+            ],
+            dxfattribs={"layer": "BASE", "color": 8},
+        )
+        stub = msp.add_lwpolyline(
+            [(53000.0, 61876.0), (53000.0, 62022.0)],
+            dxfattribs={"layer": "BASE", "color": 8},
+        )
+        # 창 베이 오른쪽 피어 (~960 mm — 예전 950 cap 밖).
+        far_pier = msp.add_lwpolyline(
+            [
+                (54047.0, 61825.0),
+                (54047.0, 62022.0),
+                (54111.0, 62022.0),
+                (54111.0, 61825.0),
+                (54047.0, 61825.0),
+            ],
+            dxfattribs={"layer": "BASE", "color": 8},
+        )
+        # 더 왼쪽 피어 (~953 mm).
+        left_far = msp.add_lwpolyline(
+            [
+                (52530.0, 61825.0),
+                (52530.0, 62022.0),
+                (52473.0, 62022.0),
+                (52473.0, 61825.0),
+                (52530.0, 61825.0),
+            ],
+            dxfattribs={"layer": "BASE", "color": 8},
+        )
+        # 벽 상단 긴 면: BASE 이중 + 같은 줄 WALL 앵커.
+        face0 = msp.add_line(
+            (53000.0, 61876.0),
+            (54047.0, 61876.0),
+            dxfattribs={"layer": "BASE", "color": 8},
+        )
+        face1 = msp.add_line(
+            (53000.0, 62022.0),
+            (54047.0, 62022.0),
+            dxfattribs={"layer": "BASE", "color": 8},
+        )
+        msp.add_line(
+            (52530.0, 62022.0),
+            (52936.0, 62022.0),
+            dxfattribs={"layer": "WALL", "color": 1},
+        )
+
+        _n_demote, n_promote = lib_llm_correct.separate_segmented_swing_doors(msp)
+
+        self.assertGreaterEqual(n_promote, 1)
+        self.assertEqual(pier.dxf.layer, "WALL")
+        self.assertEqual(stub.dxf.layer, "WALL")
+        self.assertEqual(far_pier.dxf.layer, "WALL")
+        self.assertEqual(left_far.dxf.layer, "WALL")
+        self.assertEqual(face0.dxf.layer, "WALL")
+        self.assertEqual(face1.dxf.layer, "WALL")
+
+    def test_diagonal_flank_with_slight_end_overlap_still_promotes(self):
+        """개구 끝과 수 mm 겹친 사선 BASE 이중면도 WALL로 올린다.
+
+        바로유 sheet_01 화장실 대각 벽처럼 PDF 맞춤으로 끝점이 살짝 겹칠 때.
+        """
+        doc = ezdxf.new()
+        msp = doc.modelspace()
+        hx, hy, r = 39570.0, 64124.0, 939.0
+        _add_segmented_quarter_swing(
+            msp, hx, hy, r, open_angle=210.0, closed_angle=300.0, n_arc=8
+        )
+        found = lib_llm_correct._find_segmented_swing_doors(msp)
+        self.assertEqual(len(found), 1)
+        cx0, cy0, cx1, cy1 = found[0]["close"]
+        clen = math.hypot(cx1 - cx0, cy1 - cy0)
+        cux, cuy = (cx1 - cx0) / clen, (cy1 - cy0) / clen
+        nx, ny = -cuy, cux
+        # 먼쪽 끝에서 2 mm 겹치게 시작해 밖으로 이어진 이중면
+        tip_x, tip_y = cx1, cy1
+        start = -2.0
+        flank_len = 1300.0
+        thick = 150.0
+        flank0 = msp.add_lwpolyline(
+            [
+                (tip_x + start * cux, tip_y + start * cuy),
+                (tip_x + (start + flank_len) * cux, tip_y + (start + flank_len) * cuy),
+            ],
+            dxfattribs={"layer": "BASE", "color": 8},
+        )
+        flank1 = msp.add_lwpolyline(
+            [
+                (
+                    tip_x + start * cux + thick * nx,
+                    tip_y + start * cuy + thick * ny,
+                ),
+                (
+                    tip_x + (start + flank_len) * cux + thick * nx,
+                    tip_y + (start + flank_len) * cuy + thick * ny,
+                ),
+            ],
+            dxfattribs={"layer": "BASE", "color": 8},
+        )
+
+        _n_demote, n_promote = lib_llm_correct.separate_segmented_swing_doors(msp)
+
+        self.assertGreaterEqual(n_promote, 2)
+        self.assertEqual(flank0.dxf.layer, "WALL")
+        self.assertEqual(flank1.dxf.layer, "WALL")
+
     def test_axis_aligned_segmented_swing_also_found(self):
         doc = ezdxf.new()
         msp = doc.modelspace()
@@ -847,6 +1043,49 @@ class SegmentedSwingDoorTests(unittest.TestCase):
                     surviving.append(ang)
         self.assertEqual(surviving, [], f"diagonal false closes remain: {surviving}")
         self.assertEqual(closed.dxf.layer, "WALL")
+
+    def test_slanted_double_wall_face_not_used_as_leaf(self):
+        """두께 짝이 있는 BASE 이중면은 가구 호 조각이 있어도 문짝이 아니다."""
+        doc = ezdxf.new()
+        msp = doc.modelspace()
+        base = {"layer": "BASE", "color": 8}
+        ang = math.radians(30.0)
+        ux, uy = math.cos(ang), math.sin(ang)
+        nx, ny = -uy, ux
+        hx, hy = 41780.0, 59222.0
+        r = 748.0
+        # 이중면
+        msp.add_lwpolyline(
+            [(hx, hy), (hx + r * ux, hy + r * uy)],
+            dxfattribs=base,
+        )
+        gap = 97.0
+        msp.add_lwpolyline(
+            [
+                (hx + gap * nx, hy + gap * ny),
+                (hx + 646.0 * ux + gap * nx, hy + 646.0 * uy + gap * ny),
+            ],
+            dxfattribs=base,
+        )
+        # 원주 위 가짜 호(가구)
+        for i in range(8):
+            t0 = ang + math.radians(20.0 + 10.0 * i)
+            t1 = ang + math.radians(20.0 + 10.0 * (i + 1))
+            msp.add_lwpolyline(
+                [
+                    (hx + r * math.cos(t0), hy + r * math.sin(t0)),
+                    (hx + r * math.cos(t1), hy + r * math.sin(t1)),
+                ],
+                dxfattribs=base,
+            )
+
+        found = lib_llm_correct._find_segmented_swing_doors(msp)
+        near = [
+            s
+            for s in found
+            if abs(s["hx"] - hx) < 40.0 and abs(s["hy"] - hy) < 40.0 and abs(s["radius"] - r) < 20.0
+        ]
+        self.assertEqual(near, [], f"double-wall face taken as leaf: {near}")
 
 
 if __name__ == "__main__":

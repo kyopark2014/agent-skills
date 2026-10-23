@@ -64,7 +64,9 @@ from correct._rules import (
     promote_diagonal_thin_rect_windows,
     promote_diagonal_wall_turns, promote_door_opening_flanks,
     promote_door_side_corner_runs, promote_door_side_doubles,
-    promote_thin_door_panel_sides, close_thin_door_panel_flank_gaps,
+    promote_thin_door_panel_sides, promote_pier_between_thin_door_panels,
+    promote_axis_door_pack_end_piers,
+    close_thin_door_panel_flank_gaps,
     promote_wall_between_adjacent_doors,
     promote_double_sash_windows, promote_elevator_enclosure_walls,
     promote_end_wall_columns, promote_equipment_store_walls,
@@ -648,6 +650,8 @@ def apply_corrections(
     n_promoted += promote_wall_between_adjacent_doors(msp)
     n_promoted += promote_door_side_doubles(msp)
     n_promoted += promote_thin_door_panel_sides(msp)
+    n_promoted += promote_pier_between_thin_door_panels(msp)
+    n_promoted += promote_axis_door_pack_end_piers(msp)
     n_promoted += close_thin_door_panel_flank_gaps(msp)
     n_promoted += promote_door_side_corner_runs(msp)
     n_promoted += promote_service_core_walls(msp)
@@ -746,6 +750,9 @@ def apply_corrections(
     n_seg_demote2, n_seg_promote2 = separate_segmented_swing_doors(msp)
     n_demoted += n_seg_demote2
     n_promoted += n_seg_promote2
+    # 문짝이 DOOR로 확정된 뒤, 문 사이·개구 끝 BASE 피어를 다시 올린다.
+    n_promoted += promote_pier_between_thin_door_panels(msp)
+    n_promoted += promote_axis_door_pack_end_piers(msp)
 
     # 분절 스윙 닫힘·미닫이가 외창 유리를 WALL/DOOR로 덮을 수 있어 레이어 분리 직전 재승격.
     n_facade_window2, n_facade_wall2 = promote_facade_bay_windows(msp)
@@ -755,6 +762,11 @@ def apply_corrections(
     n_promoted += promote_x_cover_squares(msp)
 
     marked = mark_doors_and_columns(msp)
+
+    # 문짝 레이어가 최종 확정된 뒤 문 사이·개구 끝 BASE 피어를 올린다.
+    # (이전 패스는 문짝이 아직 DOOR 패널이 아니어 62048·62511 피어를 놓쳤다.)
+    n_promoted += promote_pier_between_thin_door_panels(msp)
+    n_promoted += promote_axis_door_pack_end_piers(msp)
 
     n_wall = sum(1 for e in _entities(msp) if e.dxf.layer == WALL_LAYER)
     n_base = sum(1 for e in _entities(msp) if e.dxf.layer == BASE_LAYER)
