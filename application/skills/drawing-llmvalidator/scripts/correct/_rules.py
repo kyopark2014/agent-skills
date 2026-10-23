@@ -22957,12 +22957,59 @@ def _axis_rect_bbox(entity) -> tuple[float, float, float, float] | None:
     return min(xs), min(ys), max(xs), max(ys)
 
 
+def _lr_hook_arrow_from_points(
+    points: list[tuple[float, float]],
+) -> dict | None:
+    """4점 축정렬 훅 화살표(→). 샤프트·수직 미늘·짧은 팁 되돌림.
+
+    클럽하우스 1F 유리 베이 미닫이처럼 샤프트 0.25–0.7 m, 미늘 25–120 mm,
+    팁 15–80 mm 인 열린 4점 폴리선이다. 얇은 U자 벽(팁≈샤프트)은 제외한다.
+    """
+    if len(points) != 4:
+        return None
+    (ax, ay), (bx, by), (cx, cy), (dx, dy) = points
+    segs = ((ax, ay, bx, by), (bx, by, cx, cy), (cx, cy, dx, dy))
+    lengths: list[float] = []
+    dirs: list[tuple[str, float]] = []
+    for x0, y0, x1, y1 in segs:
+        sx, sy = x1 - x0, y1 - y0
+        length = math.hypot(sx, sy)
+        if length < 1.0:
+            return None
+        if abs(sy) <= 2.0 and abs(sx) >= 0.95 * length:
+            dirs.append(("h", 1.0 if sx > 0 else -1.0))
+        elif abs(sx) <= 2.0 and abs(sy) >= 0.95 * length:
+            dirs.append(("v", 1.0 if sy > 0 else -1.0))
+        else:
+            return None
+        lengths.append(length)
+    shaft, barb, tip = lengths
+    if not (250.0 <= shaft <= 700.0 and 25.0 <= barb <= 120.0 and 15.0 <= tip <= 80.0):
+        return None
+    if tip > 0.35 * shaft:
+        return None
+    if dirs[0][0] == dirs[1][0] or dirs[0][0] != dirs[2][0]:
+        return None
+    if dirs[0][1] == dirs[2][1]:
+        return None
+    horizontal = dirs[0][0] == "h"
+    sx0, sy0, sx1, sy1 = segs[0]
+    return {
+        "horizontal": horizontal,
+        "mx": (sx0 + sx1) * 0.5,
+        "my": (sy0 + sy1) * 0.5,
+        "a0": min(sx0, sx1) if horizontal else min(sy0, sy1),
+        "a1": max(sx0, sx1) if horizontal else max(sy0, sy1),
+    }
+
+
 def _find_lr_arrow_sliding_doors(msp) -> list[dict]:
     """좌·우(또는 상·하) 화살표가 가리키는 축정렬 미닫이.
 
-    샤프트 0.7–1.6 m, 미늘 0.12–0.5 m, 꺾임 20–55°인 축정렬 3점 폴리선이
-    화살표다. 클럽하우스 PDR 열처럼 벽 두께 안의 얇은 직사각 문짝과 화살표는
-    DOOR, 같은 벽면의 양옆·사이 구간은 WALL이다.
+    샤프트 0.7–1.6 m, 미늘 0.12–0.5 m, 꺾임 20–55°인 축정렬 3점 폴리선과,
+    샤프트 0.25–0.7 m·미늘 25–120 mm·팁 15–80 mm인 4점 훅 화살표(→)가
+    화살표다. 클럽하우스 PDR 열·1F 유리 베이처럼 벽 두께 안의 얇은 직사각
+    문짝과 화살표는 DOOR, 같은 벽면의 양옆·사이 구간은 WALL이다.
     """
     arrows: list[dict] = []
     for entity in _entities(msp):
@@ -22973,6 +23020,12 @@ def _find_lr_arrow_sliding_doors(msp) -> list[dict]:
         try:
             points = [(float(x), float(y)) for x, y in entity.get_points("xy")]
         except Exception:  # noqa: BLE001
+            continue
+        if len(points) == 4:
+            hook = _lr_hook_arrow_from_points(points)
+            if hook is None:
+                continue
+            arrows.append({"entity": entity, **hook})
             continue
         if len(points) != 3:
             continue
@@ -23025,7 +23078,7 @@ def _find_lr_arrow_sliding_doors(msp) -> list[dict]:
         x0, y0, x1, y1 = box
         width, height = x1 - x0, y1 - y0
         long, short = max(width, height), min(width, height)
-        if not (600.0 <= long <= 1600.0 and 35.0 <= short <= 140.0):
+        if not (600.0 <= long <= 1600.0 and 20.0 <= short <= 140.0):
             continue
         horizontal = width >= height
         panels.append({
@@ -23137,9 +23190,23 @@ def _find_lr_arrow_sliding_doors(msp) -> list[dict]:
                 # 같은 벽면의 다른 문짝도 DOOR. 양옆·사이 두꺼운 면만 WALL.
                 panel_like = (
                     600.0 <= along_span <= 1600.0
-                    and 35.0 <= perp_span <= 140.0
+                    and 20.0 <= perp_span <= 140.0
                 )
                 if panel_like:
+                    if entity not in door_entities:
+                        door_entities.append(entity)
+                    continue
+                # 화살표 옆 채워진 화살촉·짧은 밑줄도 DOOR (벽 stub로 올리지 않음).
+                mid_along = (along0 + along1) * 0.5
+                mid_perp = (perp0 + perp1) * 0.5
+                arrow_perp = arrow["my"] if arrow["horizontal"] else arrow["mx"]
+                arrow_head_like = (
+                    80.0 <= along_span <= 400.0
+                    and 8.0 <= perp_span <= 100.0
+                    and abs(mid_perp - arrow_perp) <= 100.0
+                    and arrow["a0"] - 120.0 <= mid_along <= arrow["a1"] + 120.0
+                )
+                if arrow_head_like:
                     if entity not in door_entities:
                         door_entities.append(entity)
                     continue

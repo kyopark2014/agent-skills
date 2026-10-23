@@ -88,6 +88,49 @@ class LrArrowSlidingDoorTests(unittest.TestCase):
         self.assertEqual(void_x.dxf.layer, "BASE")
         self.assertEqual(sheet.dxf.layer, "BASE")
 
+    def test_hook_arrow_thin_panel_becomes_door(self):
+        """클럽하우스 1F 유리 베이: 4점 → 훅 화살표 + 얇은 문짝 → DOOR."""
+        doc = ezdxf.new()
+        msp = doc.modelspace()
+        wall_left = _rect(msp, 0, 0, 900, 150)
+        # 두께 35 mm 이중 레일 문짝 (5점, 끝점=시작점)
+        panel = msp.add_lwpolyline(
+            [
+                (1000.0, 50.0),
+                (2130.0, 50.0),
+                (2130.0, 85.0),
+                (1000.0, 85.0),
+                (1000.0, 50.0),
+            ],
+            dxfattribs={"layer": "WALL"},
+        )
+        panel.closed = False
+        wall_right = _rect(msp, 2200, 0, 3200, 150)
+        # → 훅: 샤프트 450, 미늘 60, 팁 30
+        arrow = msp.add_lwpolyline(
+            [(1000.0, -40.0), (1450.0, -40.0), (1450.0, 20.0), (1420.0, 20.0)],
+            dxfattribs={"layer": "BASE"},
+        )
+        arrow.closed = False
+        head = _rect(msp, 1270, -40, 1450, 10)
+        # 팁≈샤프트인 얇은 U는 훅 화살표가 아니다. 문 옆 promote 창 밖.
+        thin_u = msp.add_lwpolyline(
+            [(50000.0, 0.0), (50000.0, 600.0), (49980.0, 600.0), (49980.0, 0.0)],
+            dxfattribs={"layer": "BASE"},
+        )
+        thin_u.closed = False
+
+        demoted, promoted = lib_llm_correct.separate_lr_arrow_sliding_doors(msp)
+
+        self.assertGreaterEqual(demoted, 2)
+        self.assertGreaterEqual(promoted, 1)
+        self.assertEqual(panel.dxf.layer, "DOOR")
+        self.assertEqual(arrow.dxf.layer, "DOOR")
+        self.assertEqual(head.dxf.layer, "DOOR")
+        self.assertEqual(wall_left.dxf.layer, "WALL")
+        self.assertEqual(wall_right.dxf.layer, "WALL")
+        self.assertEqual(thin_u.dxf.layer, "BASE")
+
 
 if __name__ == "__main__":
     unittest.main()
