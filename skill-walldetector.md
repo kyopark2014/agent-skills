@@ -14,10 +14,11 @@
 | 기본 입력 | `$ARTIFACTS_DIR/<drawing_id>/floors/<F>/floor_original.dxf` |
 | 기본 출력 | `floor_wall_original.*` (common + 프로젝트 + 샘플)와 `floor_wall_common.png` (common만) |
 | 도면별 조건 | `wall_conditions.json` + `floors/<F>/wall_samples/wall_conditions.json` |
-| 진입 스크립트 | `detect_walls_floor.py` (층 1개). 샘플 파일이 없으면 그 전에 `sample_wall_conditions.py --vision` |
+| 진입 스크립트 | 한 층 `detect_walls_floor.py`, 여러 층 `detect_walls_all.py`. 샘플이 없으면 그 전에 `sample_wall_conditions.py --vision` |
 | 분류·저장 | `lib_walls.classify_entities` → `write_walls_dxf` / `render_walls_png` |
 
-원본 277MB DXF를 직접 돌리지 않습니다. `parts/` 타일 분할은 기본 워크플로에서 쓰지 않습니다 (`--with-tiles`는 레거시·선택).
+원본 277MB DXF를 직접 돌리지 않습니다. `parts/` 타일 분할은 기본 워크플로에서 쓰지 않습니다 (`--with-tiles`는 레거시·선택).  
+여러 층은 `detect_walls_all.py` 한 번으로, 물리 CPU 코어 수만큼 층을 동시에 검출합니다. `for FLOOR in …`는 쓰지 않습니다.
 
 ### 산출 경로
 
@@ -263,9 +264,9 @@ DXF의 레이어 구조와 시각적으로 대응합니다.
 | `lib_walls.py` | 분류·DXF/PNG. 조건은 `wall_conditions.json` |
 | `lib_wall_samples.py` | 샘플 창·측정 |
 | `detect_walls_tile.py` | 단일 DXF. 사용자가 타일을 명시할 때 |
-| `detect_walls_all.py` | 다층 일괄. 사용자가 일괄을 명시할 때 |
+| `detect_walls_all.py` | 층이 둘 이상. 물리 CPU 코어 수만큼 동시 검출 |
 
-이미 `floor_wall_original.*`가 있어도 같은 경로에 덮어씁니다. 호출은 층당 bash 1회입니다. `for` 일괄과 `detect_walls_all`은 대용량에서 `TimeoutExpired`가 납니다.
+이미 `floor_wall_original.*`가 있어도 같은 경로에 덮어씁니다. 여러 층은 `detect_walls_all` 한 번입니다. 동시에 너무 많으면 `--workers`를 줄입니다. `for` 루프로 나누지 않습니다.
 
 ### 호출 예
 
@@ -273,7 +274,11 @@ DXF의 레이어 구조와 시각적으로 대응합니다.
 SCRIPTS="$WORKING_DIR/skills/drawing-walldetector/scripts"
 ART="$ARTIFACTS_DIR/<drawing_id>"
 
+# 한 층
 python3 "$SCRIPTS/detect_walls_floor.py" --artifacts "$ART" --floor 12F
+
+# 여러 층
+python3 "$SCRIPTS/detect_walls_all.py" --artifacts "$ART"
 ```
 
 로컬:
@@ -310,4 +315,4 @@ ART=/Users/ksdyb/Documents/src/agent-skills/application/.session_storage/lge/art
 
 ## 8. 한 줄 요약
 
-**`LINE`/`LWPOLYLINE`의 축정렬 이중선을 `wall_conditions.json` 조건으로 확정하고, 원본은 그대로 둔 채 `WALL`·`DOOR`·`WINDOW`·`COLUMN`·`BASE`로 나눈 `floor_wall_original`을 저장합니다. common만 적용한 검수용이 `floor_wall_common.png`입니다.**
+**`LINE`/`LWPOLYLINE`의 축정렬 이중선을 `wall_conditions.json` 조건으로 확정하고, 원본은 그대로 둔 채 `WALL`·`DOOR`·`WINDOW`·`COLUMN`·`BASE`로 나눈 `floor_wall_original`을 저장합니다. 여러 층은 `detect_walls_all` 한 번이며, common만 적용한 검수용이 `floor_wall_common.png`입니다.**

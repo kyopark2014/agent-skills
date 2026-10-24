@@ -1,11 +1,14 @@
 # 도면 분석 파이프라인
 
-CAD/DXF를 **층 추출 → 벽 검출 → Vision 검증 → 실명 면적** 순으로 처리합니다.  
-한 번에 끝까지 돌릴 때는 `drawing-areasizing`이 네 스킬을 이 순서로 호출합니다. 한 단계만 말하면 그 스킬만 씁니다.
+CAD/DXF/DWG를 **층 추출 → 벽 검출 → Vision 검증 → 실명 면적** 순으로 처리합니다.  
+한 번에 끝까지 돌릴 때는 `drawing-areasizing`이 네 스킬을 이 순서로 호출합니다. totalroom에는 항상 `--fill-unlabeled`를 붙입니다. 한 단계만 말하면 그 스킬만 씁니다.
 
-예시 도면은 SK용인하이닉스 지원동 (`sk_yongin_jiwon`, 원본 `SK용인하이닉스_지원동 평면도_241014.dxf`)입니다. 같은 파이프라인은 호텔·병원·주택 도면에도 씁니다. 건물·층 이름은 `$ARTIFACTS_DIR/drawing_list.json`의 `source_filename`·`floors[].floor`로 고릅니다.
+예시 도면은 SK용인하이닉스 지원동 (`sk_yongin_jiwon`, 원본 `SK용인하이닉스_지원동 평면도_241014.dxf`)입니다. 같은 파이프라인은 호텔·병원·주택 도면에도 씁니다. 건물·층 이름은 `$ARTIFACTS_DIR/drawing_list.json`의 `source_filename`·`floors[].floor`로 고릅니다. DWG는 devider가 도면 폴더 DXF로 바꾼 뒤 이어서 처리합니다.
 
-판정 문장·방 이름별 예외의 원본은 각 스킬 `SKILL.md`입니다. 이 문서는 스크립트와 산출물이 실제로 하는 일을 적습니다.
+판정 문장·방 이름별 예외의 원본은 각 스킬 `SKILL.md`입니다. 단계별 동작 상세는 `skill-devider.md` · `skill-walldetector.md` · `skill-validator.md` · `skill-totalroom.md` · `skill-roomevaluator.md` · `skill-areasizing.md` · `skill-llmextractor.md`입니다. 이 문서는 스크립트와 산출물이 실제로 하는 일을 적습니다.
+
+스킬 원본은 세 레포에 같이 둡니다: `agent-skills/application/skills/`, `lge-drawing-ecs/runtime_agent/strands/skills/`, `lge-drawing/runtime_agent/strands/skills/`.
+
 
 ## 공통 경로
 
@@ -40,22 +43,27 @@ drawing-walldetector   floor_wall_original.*  (+ floor_wall_common.png)
         ↓
 drawing-llmvalidator   floor_wall_validated.*
         ↓
-drawing-totalroom      floor_label_detected.dxf / .png / .json
+drawing-totalroom      floor_label_detected.*  (--fill-unlabeled)
 ```
 
 
-| 스킬                      | 역할                                             |
-| ----------------------- | ---------------------------------------------- |
-| `drawing-areasizing`    | 위 네 단계를 순서대로 실행. 스크립트는 없습니다                    |
-| `drawing-roomevaluator` | 실이 **하나**일 때 `floor_wall_validated`에서 그 실만 면적  |
-| `drawing-llmextractor`  | 주제(기둥·문 등)를 Vision으로 찾아 별도 PNG에 표시. 면적 파이프라인 밖 |
+| 스킬                      | 역할                                                                  |
+| ----------------------- | ------------------------------------------------------------------- |
+| `drawing-areasizing`    | 위 네 단계를 순서대로 실행. 스크립트는 없습니다. totalroom에 `--fill-unlabeled` 고정 |
+| `drawing-roomevaluator` | 실이 **하나**일 때 `floor_wall_validated`에서 그 실만 면적                     |
+| `drawing-llmextractor`  | 주제(기둥·문 등)를 Vision으로 찾아 별도 PNG에 표시. 면적 파이프라인 밖                    |
 
 
 공통 실행 규칙:
 
 - 기존 `floor_original.*`·`floor_wall_original.*`·`floor_wall_validated.*`·`llm_review/`·`floor_label_detected.*`가 있으면 **같은 경로에 덮어씁니다**. 도면 폴더는 유지합니다.
-- 층을 지정하면 그 층만, 아니면 발견 층 전체를 순서대로 처리합니다.
-- `extract_2d`·`detect_walls_floor`·`prepare_review`·`view_image`·`correct_walls_floor`·`detect_labels`는 **층당 bash 1회**. `for FLOOR in …`, `--floor all`, `detect_walls_all`은 기본으로 쓰지 않습니다.
+- 층을 지정하면 그 층만, 아니면 발견 층 전체를 한 작업으로 처리합니다.
+- **여러 층은 `_all` / `--floor all` 한 번**이 기본입니다. 물리 CPU 코어 수만큼 층을 동시에 돌립니다. `for FLOOR in …`로 단일 스크립트를 층마다 돌리지 않습니다.
+  - 추출: `extract_2d.py --floor all` (대용량은 devider `SKILL.md`대로 `nohup` 백그라운드)
+  - 벽: `detect_walls_all.py` (한 층이면 `detect_walls_floor.py`)
+  - 검증: `prepare_review_all.py` → `view_image_all.py` 각 한 번 → 보정은 층마다 `correct_walls_floor.py` + `render_wall_diff.py` (한 턴에 코어 수만큼 병렬). Vision·보정 단계에서는 `nohup`/`&`/`sleep`/`for`를 쓰지 않습니다.
+  - 실면적: `detect_labels_all.py`를 **한 bash에 최대 3층**만. 남은 층은 다음 bash.
+- `review.json`이 생기기 전에 실면적으로 가지 않습니다. `prepare_review`와 `correct`를 한 bash에 넣지 않습니다.
 
 ---
 
@@ -65,13 +73,15 @@ drawing-totalroom      floor_label_detected.dxf / .png / .json
 
 경로: `application/skills/drawing-devider/`
 
-원본 DXF를 층별 `floors/<F>/floor_original.dxf`(+ `.png`)로 뽑습니다. 층 하나가 후속 Vision·벽 인식의 입력입니다.
+원본 DXF·DWG를 층별 `floors/<F>/floor_original.dxf`(+ `.png`)로 뽑습니다. 층 하나가 후속 Vision·벽 인식의 입력입니다. DWG는 `--dxf`에 그대로 넣으면 `lib_dwg`가 `$ARTIFACTS_DIR/<drawing_id>/<원본이름>.dxf`로 변환합니다(ODA File Converter 또는 `dwg2dxf`).
 
 ### 층 구분 (`--layout auto`)
 
 1. modelspace INSERT `XA-S-{N}F 평면`이 있으면 **block** 방식. 지원동이 이 경우입니다.
-2. 그 형식이 없으면 `lib_sheet.py`가 도곽(축정렬 테두리)과 층 제목으로 나눕니다. `1층 평면도`뿐 아니라 `1층 냉난방 평면도`처럼 사이에 용도가 있어도 인정합니다. 같은 제목이 떨어진 도곽에 반복되면 왼쪽부터 `1F`, `1F_2`. 한 도곽 안에서 층을 나누지 못하면 `sheet_01`, `sheet_02`로 두고 층 이름만 미확정입니다. `sheet_XX`도 그 이름으로 추출합니다.
+2. 그 형식이 없으면 `lib_sheet.py`가 도곽(축정렬 테두리)·시트 블록 INSERT·층 제목·종이공간 뷰포트로 나눕니다. `1층 평면도`뿐 아니라 `1층 냉난방 평면도`처럼 사이에 용도가 있어도 인정합니다. 같은 제목이 떨어진 도곽에 반복되면 면적이 큰 순으로 `1F`, `1F_2`. 한 도곽 안에서 층을 나누지 못하면 `sheet_01`, `sheet_02`로 두고 층 이름만 미확정입니다. `sheet_XX`도 그 이름으로 추출합니다.
 3. 도곽 도면은 먼저 `--list-floors`로 목록만 보고, 나온 이름만 `--floor`에 넣습니다.
+
+구조 축 레이어는 `floor_original`에서 뺍니다 (`lib_structure.drop_axis_layers`: 이름 패턴 + CEN/CENTER 격자 특성). 꺼진 레이어의 숨은선(`HIDDEN` 등)도 뺍니다.
 
 
 
@@ -80,9 +90,10 @@ drawing-totalroom      floor_label_detected.dxf / .png / .json
 
 | 스크립트                                       | 역할                                                                       |
 | ------------------------------------------ | ------------------------------------------------------------------------ |
-| `scripts/extract_2d.py`                    | 원본 → `floors/<F>/floor_original.dxf` (+ `.png`). 기본 `--variant original` |
+| `scripts/extract_2d.py`                    | 원본 → `floors/<F>/floor_original.dxf` (+ `.png`). 기본 `--variant original`. 여러 층은 `--floor all` 한 번 |
+| `scripts/lib_dwg.py`                       | DWG → DXF 변환·LibreDWG SORTENTSTABLE 수리                                   |
 | `scripts/lib_sheet.py`                     | XA-S가 없을 때 도곽·층 제목                                                       |
-| `scripts/lib_structure.py`                 | 도곽 + 건축 레이어일 때 벽·창·실명·문 스윙만                                              |
+| `scripts/lib_structure.py`                 | 도곽 + 건축 레이어일 때 벽·창·실명·문 스윙만. 축선 레이어 제거                                   |
 | `scripts/analyze_drawing.py`               | `structure.md` / `structure.json`                                        |
 | `scripts/lib_render.py`                    | 치수·고해상도 렌더                                                               |
 | `scripts/lib_split.py`                     | primary 클러스터·bbox                                                        |
@@ -91,9 +102,17 @@ drawing-totalroom      floor_label_detected.dxf / .png / .json
 
 ```bash
 SCRIPTS="$SKILLS/drawing-devider/scripts"
+# 한 층
 python3 "$SCRIPTS/extract_2d.py" \
   --dxf "$ARTIFACTS_DIR/<input>.dxf" \
   --floor 5F \
+  --out "$ARTIFACTS_DIR" \
+  --drawing-id sk_yongin_jiwon
+
+# 여러 층 — 한 번. 대용량은 nohup 백그라운드 (devider SKILL.md)
+python3 "$SCRIPTS/extract_2d.py" \
+  --dxf "$ARTIFACTS_DIR/<input>.dxf" \
+  --floor all \
   --out "$ARTIFACTS_DIR" \
   --drawing-id sk_yongin_jiwon
 ```
@@ -106,7 +125,7 @@ python3 "$SCRIPTS/extract_2d.py" \
 | 레이아웃                                                | 내용                                                                                                                                       |
 | --------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
 | **block** (지원동 `XA-S-{N}F`)                         | `--variant original`이 기본. 가구 INSERT를 **유지**합니다. 좌·우 복사본이면 LINE이 많은 primary 클러스터만. `--variant clean`은 레거시이며 `FURNITURE_KEYWORDS`로 가구를 뺍니다 |
-| **sheet** + 도곽 안 건축 레이어 (`ARCH`, `*_BG`·`*_CEN` 제외) | `collect_structural_sheet`. 벽·창·실명·문 스윙만. 창선은 벽과 같이 남깁니다. 가구·카세트 배관·등고선은 넣지 않습니다. 파일명은 그대로 `floor_original.`*                            |
+| **sheet** + 도곽 안 건축 레이어 (`ARCH`, `*_BG`·`*_CEN` 제외) | `collect_structural_sheet`. 벽·창·실명·문 스윙만. 창선은 벽과 같이 남깁니다. 가구·카세트 배관·등고선은 넣지 않습니다. 제목에 `냉난방`·`배관`·`전열` 등이 있으면 필터 없이 도곽 안 전체 기하. 파일명은 그대로 `floor_original.`* |
 | **sheet** + 건축 레이어 없음                               | 도곽 안 기하를 그대로 둡니다                                                                                                                         |
 
 
@@ -115,7 +134,7 @@ python3 "$SCRIPTS/extract_2d.py" \
 ### 워크플로
 
 1. `drawing_id` 폴더가 있어도 추출합니다. `floor_original.*`·`structure.*`·`work_log.md`는 덮어씁니다.
-2. 층마다 `extract_2d.py --floor <F>` 한 번. 한 층이 끝나면 다음 층을 처리합니다.
+2. 여러 층이면 `extract_2d.py --floor all`(또는 `1F,3F`) **한 번**. 스크립트가 코어 수만큼 동시 추출합니다. `for` 루프는 쓰지 않습니다.
 3. 범위 안 추출이 끝나면 `analyze_drawing.py` 1회.
 4. `work_log.md`를 남깁니다.
 
@@ -224,15 +243,18 @@ $ARTIFACTS_DIR/
 | ----------------------------------- | --------------------------------------------------- |
 | `scripts/sample_wall_conditions.py` | 샘플 2장 → `wall_samples/wall_conditions.json`         |
 | `scripts/detect_walls_floor.py`     | **한 층** `floor_wall_original` + `floor_wall_common` |
+| `scripts/detect_walls_all.py`       | **여러 층** 한 번. 물리 CPU 코어 수만큼 동시 검출                   |
 | `scripts/lib_walls.py`              | 분류·DXF/PNG                                          |
 | `scripts/lib_wall_samples.py`       | 샘플 창·조건 수집                                          |
 | `scripts/detect_walls_tile.py`      | 단일 DXF (레거시)                                        |
-| `scripts/detect_walls_all.py`       | 다층 일괄. 사용자가 명시할 때만                                  |
 
 
 ```bash
 SCRIPTS="$SKILLS/drawing-walldetector/scripts"
+# 한 층
 python3 "$SCRIPTS/detect_walls_floor.py" --artifacts "$ART" --floor 5F
+# 여러 층
+python3 "$SCRIPTS/detect_walls_all.py" --artifacts "$ART"
 ```
 
 `wall_samples/wall_conditions.json`이 없을 때만, 그 전에:
@@ -276,7 +298,7 @@ walls_all_index.json          # 선택
 
 ### 한계
 
-- 단일선 벽·사선 벽은 약합니다.
+- 단일선 벽·사선 벽은 약합니다(검증 단계의 사선 이중선 승격이 보완).
 - 이중선 간격이 확정 조건 밖이면 놓칩니다.
 - ≤ 3.5 m 닫힌 박스로 그린 작은 실(화장실 칸 등)도 가구와 함께 빠질 수 있습니다.
 - 레이어가 표준화되면 휴리스틱보다 레이어·블록 규칙을 먼저 쓰는 편이 낫습니다.
@@ -287,11 +309,11 @@ walls_all_index.json          # 선택
 
 ## 3. 벽 검증 — `drawing-llmvalidator`
 
-경로: `skills/drawing-llmvalidator/`
+경로: `application/skills/drawing-llmvalidator/`
 
 `floor_wall_original`의 빨간 WALL을 `floor_wall_validated.*`로 고칩니다. 입력 `floor_wall_original.*`은 덮어쓰지 않습니다.
 
-선을 지우고 레이어를 바꾸는 것은 항상 `lib_llm_correct.py`의 `apply_corrections`입니다. Vision은 도면 엔티티를 건드리지 않습니다. `view_image.py`가 타일 PNG만 보고 `llm_review/review.json`에 **상자**를 씁니다. `review.json`이 없어도 기하 규칙은 그대로 돕니다. `load_review`는 없으면 `{}`를 반환합니다.
+선을 지우고 레이어를 바꾸는 것은 항상 `lib_llm_correct.py`의 `apply_corrections`입니다(구현은 `scripts/correct/` 패키지). Vision은 도면 엔티티를 건드리지 않습니다. `view_image.py`가 타일 PNG만 보고 `llm_review/review.json`에 **상자**를 씁니다. `review.json`이 없어도 기하 규칙은 그대로 돕니다. `load_review`는 없으면 `{}`를 반환합니다.
 
 ### 기하를 쓰는 경우
 
@@ -312,24 +334,24 @@ DXF에서 길이·간격·각도·블록 형태로 재는 구조입니다. 층�
 | 레이어 분리       | 보정 맨 끝에 문·창·기둥을 `DOOR` / `WINDOW` / `COLUMN`으로 다시 칠합니다. Vision은 레이어를 지정하지 않습니다 |
 
 
-방 이름·문 형태별 수치(지원동·병원 도면에서 맞춘 값)도 이 기하 함수 안에 있습니다. 목록은 `drawing-llmvalidator/SKILL.md`의 판정 기준과 같고, 실행은 `lib_llm_correct.py`입니다.
+방 이름·문 형태별 수치(지원동·병원 도면에서 맞춘 값)도 이 기하 함수 안에 있습니다. 목록은 `drawing-llmvalidator/SKILL.md`의 판정 기준과 같고, 실행은 `lib_llm_correct` / `correct/`입니다.
 
 ### Vision을 쓰는 경우
 
-이미지를 Vision LLM으로 확인하여, 수치 규칙에 **안 들어가는 오검출·미검출을 수행합니다** . 모델은 `SKILL.md`의 「Vision 판정 기준」을 프롬프트을 따라 타일 한 장마다 수행합니다.
+이미지를 Vision LLM으로 확인하여, 수치 규칙에 **안 들어가는 오검출·미검출을 수행합니다**. 모델은 `SKILL.md`의 「Vision 판정 기준」을 프롬프트로 따라 타일 한 장마다 수행합니다.
 
 
 | 상자               | 이미지에서 보는 것                                                 | 기하가 상자를 적용하는 방식                                                                            |
 | ---------------- | ---------------------------------------------------------- | ------------------------------------------------------------------------------------------ |
-| `demote_bboxes`  | **빨강인데 벽이 아닌** 한 덩어리. 책상·기구·벤치·엘리베이터 카 내부처럼 정형 가구 규칙이 놓친 것 | 상자 안에 **중심**이 들어오는 `WALL` `LINE`/`LWPOLYLINE`만 삭제. 복도·계단·엘리베이터·기둥 protect보다 **우선**         |
+| `demote_bboxes`  | **빨강인데 벽이 아닌** 한 덩어리. 책상·기구·벤치·엘리베이터 카 내부처럼 정형 가구 규칙이 놓친 것 | 상자 안에 **중심**이 들어오는 `WALL` `LINE`/`LWPOLYLINE`만 삭제. 복도·계단·엘리베이터·기둥 protect보다 **우선**. 상자 안이어도 문 양옆·창문·기둥(및 기둥 맞닿은 면)은 demote하지 않음 |
 | `promote_bboxes` | **회색인데 벽인** 한 덩어리. 빠진 칸막이·복도 경계처럼 길이·이중선 규칙이 못 올린 것        | 상자 안 회색 선을 전부 올리지 **않습니다**. 이미 WALL인 선 사이의 갭 이중선, 그리고 양옆에 WALL 이웃이 있는 세로 칸막이(2.5 m 이상)만 승격 |
 
 
 Vision이 하지 않는 일:
 
-- 엔티티 삭제, 선 추가, 레이어·색 변경. 
+- 엔티티 삭제, 선 추가, 레이어·색 변경.
 - 복도 전체·층 절반·연속 방 열. demote 상자는 한 변 25 m 초과 또는 면적 200 m² 초과면 버립니다. 보통 한 변 15 m 이하가 가구·개구 한 덩어리입니다.
-- Vision으로 문·창·기둥 레이어를 생성하지 않습니다. 
+- Vision으로 문·창·기둥 레이어를 생성하지 않습니다.
 
 기하가 놓친 자리를 작은 상자로 짚습니다.
 
@@ -363,30 +385,34 @@ review = {"demote_bboxes": demote, "promote_bboxes": promote}
 (review_dir / "review.json").write_text(json.dumps(review, ensure_ascii=False, indent=2))
 ```
 
-`prompt`는 `SKILL.md`의 「Vision 판정 기준」에 타일 파일명을 붙인 문자열입니다. 모델에게는 설명 없이 JSON 하나만 답하라고 합니다. 좌표는 그 이미지 기준 0~1(왼쪽 위가 원점, y는 아래)이고, `_to_mm`이 층 좌표로 바꿉니다. 타일이 여러 장이면 최대 4개(`--workers`)를 동시에 호출합니다.
+`prompt`는 `SKILL.md`의 「Vision 판정 기준」에 타일 파일명을 붙인 문자열입니다. 모델에게는 설명 없이 JSON 하나만 답하라고 합니다. 좌표는 그 이미지 기준 0~1(왼쪽 위가 원점, y는 아래)이고, `_to_mm`이 층 좌표로 바꿉니다. 범위 전체는 `view_image_all.py`가 층마다 물리 CPU 코어 수만큼 타일을 동시에 호출합니다.
 
 ### 스크립트
 
 
 | 스크립트                             | 역할                                                                                                                                     |
 | -------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
-| `scripts/prepare_review.py`      | `floor_wall_original.png` → `llm_review/R*C*.png` + `tiles.json`. 한 변 5000px 이하면 타일 1장. 넘으면 겹침 12% 격자. `floor_wall_full.png`는 만들지 않습니다 |
-| `scripts/view_image.py`          | 타일마다 Vision → `review.json` (층 mm bbox)                                                                                                |
-| `scripts/correct_walls_floor.py` | `apply_corrections` → `floor_wall_validated.*` + `corrections.json`                                                                    |
+| `scripts/prepare_review_all.py`  | original png가 있는 층을 코어 수만큼 동시에 타일 준비                                                                                                   |
+| `scripts/prepare_review.py`      | 한 층. `floor_wall_original.png` → `llm_review/R*C*.png` + `tiles.json`. 한 변 5000px 이하면 타일 1장. 넘으면 겹침 12% 격자. `floor_wall_full.png`는 만들지 않습니다 |
+| `scripts/view_image_all.py`      | tiles.json이 있는 층을 판정. 진행 중 Vision 호출은 물리 CPU 코어 수. 끝날 때까지 대기                                                                              |
+| `scripts/view_image.py`          | 한 층 타일마다 Vision → `review.json` (층 mm bbox)                                                                                            |
+| `scripts/correct_walls_floor.py` | `apply_corrections` → `floor_wall_validated.*` + `corrections.json`. 에이전트는 층마다 bash (한 턴에 코어 수만큼 병렬)                                   |
+| `scripts/correct_walls_all.py`   | 에이전트는 호출하지 않음                                                                                                                          |
 | `scripts/render_wall_diff.py`    | `diff_original_vs_validated.png` / `.json`. 어두운 빨강=kept, 초록=promote, 파랑=demote, 회색=BASE                                                |
-| `scripts/lib_llm_correct.py`     | demote/promote·레이어 분리                                                                                                                  |
+| `scripts/lib_llm_correct.py`     | demote/promote·레이어 분리 진입점 (`correct/` 패키지)                                                                                             |
 
 
 ```bash
 SCRIPTS="$SKILLS/drawing-llmvalidator/scripts"
-python3 "$SCRIPTS/prepare_review.py" --artifacts "$ART" --floor 5F
-# bash 300초 제한 때문에 Vision은 nohup. 로그에 review.json 경로가 나온 뒤에 correct
-python3.13 "$SCRIPTS/view_image.py" --artifacts "$ART" --floor 5F
-python3 "$SCRIPTS/correct_walls_floor.py" --artifacts "$ART" --floor 5F
+# 범위 전체
+python3 "$SCRIPTS/prepare_review_all.py" --artifacts "$ART"
+python3 "$SCRIPTS/view_image_all.py" --artifacts "$ART"
+# view_image_all이 끝난 뒤, 층마다 (한 턴에 코어 수만큼 병렬)
+python3 "$SCRIPTS/correct_walls_floor.py" --artifacts "$ART" --floor 5F && \
 python3 "$SCRIPTS/render_wall_diff.py" --artifacts "$ART" --floor 5F
 ```
 
-`prepare_review`와 `correct_walls_floor`를 한 bash에 넣지 않습니다.
+`prepare_review`와 `correct_walls_floor`를 한 bash에 넣지 않습니다. Vision·보정에서는 `nohup`/`&`/`sleep`/`for`를 쓰지 않습니다.
 
 `review.json`의 좌표는 층 전체 mm입니다. 타일 범위는 `tiles.json`의 `bbox_mm`에 있습니다. `x0/y0/x1/y1`, 중첩 `bbox_mm`, `[xmin,ymin,xmax,ymax]`도 받습니다. 키가 없으면 그 항목만 skip합니다. `--short-demote`는 문 사이 복도 조각을 지울 수 있어 기본 OFF입니다.
 
@@ -453,38 +479,53 @@ $ARTIFACTS_DIR/<drawing_id>/floors/<F>/
 
 ## 4. 실 면적 — `drawing-totalroom` / `drawing-roomevaluator`
 
-둘 다 `floor_wall_validated.dxf`를 읽기만 합니다. 검증 파일은 수정하지 않습니다. 면적 구현은 `drawing-roomevaluator/scripts/evaluate_room.py`이고, totalroom이 그 모듈을 불러 층 전체 라벨에 적용합니다.
+둘 다 `floor_wall_validated.dxf`를 읽기만 합니다. 검증 파일은 수정하지 않습니다. 면적 구현은 `drawing-roomevaluator/scripts/evaluate_room.py`이고, totalroom이 그 모듈을 불러 층 전체 라벨에 적용합니다. 면적·영역 제외와 집기·설비 토큰은 `drawing-roomevaluator/scripts/label_info.json`입니다 (`label_only_area_tokens`, `region_area_tokens` — `홀-`/`홈-` 포함, `equipment_tokens`, `fixture_names`, `non_room_tokens`).
 
 ### 경계
 
 - 라벨이 있는 쪽의 **벽 안쪽 면**.
-- 경계 레이어: `WALL`, `WINDOW`, `COLUMN`, `DOOR`. 문 스윙 호는 경계가 아닙니다.
+- 경계 레이어: `WALL`, `WINDOW`, `COLUMN`, `DOOR` 선과 `WALL`/`WINDOW`의 `ARC`·`CIRCLE`(현 ~250 mm), `COLUMN` 원형 기둥 `CIRCLE`(반지름 150–500 mm). 문 스윙 호는 경계가 아닙니다.
 - 같은 벽선의 문 개구(2.4 m 이하)는 그 벽선으로 이어 실에 포함합니다. 여닫이 문이 있는 개구는 그 문선에서 멈춥니다.
 - `--door` 기본은 `close`. 먼저 문을 모두 닫아 테두리를 잡고, 그 테두리 위 `DOOR` 직선과 테두리 450 mm 안의 여닫이만 그 실의 문입니다. `open`은 그 문만 엽니다. 테두리 밖 `DOOR`는 `open`이어도 닫힌 경계입니다.
 - H-Beam이 벽 안쪽보다 실 안으로 들어온 면적은 `area_m2`에서 뺍니다 (`column_protrusion_m2`). 벽 두께 안에만 있는 부분은 빼지 않습니다.
+- 닫히지 않은 라벨은 방안 1(벽 닫힘) → 방안 2(방향별 첫 벽) → 방안 3(격자 두께 확장) 순으로 넘깁니다. 상세는 totalroom/roomevaluator `SKILL.md`입니다.
 
 
 
 ### 라벨 (`detect_labels.py`)
 
-모델스페이스 `TEXT`/`MTEXT`만. 블록 안 글자는 펼치지 않습니다. 공백 제거 후 24자 이하이고 `면적`·`천장`·`:`·`=`이 없으며, 한글이 있거나 영문 2자 이상에 숫자가 붙은 이름만 실명입니다. `UP`/`DN`, 치수, 축선, `옷장`·`화분` 같은 집기 표기는 제외합니다. `소파룸`처럼 실명인 것은 남깁니다. 위·아래 줄 간격이 글자 높이의 1.8배 안이고 가로로 겹치면 한 실명으로 잇습니다 (`투시영상` + `검사실7`).
+모델스페이스 `TEXT`/`MTEXT`만. 블록 안 글자는 펼치지 않습니다. 공백 제거 후 24자 이하이고 `면적`·`천장`·`:`·`=`이 없으며, 한글이 있거나 영문 2자 이상에 숫자가 붙거나 공백으로 나뉜 영문 단어 2개 이상인 이름만 실명입니다. `UP`/`DN`, 치수, 축선, `옷장`·`화분` 같은 집기 표기는 제외합니다(`label_info.json`). `소파룸`처럼 실명인 것은 남깁니다. 위·아래 줄 간격이 글자 높이의 1.8배 안이고 가로로 겹치면 한 실명으로 잇습니다 (`투시영상` + `검사실7`).
 
 ### 호출
 
-층 전체:
+층 전체 (한 층):
 
 ```bash
 python3.13 "$SKILLS/drawing-totalroom/scripts/detect_labels.py" \
   --dxf "$ART/floors/5F/floor_wall_validated.dxf" \
   --meta "$ART/floors/5F/floor_wall_validated_meta.json" \
-  --door close
+  --door close \
+  --fill-unlabeled
 ```
+
+여러 층 — 한 bash에 **최대 3층**:
+
+```bash
+python3.13 "$SKILLS/drawing-totalroom/scripts/detect_labels_all.py" \
+  --artifacts "$ART" \
+  --floors 5F,6F,7F \
+  --door close \
+  --fill-unlabeled
+```
+
+`drawing-areasizing` 면적 조사에서는 **항상** `--fill-unlabeled`를 붙입니다. 실명만 잡고 멈추지 않으며, 닫힌 빈 칸은 `무명_N`으로 채웁니다(열린 open space·세면대 있는 화장실 칸 등은 제외).
 
 산출: `floor_label_detected.dxf` / `.png` / `.json`. DXF는 검증 도면 사본에 라벨별 레이어(HATCH + 실명·면적 문자)를 더한 것입니다. PNG는 그 DXF를 `render_wall_dxf_png`로 그립니다. `floor_wall_validated.png`를 배경으로 덧그리지 않습니다.
 
 - `labels[].area_m2` — 그 라벨 HATCH 합 (m²).
 - `unique_face_area_m2` — 서로 다른 면을 한 번씩만 더한 값. `shared_with`가 있으면 합계에 두 번 넣지 않습니다.
 - `skipped` — 실명으로 봤으나 벽이 닫히지 않은 글자.
+- `synthetic: true` / `source: "unlabeled_fill"` — `--fill-unlabeled`로 채운 `무명_N`.
 - 도면 문구 `면적 : N㎡`(`drawing_area_m2`)와 다르면 계산값을 기준으로 말합니다.
 
 실 하나 (`drawing-roomevaluator`):
@@ -498,7 +539,7 @@ python3.13 "$SKILLS/drawing-roomevaluator/scripts/evaluate_room.py" \
   --door close
 ```
 
-결과는 DXF 옆 `room_eval/<실명>.json`과 `<실명>_overlay.png`만 덮어씁니다. 같은 실명이 여러 곳이면 좌표를 알리고 멈추며, `--x` `--y`로 다시 호출합니다. `room_eval_1`처럼 번호 폴더를 만들지 않습니다.
+같은 실명을 여러 층에서 볼 때는 `evaluate_floors.py` 한 번(코어 수만큼 동시). 결과는 DXF 옆 `room_eval/<실명>.json`과 `<실명>_overlay.png`만 덮어씁니다. 같은 실명이 여러 곳이면 좌표를 알리고 멈추며, `--x` `--y`로 다시 호출합니다. `room_eval_1`처럼 번호 폴더를 만들지 않습니다.
 
 ---
 
@@ -506,13 +547,15 @@ python3.13 "$SKILLS/drawing-roomevaluator/scripts/evaluate_room.py" \
 
 ## 5. 한 번에 실행 — `drawing-areasizing`
 
-경로: `application/skills/drawing-areasizing/`. 자체 스크립트는 없습니다.
+경로: `application/skills/drawing-areasizing/`. 자체 스크립트는 없습니다. 상세는 `skill-areasizing.md`.
 
 ```text
-① drawing-devider       범위 안 전 층 추출 → analyze_drawing 1회
-② 층마다:
-     walldetector → llmvalidator (review.json 필수) → totalroom
-③ $ARTIFACTS_DIR/<drawing_id>/area_sizing.md
+① drawing-devider       extract_2d --floor all(또는 지정) 한 번 → analyze_drawing 1회
+② drawing-walldetector  detect_walls_all 한 번 (한 층이면 detect_walls_floor)
+③ drawing-llmvalidator  prepare_review_all → view_image_all 각 한 번
+                        → 보정은 층마다 bash (한 턴에 물리 CPU 코어 수만큼 병렬)
+④ drawing-totalroom     detect_labels_all 최대 3층 배치 (--fill-unlabeled 항상)
+⑤ $ARTIFACTS_DIR/<drawing_id>/area_sizing.md
 ```
 
 - 각 단계 직전에 그 스킬 `SKILL.md`를 따릅니다. 이 문서의 명령과 자식 스킬이 다르면 **자식 스킬**이 맞습니다.
@@ -520,6 +563,7 @@ python3.13 "$SKILLS/drawing-roomevaluator/scripts/evaluate_room.py" \
 - 기존 산출이 있어도 단계를 건너뛰지 않고 덮어씁니다.
 - 실패한 층은 그 단계에서 멈추고, 나머지 층은 이어서 처리한 뒤 보고에 적습니다.
 - `sheet_XX`는 층 이름이 미확정인 도곽입니다. `1F`로 바꾸지 않습니다.
+- 추출의 `nohup`은 devider `SKILL.md`를 따릅니다. Vision·보정에서는 `nohup`/`&`/`sleep`/`for`를 쓰지 않습니다.
 
 `area_sizing.md`의 면적은 `floor_label_detected.json`의 `labels[].area_m2`, `unique_face_area_m2`를 그대로 씁니다.
 
@@ -529,9 +573,9 @@ python3.13 "$SKILLS/drawing-roomevaluator/scripts/evaluate_room.py" \
 
 ## 6. 주제 객체 표시 — `drawing-llmextractor`
 
-면적 파이프라인과 별개입니다. 이미지와 주제(기둥, 문, 창 등)를 받아 UI에서 고른 모델(`UI_MODEL_NAME`)로 객체를 찾고, **원본은 그대로 둔 채** `{원본이름}.{주제}.png` / `.json`에 박스를 그립니다.
+면적 파이프라인과 별개입니다. 이미지와 주제(기둥, 문, 창 등)를 받아 UI에서 고른 모델(`UI_MODEL_NAME`)로 객체를 찾고, **원본은 그대로 둔 채** `{원본이름}.{주제}.png` / `.json`에 박스를 그립니다. 기본색은 빨강. 벽이 이미 빨강이면 `--color 연두`.
 
-기본 `--image`는 `drawing_list`가 가리키는 `floor_original.png`입니다. 벽 도면을 말하면 `floor_wall_validated.png`, 없으면 `floor_wall_original.png`. `--model`은 사용자가 모델을 명시할 때만 붙입니다. 층 도면은 Vision이 5분을 넘기므로 `python3.13`과 `nohup`으로 `extract_objects.py`를 돌립니다. 조각은 한 변 5000px 이하입니다.
+기본 `--image`는 `drawing_list`가 가리키는 `floor_original.png`입니다. 벽 도면을 말하면 `floor_wall_validated.png`, 없으면 `floor_wall_original.png`. `--model`은 사용자가 모델을 명시할 때만 붙입니다. 층 도면은 Vision이 길어서 `python3.13`과 `nohup`으로 `extract_objects.py`를 돌립니다. 조각은 한 변 5000px 이하입니다. `--workers` 생략 시 물리 CPU 코어 수입니다.
 
 ---
 
@@ -617,7 +661,6 @@ block 방식 기본값(`--variant original`)은 이 키워드로 가구를 **빼
 | `지원동_피트니스(5F)`                                         | 피트니스 영역 묶음 |
 | `지원동_가구(기준층락커)`                                        | 락커         |
 | `지원동_5F(샤워부스)` / `지원동_남자샤워실(5F)`                       | 샤워         |
-
 
 
 

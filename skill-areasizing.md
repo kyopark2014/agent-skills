@@ -23,61 +23,43 @@ drawing-walldetector   floor_wall_original.*
         ↓
 drawing-llmvalidator   floor_wall_validated.*
         ↓
-drawing-totalroom      floor_label_detected.dxf / .png / .json
+drawing-totalroom      floor_label_detected.*  (--fill-unlabeled)
 ```
 
 ## 2. 대상
 
 1. `$ARTIFACTS_DIR/drawing_list.json`의 `source_filename`으로 도면을 고릅니다. 없으면 `drawing_id`, `folder`.
-
-```496:506:agent-skills/application/skills/drawing-devider/scripts/extract_2d.py
-_DRAWING_KEY_ORDER = (
-    "drawing_id",
-    "folder",
-    "source_filename",
-    "source_path",
-    ...
-    "discovered_floors",
-)
-```
-
-`source_filename`을 `floors`보다 앞에 두어, 목록이 길어져도 원본 파일 이름으로 도면을 찾습니다.
 2. 층을 지정하면 그 층만 네 단계를 모두 처리합니다. `1층`은 `1F`, `지하1층`은 `B1F`, `옥상`은 `RF`.
-3. 층을 말하지 않으면 `discovered_floors`(도곽이면 `sheet_XX` 포함)를 순서대로 처리합니다.
-4. 목록에 없고 원본 DXF만 있으면 `drawing-devider`로 추출한 뒤 그 `drawing_id`를 대상으로 삼습니다.
+3. 층을 말하지 않으면 `discovered_floors`(도곽이면 `sheet_XX` 포함)를 **범위 전체**로 한 작업으로 처리합니다.
+4. 목록에 없고 원본 DXF·DWG만 있으면 `drawing-devider`로 추출한 뒤 그 `drawing_id`를 대상으로 삼습니다.
 
 ## 3. 실행 순서
 
 ```text
-① drawing-devider     범위 안 전 층 추출 → analyze_drawing 1회
-② 층마다:
-     walldetector → llmvalidator (review.json 필수) → totalroom
-③ area_sizing.md
+① drawing-devider     extract_2d --floor all(또는 지정 층) 한 번 → analyze_drawing 1회
+② drawing-walldetector detect_walls_all 한 번 (한 층이면 detect_walls_floor)
+③ drawing-llmvalidator prepare_review_all → view_image_all 각 한 번
+                       → 보정은 층마다 bash (한 턴에 물리 CPU 코어 수만큼 병렬)
+④ drawing-totalroom   detect_labels_all 최대 3층 배치 (--fill-unlabeled 항상)
+⑤ area_sizing.md
 ```
 
-①을 범위 안 전 층에 대해 끝낸 다음 ②로 갑니다. ②는 **층 하나 안에서** 벽 검출, Vision 검증, 실 면적을 끝내고 다음 층으로 갑니다. 이 스킬의 Python 파일은 없고, 아래 산출 파일 이름이 단계 사이의 계약입니다.
-
-```755:758:agent-skills/application/skills/drawing-devider/scripts/extract_2d.py
-    if skip_furniture is None:
-        skip_furniture = variant == "clean"
-    if include_extra is None:
-        include_extra = variant == "original"
-```
-
-첫 단계는 기본 `original`이라 가구 INSERT를 유지하고, 조경·천장·P코어도 넣습니다. 마지막 단계는 `detect_labels.py`가 `evaluate_room`의 면적 함수를 라벨마다 부릅니다.
+①②와 Vision(③ 전반)은 범위 전체를 스크립트 한 번씩으로 끝냅니다. 보정만 층마다 bash입니다. 실면적은 한 bash에 최대 3층입니다. 층 사이·단계 사이에 진행 여부를 묻지 않습니다.
 
 | 단계 | 스크립트 | 입력 | 출력 |
 |------|----------|------|------|
-| 추출 | `drawing-devider/scripts/extract_2d.py` | 원본 DXF | `floor_original.dxf` `.png` |
-| 벽 | `drawing-walldetector/scripts/detect_walls_floor.py` | `floor_original.dxf` | `floor_wall_original.*` |
-| 검증 | `prepare_review.py` → `view_image.py` → `correct_walls_floor.py` → `render_wall_diff.py` | `floor_wall_original.*` | `floor_wall_validated.*` |
-| 실면적 | `drawing-totalroom/scripts/detect_labels.py` | `floor_wall_validated.dxf` `_meta.json` | `floor_label_detected.*` |
+| 추출 | `extract_2d.py --floor all` | 원본 DXF/DWG | `floor_original.dxf` `.png` |
+| 벽 | `detect_walls_all.py` | `floor_original.dxf` | `floor_wall_original.*` |
+| 검증 | `prepare_review_all.py` → `view_image_all.py` → 층마다 `correct_walls_floor.py` + `render_wall_diff.py` | `floor_wall_original.*` | `floor_wall_validated.*` |
+| 실면적 | `detect_labels_all.py` (≤3층) 또는 `detect_labels.py` | `floor_wall_validated.dxf` `_meta.json` | `floor_label_detected.*` |
 
 이미 있는 산출도 그 단계를 다시 실행해 같은 경로에 덮어씁니다. 도면 폴더를 통째로 지우지는 않습니다. 직전 단계 산출은 그 단계에서 수정하지 않습니다.
 
-`extract_2d`, `detect_walls_floor`, `prepare_review`, `view_image`, `correct_walls_floor`, `render_wall_diff`, `detect_labels`는 호출 하나당 층 하나입니다. `for FLOOR in …`, `--floor all`, `detect_walls_all`은 쓰지 않습니다.
+`for FLOOR in …`로 층마다 단일 스크립트를 돌리지 않습니다. 추출의 `nohup`·백그라운드는 **devider `SKILL.md`**를 따릅니다. areasizing 본문의 Vision·보정 단계에서는 `nohup`/`&`/`sleep`/`for`를 쓰지 않습니다.
 
-Vision은 생략하지 않습니다. `prepare_review.py`와 `correct_walls_floor.py`를 한 bash에 넣지 않고, 로그에 `review.json` 경로가 나온 뒤에 보정합니다. 자세한 호출은 `skill-validator.md`입니다.
+Vision은 생략하지 않습니다. `prepare_review_all`과 `correct_walls_floor`를 한 bash에 넣지 않고, `view_image_all`이 끝난 뒤에 보정합니다. 자세한 호출은 `skill-validator.md`입니다.
+
+면적 조사에서는 **항상** `--fill-unlabeled`를 붙입니다. 실명만 잡고 멈추지 않으며, 닫힌 빈 칸은 `무명_N`으로 채웁니다(열린 open space는 제외).
 
 실패한 층은 그 단계에서 멈추고, 나머지 층은 이어서 처리한 뒤 보고에 적습니다.
 
@@ -89,4 +71,4 @@ Vision은 생략하지 않습니다. `prepare_review.py`와 `correct_walls_floor
 
 ## 5. 한 줄 요약
 
-**네 스킬을 devider → walldetector → llmvalidator → totalroom 순으로 호출하고, 전 층이 끝난 뒤 `area_sizing.md`로 실명 면적을 보고합니다.**
+**네 스킬을 devider → walldetector → llmvalidator → totalroom 순으로 범위 단위 `_all` 스크립트로 호출하고, totalroom에는 항상 `--fill-unlabeled`를 붙인 뒤 `area_sizing.md`로 실명 면적을 보고합니다.**

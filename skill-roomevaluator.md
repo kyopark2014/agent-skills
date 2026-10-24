@@ -2,7 +2,8 @@
 
 `floor_wall_validated.dxf`에서 **실명 하나**의 벽 안쪽 면적을 계산합니다.  
 핵심 구현: `application/skills/drawing-roomevaluator/scripts/evaluate_room.py`  
-층 전체 라벨은 `drawing-totalroom`이 이 모듈을 그대로 부릅니다.
+층 전체 라벨은 `drawing-totalroom`이 이 모듈을 그대로 부릅니다.  
+면적·영역 제외·집기·설비 토큰은 `scripts/label_info.json`을 씁니다.
 
 입력 DXF·PNG는 수정하지 않습니다. 결과는 DXF 옆 `room_eval/`에만 씁니다.
 
@@ -16,6 +17,7 @@
 | 선행 | `floor_wall_validated.dxf` / `.png` / `_meta.json` |
 | 실명 | `--room`. 공백은 무시. 위·아래로 붙은 글자는 이어서 찾음 |
 | 출력 | `room_eval/<실명>.json`, `room_eval/<실명>_overlay.png` |
+| 여러 층 | 같은 실명을 여러 층에서 보면 `evaluate_floors.py` 한 번(물리 CPU 코어만큼 동시). `for`로 층마다 `evaluate_room.py`를 돌리지 않음 |
 
 ```bash
 python3.13 "$SKILLS/drawing-roomevaluator/scripts/evaluate_room.py" \
@@ -43,11 +45,14 @@ python3.13 "$SKILLS/drawing-roomevaluator/scripts/evaluate_room.py" \
 ⑥ 꼭짓점을 실제 벽·기둥 좌표에 스냅한 뒤 신발끈 면적
 ```
 
+앞 방안에서 닫히지 않은 라벨만 방안 2(레이캐스트)·방안 3(거리 변환)으로 넘깁니다. 상세 임계는 `SKILL.md` Critical Rules입니다.
+
 | 항목 | 규칙 |
 |------|------|
-| 경계 | `WALL`·`WINDOW`·`COLUMN`. `close`일 때 그 실의 `DOOR` 직선도 경계. 문 스윙 호는 경계가 아님 |
-| 문 개구 | 같은 벽선에서 2.4 m 이하면 그 벽선으로 이어 실에 포함. 벽 두께 한가운데나 바깥면이 아님. 여닫이가 있으면 그 문선에서 멈춤 |
-| 기둥 | 변 0.45–1.5 m 정사각(이중 사각 또는 중심 `_`)이 벽 안쪽보다 실 안으로 들어온 면적을 `area_m2`에서 제외. 벽 두께 안은 빼지 않음. 돌출이 없으면 0 |
+| 경계 | `WALL`·`WINDOW`·`COLUMN`. `close`일 때 그 실의 `DOOR` 직선도 경계. 문 스윙 호·문짝 얇은 사각은 경계가 아님 |
+| 문 개구 | 같은 벽선에서 2.4 m 이하면 그 벽선으로 이어 실에 포함. 직교 실간 벽·복도 개구는 잇지 않음. 여닫이가 있으면 그 문선에서 멈춤 |
+| 기둥 | 변 0.45–1.5 m 정사각(이중 사각 또는 중심 `_`)이 벽 안쪽보다 실 안으로 들어온 면적을 `area_m2`에서 제외 |
+| 제외 라벨 | `label_info.json`의 집기·설비·영역 토큰. `옷장`·`세면대`·`홀-`/`홈-` 등은 면적 실이 아님 |
 
 경계로 읽는 레이어와 문 간격은 상수로 고정되어 있습니다.
 
@@ -55,41 +60,6 @@ python3.13 "$SKILLS/drawing-roomevaluator/scripts/evaluate_room.py" \
 BOUNDARY_LAYERS = (WALL_LAYER, WINDOW_LAYER, COLUMN_LAYER, DOOR_LAYER)
 DOOR_GAP_MM = 2400.0
 DOOR_TOUCH_MM = 450.0
-```
-
-```322:328:agent-skills/application/skills/drawing-roomevaluator/scripts/evaluate_room.py
-def wall_segments(msp, boxes, *, include_door: bool = True, open_doors=None):
-    layers = BOUNDARY_LAYERS if include_door else (WALL_LAYER, WINDOW_LAYER, COLUMN_LAYER)
-    for e in msp:
-        if e.dxf.layer not in layers:
-            continue
-```
-
-문을 열라고 하면, 닫힌 테두리로 그 실의 문을 고른 뒤에만 그 문짝을 경계에서 뺍니다.
-
-```1102:1114:agent-skills/application/skills/drawing-roomevaluator/scripts/evaluate_room.py
-    closed_segs = wall_segments(msp, boxes)
-    face, x_axes, y_axes, swings = _room_lines(msp, closed_segs, (lx, ly), boxes, [])
-    boundary = _boundary_doors(swings, face) + _leaf_doors_on_boundary(msp, face)
-    open_doors = boundary if door == "open" else []
-    if open_doors:
-        segs = wall_segments(msp, boxes, open_doors=open_doors)
-```
-
-면적은 mm 다각형의 신발끈을 m²로 나눈 값에서, 실 안으로 들어온 기둥만 뺍니다.
-
-```751:758:agent-skills/application/skills/drawing-roomevaluator/scripts/evaluate_room.py
-def shoelace_m2(pts: list[tuple[float, float]]) -> float:
-    ...
-        acc += x0 * y1 - x1 * y0
-    return abs(acc) * 0.5 / 1_000_000.0
-```
-
-```693:705:agent-skills/application/skills/drawing-roomevaluator/scripts/evaluate_room.py
-def _subtract_columns(face: Polygon, boxes, seed: tuple[float, float]):
-    """실 안으로 들어온 H-Beam 박스를 뺀다. 벽 두께 안에만 있는 기둥은 면과 안 겹친다."""
-    ...
-        net = net.difference(rect)
 ```
 
 ## 3. 출력

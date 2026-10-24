@@ -18,7 +18,7 @@
 | Vision 입력 | `prepare_review.py`가 만든 `llm_review/R*C*.png` (한 변 5000px 이하) |
 | 보정 입력 | `floor_wall_original.dxf` + `llm_review/review.json` |
 | 기본 출력 | `floor_wall_validated.{dxf,png,_meta.json}` + `diff_original_vs_validated.png` |
-| 진입 | `prepare_review.py` → `view_image.py` → `correct_walls_floor.py` → `render_wall_diff.py` |
+| 진입 | 범위: `prepare_review_all.py` → `view_image_all.py` → 층마다 `correct_walls_floor.py` + `render_wall_diff.py` (한 턴에 물리 CPU 코어 수만큼 병렬). 한 층만이면 `prepare_review.py` / `view_image.py`도 가능 |
 | 핵심 API | `lib_llm_correct.apply_corrections(doc, review=…)` |
 
 ### 산출 경로
@@ -40,11 +40,16 @@ $ARTIFACTS_DIR/<drawing_id>/floors/<FLOOR>/
 
 | 스크립트 | 역할 |
 |----------|------|
-| `prepare_review.py` | `floor_wall_original.png` → 한 변 5000px 이하 타일 + `tiles.json`. 층 전체 한 장 복사는 하지 않음 |
-| `view_image.py` | 타일 PNG를 base64로 `chat.get_chat().invoke`에 보내고 `review.json` 작성 |
-| `correct_walls_floor.py` | DXF 로드 → `apply_corrections` → validated 저장 |
+| `prepare_review_all.py` | original PNG가 있는 층을 물리 CPU 코어 수만큼 동시에 타일 준비 |
+| `prepare_review.py` | 한 층. `floor_wall_original.png` → 한 변 5000px 이하 타일 + `tiles.json`. 층 전체 한 장 복사는 하지 않음 |
+| `view_image_all.py` | tiles.json이 있는 층을 판정. 진행 중 Vision 호출은 물리 CPU 코어 수. 끝날 때까지 대기 |
+| `view_image.py` | 한 층 타일 PNG를 base64로 `chat.get_chat().invoke`에 보내고 `review.json` 작성. 도구가 아님 |
+| `correct_walls_floor.py` | DXF 로드 → `apply_corrections` → validated 저장. 한 턴에 코어 수만큼 층 bash를 나란히 호출 |
+| `correct_walls_all.py` | 에이전트는 호출하지 않음(한 bash에 여러 층이면 끝날 때까지 결과가 안 보임) |
 | `render_wall_diff.py` | original vs validated diff PNG/JSON |
 | `lib_llm_correct.py` | 세그먼트·promote/demote·문·창·기둥 레이어 |
+
+옷장·화장실 등 Vision·기하 조건을 과도하게 잡지 않도록, 윤곽 안 `옷장` 글자·침대 outline 오탐·화장실 상자 크기 상한(한 변 10 m·50 m²) 등이 `SKILL.md` Vision 판정·`lib_llm_correct`에 반영되어 있습니다.
 
 ---
 
@@ -436,10 +441,23 @@ Vision은 **휴리스틱이 애매한 구역**을 bbox로 보강하는 층입니
 
 ## 8. 실행·검증
 
+범위 전체(층을 말하지 않았거나 여러 층):
+
 ```bash
 SCRIPTS=.../drawing-llmvalidator/scripts
 ART=$ARTIFACTS_DIR/<drawing_id>
 
+python3 "$SCRIPTS/prepare_review_all.py" --artifacts "$ART"
+python3.13 "$SCRIPTS/view_image_all.py" --artifacts "$ART"
+# view_image_all 이 끝난 뒤, 한 턴에 물리 CPU 코어 수만큼 층 bash를 나란히 호출
+python3 "$SCRIPTS/correct_walls_floor.py" --artifacts "$ART" --floor 5F && \
+python3 "$SCRIPTS/render_wall_diff.py" --artifacts "$ART" --floor 5F
+# 각 bash가 끝나면 "{floor}이 끝났습니다" 후 다음 묶음. for/nohup/&/tail/correct_walls_all 금지
+```
+
+한 층만:
+
+```bash
 python3 "$SCRIPTS/prepare_review.py" --artifacts "$ART" --floor 5F
 python3.13 "$SCRIPTS/view_image.py" --artifacts "$ART" --floor 5F
 python3 "$SCRIPTS/correct_walls_floor.py" --artifacts "$ART" --floor 5F
@@ -464,7 +482,8 @@ python3 "$SCRIPTS/render_wall_diff.py" --artifacts "$ART" --floor 5F
 ## 9. Decision Checklist
 
 - [ ] `floor_wall_original.dxf`가 있는가
-- [ ] `view_image.py`가 `review.json`을 쓴 뒤에 `correct_walls_floor.py`를 실행했는가
+- [ ] `prepare_review_all`·`view_image_all`(또는 한 층용 단일 스크립트)이 `review.json`을 쓴 뒤에 보정했는가
+- [ ] 보정 bash를 한 턴에 물리 CPU 코어 수만큼만 나란히 호출했는가 (`correct_walls_all`·`for` 없음)
 - [ ] 출력이 `floor_wall_validated.*`이고 original은 그대로인가
 - [ ] 문·창·기둥이 `DOOR` / `WINDOW` / `COLUMN`으로 나뉘었는가
 

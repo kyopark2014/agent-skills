@@ -17,11 +17,13 @@
 | 도면 목록 | `$ARTIFACTS_DIR/drawing_list.json` (해당 도면만 갱신, `source_filename`을 `floors`보다 앞) |
 | 추출 요약 | `$ARTIFACTS_DIR/<drawing_id>/extract_summary.json` |
 | 작업 로그 | `work_log.md` |
-| 진입 스크립트 | `extract_2d.py` (층 1개, 기본 `--variant original`) |
+| 진입 스크립트 | `extract_2d.py` (여러 층은 `--floor all` 한 번, 기본 `--variant original`) |
 | 공통 유틸 | `lib_split.py`, `lib_render.py`, `lib_sheet.py`, `lib_structure.py` |
 
 **기본 워크플로에서 만들지 않는 것:** `parts/` 타일, `floor_*_clean.dxf`, `floor_overview.*`, `floor_*_2d.png`.  
 타일 분할은 사용자가 명시한 경우에만 `plan_split.py` / `split_floor.py`(레거시).
+
+여러 층은 `extract_2d.py`를 **한 번** 실행합니다(`--floor all` 또는 `--floor 1F,3F`). 스크립트가 물리 CPU 코어 수만큼 층을 동시에 추출합니다. `for FLOOR in …` 루프는 쓰지 않습니다. 대용량 DXF는 포그라운드 대기(~3600초)로 끊기므로 `nohup … > /tmp/<drawing_id>_extract.log 2>&1 &`로 띄운 뒤 `extract_summary.json`·로그의 `summary →`를 폴링합니다. `--list-floors`만 포그라운드가 허용됩니다.
 
 ### 산출 경로
 
@@ -288,17 +290,20 @@ ART="$ARTIFACTS_DIR/sk_yongin_jiwon"
 
 ### 5.4 호출 예
 
-기존 `floor_original.*`가 있어도 같은 경로에 덮어씁니다. 층마다 bash 한 번입니다.
+기존 `floor_original.*`가 있어도 같은 경로에 덮어씁니다. 여러 층은 `--floor all` 한 번(백그라운드)입니다.
 
 ```bash
-python3 "$SCRIPTS/extract_2d.py" \
+nohup python3 "$SCRIPTS/extract_2d.py" \
   --dxf "$ARTIFACTS_DIR/SK용인하이닉스_지원동 평면도_241014.dxf" \
-  --floor 5F \
+  --floor all \
   --out "$ARTIFACTS_DIR" \
-  --drawing-id sk_yongin_jiwon
+  --drawing-id sk_yongin_jiwon \
+  > /tmp/sk_yongin_jiwon_extract.log 2>&1 &
+echo $!
+# extract_summary.json 또는 로그의 summary → 가 보일 때까지 폴링한 뒤 analyze_drawing
 ```
 
-도곽 도면은 먼저 목록만 봅니다.
+한 층만이면 `--floor 5F`. 도곽 도면은 먼저 목록만 봅니다(`--list-floors`는 포그라운드).
 
 ```bash
 python3 "$SCRIPTS/extract_2d.py" \
@@ -322,22 +327,23 @@ python3 "$SCRIPTS/analyze_drawing.py" \
 ## 6. 워크플로·게이트
 
 ```text
-DXF 입력
+DXF/DWG 입력
   ↓
-① extract_2d --floor <각 층>     층당 bash 1회, 있으면 덮어씀
+① extract_2d --floor all (또는 지정 층)   한 번, nohup 백그라운드, 있으면 덮어씀
      → floors/<F>/floor_original.{dxf,png,_meta.json}
      → drawing_list.json / extract_summary.json 갱신
   ↓
-② analyze_drawing → structure.md / .json
+② analyze_drawing → structure.md / .json   (summary 완료 후)
   ↓
 ③ work_log.md
 ```
 
-층을 지정하면 그 층만, 아니면 발견 층(`discovered_floors`, 도곽이면 `sheet_XX` 포함) 전체를 순서대로 처리합니다.
+층을 지정하면 그 층만, 아니면 발견 층(`discovered_floors`, 도곽이면 `sheet_XX` 포함) 전체를 **한 호출**로 처리합니다.
 
 | 호출 | 이유 |
 |------|------|
-| 층당 bash 1회 | 대용량 DXF에서 `for` 일괄·`--floor all`은 `TimeoutExpired` |
+| `--floor all` 한 번 | 물리 CPU 코어만큼 동시 추출. `for` 루프로 나누지 않음 |
+| `nohup` 백그라운드 | 포그라운드 ~3600초 timeout으로 대용량 extract가 끊김 |
 | `parts/` / `floor_overview.*` / `floor_structure.*` | 만들지 않음. 미리보기는 `floor_original.png` |
 
 ### 경로 bootstrap (로컬)
@@ -351,7 +357,7 @@ DXF 입력
 
 | 스크립트 | 역할 |
 |----------|------|
-| `extract_2d.py` | 한 층 `floor_original`, `drawing_list.json` 갱신 |
+| `extract_2d.py` | `--floor all` 또는 쉼표 층. `floor_original`, `drawing_list.json` 갱신 |
 | `analyze_drawing.py` | 구조 실측 → `structure.md` / `.json` |
 | `lib_sheet.py` | `XA-S`가 없을 때 도곽·층 제목 |
 | `lib_structure.py` | 도곽 + 건축 레이어일 때 벽·창·실명·문 스윙 |
@@ -384,4 +390,4 @@ DXF 입력
 
 ## 10. 한 줄 요약
 
-**원본 DXF의 층 INSERT를 explode해 primary 클러스터만 남긴 `floor_original.dxf`(+치수 PNG)를 층당 하나씩 만들고, 그 결과가 walldetector 등 후속 파이프라인의 입력이 됩니다.**
+**원본 DXF/DWG의 층 INSERT를 explode해 primary 클러스터만 남긴 `floor_original.dxf`(+치수 PNG)를 `--floor all` 한 번(필요 시 nohup)으로 만들고, 그 결과가 walldetector 등 후속 파이프라인의 입력이 됩니다.**
