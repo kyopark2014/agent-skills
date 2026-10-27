@@ -63,6 +63,38 @@ class SwingLeafNotBoundaryTests(unittest.TestCase):
         self.assertLessEqual(face.bounds[1], 50.0)
         self.assertGreater(face.area / 1e6, 20.0)
 
+    def test_leaf_tip_shorts_do_not_notch_double_swing(self):
+        """양개문 문짝 끝 짧은 두께 선이 tip 사이 가짜 벽을 만들지 않는다."""
+        doc = ezdxf.new()
+        msp = doc.modelspace()
+        # 방: (0,0)-(6000,4000). 양개문 힌지 2000·3710, r=855.
+        msp.add_line((0, 0), (2000, 0), dxfattribs={"layer": "WALL"})
+        msp.add_line((3710, 0), (6000, 0), dxfattribs={"layer": "WALL"})
+        msp.add_line((0, 0), (0, 4000), dxfattribs={"layer": "WALL"})
+        msp.add_line((6000, 0), (6000, 4000), dxfattribs={"layer": "WALL"})
+        msp.add_line((0, 4000), (6000, 4000), dxfattribs={"layer": "WALL"})
+        msp.add_line((2000, 0), (3710, 0), dxfattribs={"layer": "WALL"})
+        # 실 안 문짝 + 끝 두께(~40 mm). tip이 남으면 y=855 축으로 이어진다.
+        msp.add_line((2000, 0), (2000, 855), dxfattribs={"layer": "DOOR"})
+        msp.add_line((3710, 0), (3710, 855), dxfattribs={"layer": "DOOR"})
+        msp.add_line((2000, 855), (2040, 855), dxfattribs={"layer": "DOOR"})
+        msp.add_line((3710, 855), (3670, 855), dxfattribs={"layer": "DOOR"})
+        msp.add_arc((2000, 0), 855, 0, 90, dxfattribs={"layer": "DOOR"})
+        msp.add_arc((3710, 0), 855, 90, 180, dxfattribs={"layer": "DOOR"})
+
+        segs = room.wall_segments(msp, [])
+        self.assertFalse(
+            any(abs((s[1] + s[3]) * 0.5 - 855.0) <= 1.0 for s in segs),
+            "leaf tip shorts must not remain as boundary",
+        )
+        face, *_rest = room._room_lines(msp, segs, (3000, 2000), [], [])
+        self.assertIsNotNone(face)
+        self.assertLessEqual(face.bounds[1], 50.0)
+        self.assertFalse(
+            any(abs(y - 855.0) <= 5.0 for _x, y in face.exterior.coords),
+            "face must not notch at leaf tip depth",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -17490,7 +17490,11 @@ def _promote_closed_door_flanks(msp, edges, x0: float, y0: float, x1: float, y1:
         nonlocal promoted
         if ent is None or _dxftype(ent) != "LINE" or id(ent) in seen:
             return
-        if getattr(ent.dxf, "layer", None) != BASE_LAYER:
+        # 기울어진 스윙 정리로 지운 LINE 은 dxf 가 없을 수 있다.
+        try:
+            if getattr(ent.dxf, "layer", None) != BASE_LAYER:
+                return
+        except Exception:  # noqa: BLE001
             return
         if _paint_layer(ent, WALL_LAYER, WALL_COLOR):
             promoted += 1
@@ -17500,7 +17504,11 @@ def _promote_closed_door_flanks(msp, edges, x0: float, y0: float, x1: float, y1:
     for ax, ay, bx, by, layer, ent in edges:
         if layer != BASE_LAYER or ent is None:
             continue
-        if getattr(ent.dxf, "layer", None) != BASE_LAYER:
+        # 기울어진 스윙 정리로 지운 LINE 은 dxf 가 없을 수 있다.
+        try:
+            if getattr(ent.dxf, "layer", None) != BASE_LAYER:
+                continue
+        except Exception:  # noqa: BLE001
             continue
         length = math.hypot(bx - ax, by - ay)
         if not (80.0 <= length <= 2500.0) or _leaf(ax, ay, bx, by):
@@ -31937,6 +31945,24 @@ def _cluster_x_obbs(
     return clusters
 
 
+def _merge_coverage_intervals(
+    intervals: list[tuple[float, float]],
+    *,
+    join_mm: float = 1.0,
+) -> list[tuple[float, float]]:
+    """투영 구간을 합친다."""
+    if not intervals:
+        return []
+    ordered = sorted((min(a, b), max(a, b)) for a, b in intervals)
+    merged: list[list[float]] = [[ordered[0][0], ordered[0][1]]]
+    for start, end in ordered[1:]:
+        if start <= merged[-1][1] + join_mm:
+            merged[-1][1] = max(merged[-1][1], end)
+        else:
+            merged.append([start, end])
+    return [(item[0], item[1]) for item in merged]
+
+
 def _line_on_obb_edge(
     x0: float,
     y0: float,
@@ -31946,8 +31972,14 @@ def _line_on_obb_edge(
     *,
     tol_mm: float = 45.0,
     cover_ratio: float = 0.55,
+    min_overlap_mm: float = 80.0,
 ) -> bool:
-    """선이 X OBB 한 변 위에 있으면 True(축정렬·기울어짐 공통)."""
+    """선이 X OBB 한 변 위에 있으면 True(축정렬·기울어짐 공통).
+
+    변 전체의 cover_ratio뿐 아니라, 변 위 짧은 분절(≥min_overlap_mm)도
+    True다. 지에스이 상부오픈처럼 왼쪽 변이 WALL 일부+BASE 짧은 조각으로
+    나뉜 경우 BASE 조각도 올려야 로비 flood가 안 샌다.
+    """
     length = math.hypot(x1 - x0, y1 - y0)
     if length < 80.0:
         return False
@@ -31971,7 +32003,7 @@ def _line_on_obb_edge(
         t1 = (x1 - a[0]) * eux + (y1 - a[1]) * euy
         lo, hi = min(t0, t1), max(t0, t1)
         ov = min(hi, elen) - max(lo, 0.0)
-        if ov >= cover_ratio * elen:
+        if ov >= min_overlap_mm or ov >= cover_ratio * elen:
             return True
     return False
 
@@ -31985,6 +32017,7 @@ def _line_on_x_box_edge(
     *,
     tol_mm: float = 45.0,
     cover_ratio: float = 0.55,
+    min_overlap_mm: float = 80.0,
 ) -> bool:
     """선이 축정렬 X 외곽 사각의 한 변 위에 있으면 True."""
     bx0, by0, bx1, by1 = box
@@ -31999,7 +32032,7 @@ def _line_on_x_box_edge(
         if not (on_bot or on_top):
             return False
         ov = min(max(x0, x1), bx1) - max(min(x0, x1), bx0)
-        return ov >= cover_ratio * (bx1 - bx0)
+        return ov >= min_overlap_mm or ov >= cover_ratio * (bx1 - bx0)
     if dx <= max(20.0, 0.12 * length) and dy >= dx:
         x = (x0 + x1) * 0.5
         on_left = abs(x - bx0) <= tol_mm
@@ -32007,25 +32040,26 @@ def _line_on_x_box_edge(
         if not (on_left or on_right):
             return False
         ov = min(max(y0, y1), by1) - max(min(y0, y1), by0)
-        return ov >= cover_ratio * (by1 - by0)
+        return ov >= min_overlap_mm or ov >= cover_ratio * (by1 - by0)
     return False
 
 
-def _obb_edge_covered(
+def _obb_edge_proj_intervals(
     side: tuple[tuple[float, float], tuple[float, float]],
     lines: list[tuple[float, float, float, float]],
     *,
     tol_mm: float = 45.0,
-    cover_ratio: float = 0.55,
-) -> bool:
-    """이미 선이 OBB 한 변을 덮으면 True."""
+    min_overlap_mm: float = 80.0,
+) -> tuple[float, list[tuple[float, float]]]:
+    """OBB 한 변 위에서 선들이 덮는 투영 구간(합치기 전)과 변 길이."""
     a, b = side
     ex, ey = b[0] - a[0], b[1] - a[1]
     elen = math.hypot(ex, ey)
     if elen < 80.0:
-        return False
+        return elen, []
     eux, euy = ex / elen, ey / elen
     nx, ny = -euy, eux
+    intervals: list[tuple[float, float]] = []
     for x0, y0, x1, y1 in lines:
         length = math.hypot(x1 - x0, y1 - y0)
         if length < 80.0:
@@ -32038,11 +32072,71 @@ def _obb_edge_covered(
             continue
         t0 = (x0 - a[0]) * eux + (y0 - a[1]) * euy
         t1 = (x1 - a[0]) * eux + (y1 - a[1]) * euy
-        lo, hi = min(t0, t1), max(t0, t1)
-        ov = min(hi, elen) - max(lo, 0.0)
-        if ov >= cover_ratio * elen:
-            return True
-    return False
+        lo, hi = max(min(t0, t1), 0.0), min(max(t0, t1), elen)
+        if hi - lo >= min_overlap_mm:
+            intervals.append((lo, hi))
+    return elen, intervals
+
+
+def _obb_edge_gap_segments(
+    side: tuple[tuple[float, float], tuple[float, float]],
+    lines: list[tuple[float, float, float, float]],
+    *,
+    tol_mm: float = 45.0,
+    min_gap_mm: float = 80.0,
+    cover_ratio: float = 0.92,
+) -> list[tuple[tuple[float, float], tuple[float, float]]]:
+    """OBB 한 변에서 아직 안 덮인 구간을 선분 목록으로 돌린다.
+
+    한 선이 변의 55%만 덮어도 ‘덮임’으로 보던 때 남은 틈(지에스이 로비→
+    상부오픈 왼쪽 삼각형)으로 flood가 새던 것을 막는다. 합친 덮임이
+    cover_ratio 미만이거나 min_gap_mm 이상 틈이 있으면 그 틈을 돌린다.
+    """
+    a, b = side
+    elen, raw = _obb_edge_proj_intervals(side, lines, tol_mm=tol_mm)
+    if elen < 80.0:
+        return []
+    eux = (b[0] - a[0]) / elen
+    euy = (b[1] - a[1]) / elen
+    merged = _merge_coverage_intervals(raw)
+    covered = sum(end - start for start, end in merged)
+    gaps: list[tuple[float, float]] = []
+    cursor = 0.0
+    for start, end in merged:
+        if start - cursor >= min_gap_mm:
+            gaps.append((cursor, start))
+        cursor = max(cursor, end)
+    if elen - cursor >= min_gap_mm:
+        gaps.append((cursor, elen))
+    if covered >= cover_ratio * elen and not gaps:
+        return []
+    if covered >= cover_ratio * elen:
+        # 덮임 비율은 충분해도 틈이 있으면 그 틈만 메운다.
+        pass
+    elif not gaps:
+        return [(a, b)]
+    out: list[tuple[tuple[float, float], tuple[float, float]]] = []
+    for t0, t1 in gaps:
+        out.append(
+            (
+                (a[0] + eux * t0, a[1] + euy * t0),
+                (a[0] + eux * t1, a[1] + euy * t1),
+            )
+        )
+    return out
+
+
+def _obb_edge_covered(
+    side: tuple[tuple[float, float], tuple[float, float]],
+    lines: list[tuple[float, float, float, float]],
+    *,
+    tol_mm: float = 45.0,
+    cover_ratio: float = 0.92,
+) -> bool:
+    """이미 선들이 OBB 한 변을 거의 이어서 덮으면 True(틈 ≥80 mm 없으면)."""
+    return not _obb_edge_gap_segments(
+        side, lines, tol_mm=tol_mm, cover_ratio=cover_ratio
+    )
 
 
 def _x_box_edge_covered(
@@ -32051,32 +32145,17 @@ def _x_box_edge_covered(
     lines: list[tuple[float, float, float, float]],
     *,
     tol_mm: float = 45.0,
-    cover_ratio: float = 0.55,
+    cover_ratio: float = 0.92,
 ) -> bool:
-    """edge: bot|top|left|right. 이미 선이 그 변을 덮으면 True."""
+    """edge: bot|top|left|right. 합친 덮임이 충분하면 True."""
     bx0, by0, bx1, by1 = box
-    for x0, y0, x1, y1 in lines:
-        length = math.hypot(x1 - x0, y1 - y0)
-        if length < 80.0:
-            continue
-        dx, dy = abs(x1 - x0), abs(y1 - y0)
-        if edge in ("bot", "top") and dy <= max(20.0, 0.12 * length) and dx >= dy:
-            y = (y0 + y1) * 0.5
-            target = by0 if edge == "bot" else by1
-            if abs(y - target) > tol_mm:
-                continue
-            ov = min(max(x0, x1), bx1) - max(min(x0, x1), bx0)
-            if ov >= cover_ratio * (bx1 - bx0):
-                return True
-        if edge in ("left", "right") and dx <= max(20.0, 0.12 * length) and dy >= dx:
-            x = (x0 + x1) * 0.5
-            target = bx0 if edge == "left" else bx1
-            if abs(x - target) > tol_mm:
-                continue
-            ov = min(max(y0, y1), by1) - max(min(y0, y1), by0)
-            if ov >= cover_ratio * (by1 - by0):
-                return True
-    return False
+    if edge in ("bot", "top"):
+        y = by0 if edge == "bot" else by1
+        side = ((bx0, y), (bx1, y))
+    else:
+        x = bx0 if edge == "left" else bx1
+        side = ((x, by0), (x, by1))
+    return _obb_edge_covered(side, lines, tol_mm=tol_mm, cover_ratio=cover_ratio)
 
 
 def _lwpolyline_segments(entity) -> list[tuple[float, float, float, float]]:
@@ -32264,11 +32343,13 @@ def promote_x_cover_squares(msp) -> int:
         if seed["short"] < 499.0:
             continue
         for start, end in seed["sides"]:
-            if _obb_edge_covered((start, end), edge_lines):
-                continue
-            msp.add_line(start, end, dxfattribs={"layer": WALL_LAYER, "color": WALL_COLOR})
-            promoted += 1
-            edge_lines.append((start[0], start[1], end[0], end[1]))
+            # 변 일부만 WALL이면 남은 틈만 가상 WALL로 메운다(전 구간 skip 금지).
+            for gap_a, gap_b in _obb_edge_gap_segments((start, end), edge_lines):
+                msp.add_line(
+                    gap_a, gap_b, dxfattribs={"layer": WALL_LAYER, "color": WALL_COLOR}
+                )
+                promoted += 1
+                edge_lines.append((gap_a[0], gap_a[1], gap_b[0], gap_b[1]))
 
     # 기운 X 둘레에 남은 축정렬 AABB 가상 변은 지운다.
     promoted += _strip_rotated_x_aabb_walls(msp, crosses)

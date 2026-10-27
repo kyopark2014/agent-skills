@@ -585,15 +585,32 @@ def _is_swing_leaf_segment(
     y1: float,
     hinges: list[tuple[float, float, float]],
 ) -> bool:
-    """힌지에서 문 반지름만큼 나간 문짝 직선.
+    """힌지에서 문 반지름만큼 나간 문짝 직선·문짝 끝의 짧은 두께 선.
 
     close 모드에서는 개구를 벽으로 잇고 문짝은 경계가 아니다.
     힌지와 힌지를 잇는 개구 현(닫힌 문짝이 벽선에 누운 경우)은 남긴다.
     WALL로 잘못 올라온 문짝도 같은 형태로 뺀다.
+    문짝 끝의 짧은 두께 선이 남으면 양개문 tip 사이가 이어져 면이 파인 것처럼 보인다.
     """
     if not hinges:
         return False
     length = math.hypot(x1 - x0, y1 - y0)
+    # 문짝 끝 짧은 변(두께). 반지름 원주 위에 있고 힌지→중점과 직교.
+    if 1.0 <= length <= 80.0:
+        mx, my = (x0 + x1) * 0.5, (y0 + y1) * 0.5
+        for cx, cy, radius in hinges:
+            d0 = math.hypot(x0 - cx, y0 - cy)
+            d1 = math.hypot(x1 - cx, y1 - cy)
+            if abs(d0 - radius) > 55.0 or abs(d1 - radius) > 55.0:
+                continue
+            dm = math.hypot(mx - cx, my - cy)
+            if abs(dm - radius) > 55.0 or dm < 1.0:
+                continue
+            # 개구 현 중점은 힌지열과 평행 → 제외하지 않는다.
+            if abs((mx - cx) * (x1 - x0) + (my - cy) * (y1 - y0)) > 0.35 * dm * length:
+                continue
+            return True
+        return False
     if not (600.0 <= length <= 1700.0):
         return False
     for cx, cy, radius in hinges:
