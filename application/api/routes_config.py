@@ -39,6 +39,7 @@ MODELS = [
     "OpenAI GPT 5.4",
     "OpenAI GPT 5.5",
     "OpenAI GPT 6 Astra",
+    "OpenAI GPT 6.1 Sol",
     "OpenAI GPT 6 Sol",
     "OpenAI GPT 6 Luna",
     "OpenAI GPT 5.6 Sol",

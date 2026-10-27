@@ -9,7 +9,7 @@ LangGraph 에이전트는 tool loop마다 동일한 **system prompt + tool schem
 | 경로 | model_type | 모델 예 | 캐싱 방식 |
 |------|------------|---------|-----------|
 | **Claude / Nova** | `claude`, `nova` | `us.anthropic.claude-sonnet-5` | Explicit (`cache_control`) |
-| **GPT 6 Astra / 5.6+ (Converse)** | `openai` | `us.openai.gpt-6-astra`, `us.openai.gpt-5.6-sol`, `-terra`, `-luna` | Converse 경로 (Gateway/`ChatBedrockConverse`) |
+| **GPT 6 / 6.1 / 5.6+ (Converse)** | `openai` | `us.openai.gpt-6-astra`, `us.openai.gpt-6.1-sol`, `us.openai.gpt-5.6-sol`, `-terra`, `-luna` | Converse 경로 (Gateway/`ChatBedrockConverse`) |
 | **GPT 5.5 이하 (Mantle)** | `openai` | `openai.gpt-5.5`, `openai.gpt-5.4` | Implicit (AWS 자동, 코드 미적용) |
 
 GPT 5.6+ / Astra는 **Bedrock Converse + US inference profile**로 호출합니다. GPT 5.5/5.4는 Mantle Responses를 유지합니다.
