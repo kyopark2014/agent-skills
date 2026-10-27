@@ -42,6 +42,8 @@ class AxisLayerTests(unittest.TestCase):
         self.assertTrue(lib_structure.is_axis_layer("A-ST-AXIS-BUB"))
         self.assertTrue(lib_structure.is_axis_layer("A-ST-AXIS-DIM"))
         self.assertTrue(lib_structure.is_axis_layer("AXIS-BUB"))
+        self.assertTrue(lib_structure.is_axis_layer("AA-AXIS-LINE"))
+        self.assertTrue(lib_structure.is_axis_layer("XR_PLAN(B동)$0$AA-AXIS-LINE"))
         self.assertTrue(lib_structure.is_axis_layer("축선"))
         self.assertTrue(lib_structure.is_axis_layer("CEN"))
         self.assertTrue(lib_structure.is_axis_layer("cen"))
@@ -57,6 +59,8 @@ class AxisLayerTests(unittest.TestCase):
         self.assertFalse(lib_structure.is_axis_layer("ARCH_CEN"))
         self.assertFalse(lib_structure.is_axis_layer("A-WALL"))
         self.assertFalse(lib_structure.is_axis_layer("GRIDLINE"))
+        self.assertFalse(lib_structure.is_axis_layer("AA-XXXX-DIMS"))
+        self.assertFalse(lib_structure.is_axis_layer("AA-XXXX-CNTL"))
 
     def test_drop_axis_layers(self):
         doc = ezdxf.new()

@@ -153,11 +153,11 @@ echo "PID=$! LOG=$LOG"
 ```
 
 성공 시 `floors/12F/floor_original.dxf` / `.png` / `_meta.json`이 생긴다. 같은 파일이 있으면 덮어쓴다.  
-도곽 안에 건축 레이어(`ARCH`, `*_BG`·`*_CEN` 제외)가 있으면 그 선·실명과 문 스윙만 남긴다. 그 레이어의 창선은 벽과 같이 남긴다. 가구·카세트 배관·등고선은 넣지 않는다. 다만 제목에 `냉난방`·`배관`·`전열` 등이 있거나 INSERT 접미로만 보완한 설비 시트는 ARCH 필터를 쓰지 않고 도곽 안 전체 기하를 남긴다. 이 결과도 파일명은 `floor_original.png` 이다. 제목 TEXT가 없는 큰 Defpoints 도곽은 `BASEMENT FLOOR PLAN` 등 INSERT 접미로 `B1F` 등을 보완한다. 전 층 재추출 시 이번 목록에 없는 옛 `sheet_XX` 폴더는 지운다.  
+도곽 안에 건축 레이어(`ARCH`, `*_BG`·`*_CEN` 제외)가 있으면 그 선·실명과 문 스윙만 남긴다. 그 레이어의 창선은 벽과 같이 남긴다. 가구·카세트 배관·등고선은 넣지 않는다. 다만 제목에 `냉난방`·`배관`·`전열` 등이 있거나 INSERT 접미로만 보완한 설비 시트는 ARCH 필터를 쓰지 않고 도곽 안 전체 기하를 남긴다. 멀티층 평면 블록(`XR_PLAN` 등)이 삽입점 `(0,0)`에만 있고 층별 기하가 블록 내부 Y 오프셋에 있으면, 삽입점이 도곽 밖이어도 **extent가 도곽과 교차하면** explode 후 clip으로 자른다(같은 이름·삽입점 INSERT는 한 번만). 이 결과도 파일명은 `floor_original.png` 이다. 제목 TEXT가 없는 큰 Defpoints 도곽은 `BASEMENT FLOOR PLAN` 등 INSERT 접미로 `B1F` 등을 보완한다. 전 층 재추출 시 이번 목록에 없는 옛 `sheet_XX` 폴더는 지운다.  
 꺼진 레이어 위의 숨은선(`HIDDEN`, `HID2`, `HID` 등)은 뺀다. 켜진 레이어의 점선과 실선은 남긴다.  
 구조 축 레이어는 `floor_original`에서 뺀다 (`lib_structure.drop_axis_layers`). 추출 시 아래 순서로 **자동** 처리한다.
 
-1. **이름 패턴** (`is_axis_layer`): `A-ST-AXIS-*`, `축선`, 단독 `CEN`, `N-CNTL`/`N-CNTL-CEN*`/`N-CNTL-AXIS`, `GRID` 등.
+1. **이름 패턴** (`is_axis_layer`): `A-ST-AXIS-*`, `AA-AXIS-LINE`, `축선`, 단독 `CEN`, `N-CNTL`/`N-CNTL-CEN*`/`N-CNTL-AXIS`, `GRID` 등.
 2. **축 기하·레이어 특성** (`discover_axis_layers`): 이름에 안 걸려도 층에 **긴 직교 격자**가 남아 있고, 그 레이어가 `CEN`/`CENTER*` linetype이며 축 피치(1.5–12 m)·3줄 이상이면 해당 레이어 전체를 제거. 로그에 `axis layers by traits: [...]` 로 남는다.
 3. `G-CEN`·`ARCH_*_CEN`·`Continuous` 외벽 장축은 특성 제거 대상이 아니다. 이름만 보고 벽을 지우지 않는다.
 
@@ -170,7 +170,7 @@ echo "PID=$! LOG=$LOG"
 
 | 신호 | 축선(제거) | 벽·중심선(유지) |
 |------|------------|-----------------|
-| 레이어 이름 | `*AXIS*`, `축선`, `N-CNTL*`, `GRID`, 단독 `CEN` | `G-CEN`, `ARCH_*_CEN` |
+| 레이어 이름 | `*AXIS*`/`AA-AXIS-LINE`, `축선`, `N-CNTL*`, `GRID`, 단독 `CEN` | `G-CEN`, `ARCH_*_CEN` |
 | linetype | `CENTER` / `CENTER2` / `CEN` 등 (**특성 탐지 필수**) | `Continuous`, `HIDDEN*` |
 | 기하 | 층 span의 긴 직교 LINE, 피치 1.5–12 m, 3줄 이상 | 짧은 선분·벽 두께 쌍 |
 

@@ -66,12 +66,14 @@ def drop_off_layer_hidden(doc: Drawing, entities: list) -> tuple[list, int]:
     return kept, skipped
 
 
-# 구조 축선·버블·축치수. 'A-ST-AXIS-CEN', 'A-ST-AXIS-BUB', 'AXIS-DIM', 단독 'CEN' 등.
+# 구조 축선·버블·축치수. 'A-ST-AXIS-CEN', 'A-ST-AXIS-BUB', 'AXIS-DIM',
+# 'AA-AXIS-LINE'(가산동 EHP 등), 단독 'CEN' 등.
 # 단독 CEN은 CENTER* 격자 축선(예: 전남대 예술대). G-CEN·*_CEN 벽 중심선은 제외.
 # N-CNTL / N-CNTL-CEN* / N-CNTL-AXIS / GRID: CEN linetype 구조 축(예: 중화5구역 부대시설).
 _AXIS_LAYER = re.compile(
     r"(?:^|[^A-Za-z0-9])(?:A[_-]?)?ST[_-]?AXIS|"
-    r"AXIS[_-]?(?:CEN|CENTER|BUB|BUBBLE|DIM)(?:$|[^A-Za-z0-9])|"
+    r"(?:^|[^A-Za-z0-9]|\$0\$)(?:AA[_-]?)?AXIS"
+    r"(?:[_-](?:CEN|CENTER|BUB|BUBBLE|DIM|LINE|IDEN))?(?:$|[^A-Za-z0-9])|"
     r"축선|축버블|구조축|"
     r"^CEN$|"
     r"(?:^|[^A-Za-z0-9])N-CNTL(?:-CEN\d*|-AXIS)?(?:$|[^A-Za-z0-9])|"

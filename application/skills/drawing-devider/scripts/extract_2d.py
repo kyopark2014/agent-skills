@@ -354,6 +354,14 @@ def filter_by_bbox(
     return kept
 
 
+def _bbox_intersects(
+    a: tuple[float, float, float, float],
+    b: tuple[float, float, float, float],
+) -> bool:
+    """축정렬 bbox 교차. (xmin, ymin, xmax, ymax)."""
+    return not (a[2] < b[0] or a[0] > b[2] or a[3] < b[1] or a[1] > b[3])
+
+
 def write_clean_dxf(
     entities: list[DXFEntity],
     out_path: Path,
@@ -1118,27 +1126,50 @@ def extract_sheet_floor(
             if center and clip[0] <= center[0] <= clip[2] and clip[1] <= center[1] <= clip[3]:
                 entities.append(entity)
 
-    line_count = sum(1 for e in entities if e.dxftype() == "LINE")
-    if not structural_mode and line_count < 30:
+        # 멀티층 평면 블록(XR_PLAN 등)은 삽입점이 (0,0)이고 층별 기하는
+        # 블록 내부 Y 오프셋에만 있다. 삽입점이 clip 밖이어도 extent가
+        # 도곽과 교차하면 explode 후 clip으로 자른다. 도곽선만으로
+        # LINE≥30이 되어 예전 center-in-clip fallback이 스킵되던 경우도 포함한다.
         try:
             from ezdxf import bbox as ezbbox
         except Exception:  # noqa: BLE001
             ezbbox = None
         if ezbbox is not None:
             cache = ezbbox.Cache()
+            seen_keys: set[tuple[str, int, int]] = set()
             for entity in doc.modelspace().query("INSERT"):
                 if id(entity) in used_inserts:
                     continue
+                try:
+                    name = str(entity.dxf.name)
+                    ix = float(entity.dxf.insert.x)
+                    iy = float(entity.dxf.insert.y)
+                    key = (name, int(round(ix)), int(round(iy)))
+                except Exception:  # noqa: BLE001
+                    continue
+                if key in seen_keys:
+                    used_inserts.add(id(entity))
+                    continue
+                seen_keys.add(key)
                 try:
                     ext = ezbbox.extents([entity], cache=cache)
                 except Exception:  # noqa: BLE001
                     continue
                 if not ext.has_data:
                     continue
-                cx = (float(ext.extmin.x) + float(ext.extmax.x)) / 2
-                cy = (float(ext.extmin.y) + float(ext.extmax.y)) / 2
-                if clip[0] <= cx <= clip[2] and clip[1] <= cy <= clip[3]:
-                    absorb_insert(entity)
+                ext_bb = (
+                    float(ext.extmin.x),
+                    float(ext.extmin.y),
+                    float(ext.extmax.x),
+                    float(ext.extmax.y),
+                )
+                if not _bbox_intersects(ext_bb, clip):
+                    continue
+                print(
+                    f"  extent-hit INSERT {name} @ ({ix:.0f},{iy:.0f}) "
+                    f"∩ clip → absorb"
+                )
+                absorb_insert(entity)
 
     entities, skipped_hidden = drop_off_layer_hidden(doc, entities)
     if skipped_hidden:
