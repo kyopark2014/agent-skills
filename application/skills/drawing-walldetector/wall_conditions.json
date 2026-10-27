@@ -4,7 +4,10 @@
       "candidate": {
         "angle_tolerance_deg": 8,
         "min_length_mm": 500,
-        "gap_mm": { "min": 30, "max": 420 },
+        "gap_mm": {
+          "min": 30,
+          "max": 480
+        },
         "overlap_mm_min": 400,
         "overlap_ratio_of_shorter": 0.25
       },
@@ -16,20 +19,29 @@
       },
       "broken_partition": {
         "enabled": true,
-        "gap_mm": { "min": 120, "max": 180 },
+        "gap_mm": {
+          "min": 120,
+          "max": 180
+        },
         "run_min_length_mm": 2200,
         "ortho_tolerance_mm": 8,
         "join_gap_mm": 40
       },
       "abuts_door_opening": {
         "enabled": true,
-        "gap_mm": { "min": 120, "max": 180 },
+        "gap_mm": {
+          "min": 120,
+          "max": 180
+        },
         "face_tolerance_mm": 25,
         "end_touch_mm": 50
       },
       "long_double_wall": {
         "enabled": true,
-        "gap_mm": { "min": 30, "max": 420 },
+        "gap_mm": {
+          "min": 30,
+          "max": 480
+        },
         "shorter_length_mm_gte": 2200,
         "overlap_ratio_of_shorter_gte": 0.8,
         "long_neighbor_length_mm_gte": 2200,
@@ -43,25 +55,41 @@
   "projects": {
     "hotel": [
       {
-        "match": ["gyeongju_boutique_hotel", "hotel", "호텔"],
+        "match": [
+          "gyeongju_boutique_hotel",
+          "hotel",
+          "호텔"
+        ],
         "note": "304호·305호 이중선은 common으로 잡힌다."
       }
     ],
     "hynix": [
       {
-        "match": ["sk_yongin_jiwon", "hynix", "하이닉스"],
+        "match": [
+          "sk_yongin_jiwon",
+          "hynix",
+          "하이닉스"
+        ],
         "note": "방송기자재실 아래 3.4 m 이중선은 common으로 잡힌다."
       }
     ],
     "hospital": [
       {
-        "match": ["wonkwang_hospital_ward1", "hospital", "병원"],
+        "match": [
+          "wonkwang_hospital_ward1",
+          "hospital",
+          "병원"
+        ],
         "note": "회의실·교육실 네 변은 common으로 잡힌다."
       }
     ],
     "house": [
       {
-        "match": ["seongbuk_dong_rowhouse", "house", "주택"],
+        "match": [
+          "seongbuk_dong_rowhouse",
+          "house",
+          "주택"
+        ],
         "note": "옷방 본벽은 common. 오른쪽 1.51 m 면과 위쪽 0.69 m 조각만 여기서 더한다.",
         "long_double_wall": {
           "shorter_length_mm_gte": 1510,
@@ -73,10 +101,16 @@
         "candidate": {
           "min_length_mm": 790,
           "max_length_mm": 810,
-          "gap_mm": { "min": 45, "max": 55 }
+          "gap_mm": {
+            "min": 45,
+            "max": 55
+          }
         },
         "long_double_wall": {
-          "gap_mm": { "min": 45, "max": 55 },
+          "gap_mm": {
+            "min": 45,
+            "max": 55
+          },
           "shorter_length_mm_gte": 800,
           "overlap_ratio_of_shorter_gte": 0.9
         }
@@ -84,17 +118,26 @@
     ],
     "manseongcho": [
       {
-        "match": ["manseongcho", "만성초"],
+        "match": [
+          "manseongcho",
+          "만성초"
+        ],
         "note": "3F 과학준비실-1 아래처럼 기둥·창문 사이 짧은 이중선. 간격 150 mm, 짧은 쪽 300–500 mm.",
         "candidate": {
           "min_length_mm": 290,
           "max_length_mm": 520,
-          "gap_mm": { "min": 145, "max": 155 },
+          "gap_mm": {
+            "min": 145,
+            "max": 155
+          },
           "overlap_mm_min": 260,
           "overlap_ratio_of_shorter": 0.9
         },
         "long_double_wall": {
-          "gap_mm": { "min": 145, "max": 155 },
+          "gap_mm": {
+            "min": 145,
+            "max": 155
+          },
           "shorter_length_mm_gte": 290,
           "overlap_ratio_of_shorter_gte": 0.9,
           "long_neighbor_count_gte": 99,
@@ -106,12 +149,18 @@
         "candidate": {
           "min_length_mm": 1150,
           "max_length_mm": 1775,
-          "gap_mm": { "min": 195, "max": 210 },
+          "gap_mm": {
+            "min": 195,
+            "max": 210
+          },
           "overlap_mm_min": 1000,
           "overlap_ratio_of_shorter": 0.8
         },
         "long_double_wall": {
-          "gap_mm": { "min": 195, "max": 210 },
+          "gap_mm": {
+            "min": 195,
+            "max": 210
+          },
           "shorter_length_mm_gte": 1150,
           "overlap_ratio_of_shorter_gte": 0.8,
           "long_neighbor_count_gte": 99,

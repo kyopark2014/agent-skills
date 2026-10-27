@@ -92,6 +92,30 @@ class GridAxisWallTests(unittest.TestCase):
         self.assertNotIn(id(face_a), demote)
         self.assertNotIn(id(face_b), demote)
 
+    def test_450mm_double_wall_is_not_grid_demoted(self):
+        """반포초처럼 450 mm 외벽 이중선도 벽 두께 짝으로 격자 demote에서 뺀다."""
+        doc = ezdxf.new()
+        msp = doc.modelspace()
+        face_a = msp.add_line(
+            (0, 0),
+            (32400, 0),
+            dxfattribs={"layer": WALL_LAYER, "color": 1},
+        )
+        face_b = msp.add_line(
+            (0, 450),
+            (32400, 450),
+            dxfattribs={"layer": WALL_LAYER, "color": 1},
+        )
+        msp.add_line(
+            (0, 12500),
+            (32400, 12500),
+            dxfattribs={"layer": WALL_LAYER, "color": 1},
+        )
+        segs = iter_axis_segs(msp, min_len_mm=70.0)
+        demote = demote_parallel_grid_axis_walls(segs)
+        self.assertNotIn(id(face_a), demote)
+        self.assertNotIn(id(face_b), demote)
+
 
 if __name__ == "__main__":
     unittest.main()

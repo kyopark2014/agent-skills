@@ -692,7 +692,7 @@ GRID_AXIS_OVERLAP_RATIO = 0.50
 GRID_AXIS_PITCH_MIN_MM = 1500.0
 GRID_AXIS_PITCH_MAX_MM = 12000.0
 GRID_AXIS_THICK_MIN_MM = 30.0
-GRID_AXIS_THICK_MAX_MM = 420.0
+GRID_AXIS_THICK_MAX_MM = 480.0
 
 
 def _seg_ortho(s: Seg, *, along_x: bool) -> float:
@@ -1643,7 +1643,7 @@ def classify_entities(
     - 기둥 축 격자(XC) 변은 벽 면이 아니다.
     - 이중선 한가운데 중심선(CEN 축선 등)은 벽 면이 아니다. 바깥 면끼리만 짝한다.
     - 10 m 이상 평행선이 축 피치(1.5–12 m)로 3줄 이상이면 기둥 축 격자다.
-      벽 두께 이중선(30–420 mm) 짝이 있으면 격자가 아니다.
+      벽 두께 이중선(30–480 mm) 짝이 있으면 격자가 아니다.
     """
     profiles = _wall_condition_profiles(conditions, project)
     angle_tol = max(float(profile["candidate"]["angle_tolerance_deg"]) for profile in profiles)

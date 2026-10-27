@@ -29,7 +29,7 @@ WALL_SAMPLE_PROMPT = """이 이미지는 건축 평면도에서 잘라 낸 샘�
 </result>
 """
 
-# 샘플 창에서 이중선을 찾을 때 쓰는 대역. common(30–420 mm) 밖 벽도 모을 수 있게 넓힌다.
+# 샘플 창에서 이중선을 찾을 때 쓰는 대역. common(30–480 mm) 밖 벽도 모을 수 있게 넓힌다.
 _MEASURE_GAP_MIN_MM = 15.0
 _MEASURE_GAP_MAX_MM = 800.0
 _MEASURE_MIN_LENGTH_MM = 350.0

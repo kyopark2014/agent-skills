@@ -632,7 +632,7 @@ def _has_parallel_pair(
     base: list[AxisSeg],
     *,
     thick_min: float = 50.0,
-    thick_max: float = 420.0,
+    thick_max: float = 480.0,
     cover_ratio: float = 0.0,
 ) -> bool:
     """BASE 이중선(벽 두께) 짝이 있으면 구조 벽 후보로 본다.
@@ -2268,7 +2268,7 @@ def _has_wall_thickness_mate(
     segs: list[AxisSeg],
     *,
     thick_min_mm: float = 30.0,
-    thick_max_mm: float = 420.0,
+    thick_max_mm: float = 480.0,
     overlap_ratio: float = 0.5,
 ) -> bool:
     """벽 두께 대역의 평행 짝이 있으면 구조/창호 면이다. CEN 축이 아니다."""
