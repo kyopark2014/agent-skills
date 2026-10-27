@@ -34,6 +34,11 @@ class ParseFloorLabelTests(unittest.TestCase):
             "B1F": "B1F",
             "12F PLAN": "12F",
             "27F FLOOR PLAN": "27F",
+            "01. 2F 평면도": "2F",
+            "01. 3F 평면도": "3F",
+            "01. 4F 평면도": "4F",
+            "01) 4F 평면도": "4F",
+            "01 2F 평면도": "2F",
             "4~5층 평면도": "4F",
             "4 ~5 층 평 면 도": "4F",
             "옥탑지붕 평면도": "PH",
@@ -419,6 +424,83 @@ class BlockNameAndSheetInsertTests(unittest.TestCase):
         self.assertEqual(lib_sheet.parse_floor_from_block_name("PL260224-관리-2"), "2F")
         self.assertIsNone(lib_sheet.parse_floor_from_block_name("ooa-sheet-1"))
         self.assertIsNone(lib_sheet.parse_floor_from_block_name("door-handle"))
+
+    def test_concentric_inner_borders_keep_outer_sheet(self):
+        """동심 숨김 테두리가 있어도 바깥 시트 도곽을 지우지 않는다."""
+        outer = (-140_449.0, 47_523.0, -77_449.0, 92_073.0)
+        inners = [
+            (-132_190.0, 51_052.0, -85_708.0, 90_832.0),
+            (-131_440.0, 51_802.0, -86_458.0, 90_082.0),
+            (-130_690.0, 52_552.0, -87_208.0, 89_332.0),
+            (-129_190.0, 54_052.0, -88_708.0, 87_832.0),
+        ]
+        kept = lib_sheet._dedupe_rects([outer, *inners])
+        self.assertTrue(
+            any(
+                abs(rect[0] - outer[0]) < 1 and abs(rect[1] - outer[1]) < 1
+                for rect in kept
+            ),
+            kept,
+        )
+
+    def test_side_by_side_children_still_drop_grid_parent(self):
+        """좌우로 나뉜 자식 시트가 있으면 격자 부모 도곽은 제거한다."""
+        parent = (0.0, 0.0, 200_000.0, 100_000.0)
+        left = (5_000.0, 5_000.0, 95_000.0, 95_000.0)
+        right = (105_000.0, 5_000.0, 195_000.0, 95_000.0)
+        kept = lib_sheet._dedupe_rects([parent, left, right])
+        self.assertEqual(len(kept), 2)
+        self.assertFalse(
+            any(abs(rect[0] - parent[0]) < 1 and abs(rect[2] - parent[2]) < 1 for rect in kept)
+        )
+
+    def test_drawing_index_titles_and_concentric_borders_keep_all_floors(self):
+        """'01. NF 평면도' + 동심 테두리가 있어도 시트 INSERT 층을 모두 남긴다."""
+        import ezdxf
+
+        doc = ezdxf.new()
+        msp = doc.modelspace()
+        sheet = doc.blocks.new("세미 도곽")
+        sheet.add_lwpolyline(
+            [(0, 0), (63_000, 0), (63_000, 44_500), (0, 44_500)],
+            close=True,
+        )
+
+        def add_floor(insert_y: float, title: str, *, concentric: bool) -> None:
+            msp.add_blockref("세미 도곽", insert=(0, insert_y))
+            msp.add_mtext(
+                title,
+                dxfattribs={
+                    "insert": (2_000, insert_y + 1_800),
+                    "char_height": 560,
+                    "layer": "5.글자_실명",
+                },
+            )
+            if concentric:
+                for inset in (8_000, 10_000, 12_000, 15_000):
+                    msp.add_lwpolyline(
+                        [
+                            (inset, insert_y + inset * 0.7),
+                            (63_000 - inset, insert_y + inset * 0.7),
+                            (63_000 - inset, insert_y + 44_500 - inset * 0.7),
+                            (inset, insert_y + 44_500 - inset * 0.7),
+                        ],
+                        close=True,
+                        dxfattribs={"layer": "14.숨김선"},
+                    )
+            for index in range(40):
+                x = 10_000 + (index % 8) * 5_000
+                y = insert_y + 10_000 + (index // 8) * 5_000
+                msp.add_line((x, y), (x + 2_000, y + 500))
+
+        add_floor(0.0, "01. 4F 평면도", concentric=False)
+        add_floor(55_000.0, "01. 3F 평면도", concentric=False)
+        add_floor(110_000.0, "01. 2F 평면도", concentric=True)
+
+        found = lib_sheet.discover_layout(doc, mode="sheet")
+
+        self.assertEqual(found.floors, ["2F", "3F", "4F"])
+        self.assertTrue(any("시트 블록 INSERT" in note for note in found.warnings))
 
     def test_sheet_insert_bbox_beats_tiny_duplicate_title_cell(self):
         """시트 INSERT 큰 도곽이 있으면 복제 제목용 작은 칸은 같은 층으로 흡수된다."""

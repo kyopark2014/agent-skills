@@ -169,6 +169,21 @@ def _strip_equipment_prefix(raw: str) -> str:
     return " ".join(tokens[index:])
 
 
+_DRAWING_INDEX_DOT = re.compile(r"^\d{1,3}[.)]\s*")
+_DRAWING_INDEX_SPACE = re.compile(
+    r"^\d{1,3}\s+(?=(?:지상\s*)?(?:지하|\d+\s*(?:층|F)|B\s*\d|옥|지붕|ROOF|RF|PH))",
+    re.I,
+)
+
+
+def _strip_drawing_index_prefix(raw: str) -> str:
+    """'01. 4F 평면도', '01) 2F 평면도', '01 3F 평면도'처럼 앞 도면 순번을 뺀다."""
+    stripped = _DRAWING_INDEX_DOT.sub("", raw, count=1)
+    if stripped != raw:
+        return stripped
+    return _DRAWING_INDEX_SPACE.sub("", raw, count=1)
+
+
 _DRAWING_NUMBER = re.compile(r"^[A-Za-z]{2,6}-\d{2,4}$")
 _PLAN_WORD = re.compile(
     r"평면도|단면도|입면도|배치도|공조조닝도|조닝도|\bPLAN\b|\bSECTION\b|\bELEVATION\b",
@@ -256,6 +271,7 @@ def parse_floor_label(value: str) -> str | None:
     'EHP 1층 냉난방 제어 평면도', 'EHP 지붕층 냉난방 철거 평면도',
     '지붕층 냉난방 배관평면도'처럼 앞에 설비 코드가 있고
     층과 평면도 사이에 용도가 있는 제목도 인정한다.
+    '01. 4F 평면도', '01 2F 평면도'처럼 앞에 도면 순번이 있어도 인정한다.
     '4~5층 평면도'처럼 한 시트에 묶인 층 구간은 시작 층(4F)으로 둔다.
     '옥탑지붕 평면도'는 옥탑(PH)으로 둔다.
     """
@@ -264,7 +280,7 @@ def parse_floor_label(value: str) -> str | None:
         return None
     if re.fullmatch(r"[\d.,\s]+", raw):
         return None
-    body = _strip_equipment_prefix(raw)
+    body = _strip_drawing_index_prefix(_strip_equipment_prefix(raw))
     body = re.sub(r"(\d+)\s*[~\-～〜]\s*(\d+)", r"\1~\2", body)
     range_hit = re.fullmatch(
         rf"(?P<a>\d+)~(?P<b>\d+)\s*(?:층|F)(?:\s*{_PLAN_TAIL})?{_TRAIL_PAREN}$",
@@ -571,6 +587,17 @@ def _coverage_fraction(outer, inners, grid: int = 24) -> float:
     return hit / (grid * grid)
 
 
+def _children_are_nested(
+    children: list[tuple[float, float, float, float]],
+) -> bool:
+    """동심 테두리처럼 한쪽이 다른 쪽을 품으면 True. 좌우 격자 칸은 False."""
+    for index, left in enumerate(children):
+        for right in children[index + 1 :]:
+            if _contains(left, right) or _contains(right, left):
+                return True
+    return False
+
+
 def _dedupe_rects(rects: list[tuple[float, float, float, float]]):
     """같은 테두리의 중복은 치우되, 진짜 바깥 도곽(코너·치수선 조각들의 부모)만 남긴다.
 
@@ -578,6 +605,7 @@ def _dedupe_rects(rects: list[tuple[float, float, float, float]]):
     치수선·심볼 조각이 큰 도곽 구석에 우연히 2개 겹치면 그 큰 도곽 자체(=실제 도면 테두리)가
     통째로 사라져 "도곽 안에 기하가 없습니다" 오류로 이어졌다. 자식들이 바깥 사각형의
     대부분(코너 2개 조각 정도가 아니라 과반)을 덮을 때만 부모를 중복으로 보고 지운다.
+    다만 동심(숨김선·보조) 테두리가 겹쳐 덮는 경우는 격자 칸이 아니므로 부모 시트를 남긴다.
     """
     ordered = sorted(rects, key=_area, reverse=True)
     kept: list[tuple[float, float, float, float]] = []
@@ -594,7 +622,11 @@ def _dedupe_rects(rects: list[tuple[float, float, float, float]]):
             for j, inner in enumerate(kept)
             if i != j and _contains(outer, inner) and _area(inner) < _area(outer) * 0.85
         ]
-        if len(children) >= 2 and _coverage_fraction(outer, children) >= 0.6:
+        if (
+            len(children) >= 2
+            and _coverage_fraction(outer, children) >= 0.6
+            and not _children_are_nested(children)
+        ):
             parents.add(i)
     return [rect for i, rect in enumerate(kept) if i not in parents]
 
