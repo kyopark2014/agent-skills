@@ -212,6 +212,55 @@ class XCoverSquareTests(unittest.TestCase):
         self.assertIn(((23100, 4500), (0, 4500)), walls)
         self.assertIn(((0, 4500), (0, 0)), walls)
 
+    def test_partial_left_edge_stub_and_gap_become_wall(self):
+        """왼쪽 변이 WALL 일부+BASE 짧은 조각이면 조각·남은 틈도 봉인한다.
+
+        지에스이 신사옥 1F 상부오픈(~7.6×5.1 m): 왼쪽 아래 ~1.35 m BASE 틈으로
+        로비가 X 왼쪽 삼각형에 새던 경우.
+        """
+        doc = ezdxf.new()
+        msp = doc.modelspace()
+        w, h = 7600.0, 5100.0
+        diag_a = msp.add_line((0, 0), (w, h), dxfattribs={"layer": "BASE"})
+        diag_b = msp.add_line((w, 0), (0, h), dxfattribs={"layer": "BASE"})
+        bot = msp.add_line((0, 0), (w, 0), dxfattribs={"layer": "BASE"})
+        top = msp.add_line((0, h), (w, h), dxfattribs={"layer": "BASE"})
+        right = msp.add_line((w, 0), (w, h), dxfattribs={"layer": "BASE"})
+        # 왼쪽: 아래 1350 mm BASE, 위 4050 mm 는 이미 WALL(부분만 덮음)
+        left_stub = msp.add_line((0, 0), (0, 1350), dxfattribs={"layer": "BASE"})
+        left_wall = msp.add_line((0, 1350), (0, h), dxfattribs={"layer": "WALL", "color": 1})
+
+        promoted = lib_llm_correct.promote_x_cover_squares(msp)
+
+        self.assertGreaterEqual(promoted, 5)
+        self.assertEqual(diag_a.dxf.layer, "WALL")
+        self.assertEqual(diag_b.dxf.layer, "WALL")
+        self.assertEqual(bot.dxf.layer, "WALL")
+        self.assertEqual(top.dxf.layer, "WALL")
+        self.assertEqual(right.dxf.layer, "WALL")
+        self.assertEqual(left_stub.dxf.layer, "WALL")
+        self.assertEqual(left_wall.dxf.layer, "WALL")
+        # 왼쪽 변 전체가 WALL 선으로 이어져야 한다(투영 합 ≥ 92%).
+        left_spans = []
+        for entity in msp:
+            if entity.dxftype() != "LINE" or entity.dxf.layer != "WALL":
+                continue
+            x0, y0 = float(entity.dxf.start.x), float(entity.dxf.start.y)
+            x1, y1 = float(entity.dxf.end.x), float(entity.dxf.end.y)
+            if abs(x0) > 1.0 or abs(x1) > 1.0:
+                continue
+            lo, hi = sorted((y0, y1))
+            left_spans.append((lo, hi))
+        left_spans.sort()
+        merged = []
+        for start, end in left_spans:
+            if not merged or start > merged[-1][1] + 1.0:
+                merged.append([start, end])
+            else:
+                merged[-1][1] = max(merged[-1][1], end)
+        covered = sum(end - start for start, end in merged)
+        self.assertGreaterEqual(covered, 0.92 * h)
+
     def test_tall_elev_x_with_float_width_and_poly_edge(self):
         """승강기 옆처럼 짧은 변 ~500 mm(좌표 오차) X와 2점 폴리 변도 올린다."""
         doc = ezdxf.new()
