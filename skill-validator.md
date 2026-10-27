@@ -43,7 +43,7 @@ $ARTIFACTS_DIR/<drawing_id>/floors/<FLOOR>/
 | `prepare_review_all.py` | original PNG가 있는 층을 물리 CPU 코어 수만큼 동시에 타일 준비 |
 | `prepare_review.py` | 한 층. `floor_wall_original.png` → 한 변 5000px 이하 타일 + `tiles.json`. 층 전체 한 장 복사는 하지 않음 |
 | `view_image_all.py` | tiles.json이 있는 층을 판정. 진행 중 Vision 호출은 물리 CPU 코어 수. 끝날 때까지 대기 |
-| `view_image.py` | 한 층 타일 PNG를 base64로 `chat.get_chat().invoke`에 보내고 `review.json` 작성. 도구가 아님 |
+| `view_image.py` | 한 층 타일 PNG를 base64로 `chat.get_chat().invoke`에 보내고 `review.json` 작성. Vision 모델은 `OpenAI GPT 6 Astra` 고정. 도구가 아님 |
 | `correct_walls_floor.py` | DXF 로드 → `apply_corrections` → validated 저장. 한 턴에 코어 수만큼 층 bash를 나란히 호출 |
 | `correct_walls_all.py` | 에이전트는 호출하지 않음(한 bash에 여러 층이면 끝날 때까지 결과가 안 보임) |
 | `render_wall_diff.py` | original vs validated diff PNG/JSON |
@@ -65,7 +65,7 @@ Vision 모델은 DXF 좌표를 직접 파싱하지 않습니다.
 | 파란 텍스트 | TEXT/MTEXT | 실명·UP/DN·강당 등 맥락 |
 | ARC(문 스윙) 등 | BASE에 남음 | 개구 힌트 (갭을 메우지 말 것) |
 
-채팅 에이전트는 타일을 열지 않습니다. `view_image.py`가 PNG를 base64로 넣고, UI에서 고른 모델에 판정 기준과 함께 보냅니다. 답은 상자 JSON이고, 스크립트가 타일 0~1 좌표를 층 mm로 바꿔 `review.json`에 모읍니다.
+채팅 에이전트는 타일을 열지 않습니다. `view_image.py`가 PNG를 base64로 넣고, **`OpenAI GPT 6 Astra`**(UI 선택과 무관)에 판정 기준과 함께 보냅니다. 답은 상자 JSON이고, 스크립트가 타일 0~1 좌표를 층 mm로 바꿔 `review.json`에 모읍니다.
 
 ```python
 encoded = _encode_png(review_dir / tile["file"])

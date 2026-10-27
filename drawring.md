@@ -355,12 +355,12 @@ Vision이 하지 않는 일:
 
 기하가 놓친 자리를 작은 상자로 짚습니다.
 
-타일을 보는 주체는 채팅 에이전트가 아닙니다. `view_image.py`가 `llm_review/`의 PNG를 읽어 base64로 만들고, UI에서 고른 모델(`chat.get_chat()`)에 이미지와 판정 기준을 함께 보냅니다. 모델 답은 상자 JSON이고, 스크립트가 타일 좌표를 층 mm로 바꿔 `review.json`에 모읍니다.
+타일을 보는 주체는 채팅 에이전트가 아닙니다. `view_image.py`가 `llm_review/`의 PNG를 읽어 base64로 만들고, **`OpenAI GPT 6 Astra`**(UI 선택과 무관)에 이미지와 판정 기준을 함께 보냅니다. 모델 답은 상자 JSON이고, 스크립트가 타일 좌표를 층 mm로 바꿔 `review.json`에 모읍니다.
 
 ```python
 # view_image.py — 타일 한 장
 encoded = _encode_png(review_dir / tile["file"])  # PNG → base64
-chat, client = _chat()  # chat.get_chat(), UI_MODEL_NAME
+chat, client = _chat()  # OpenAI GPT 6 Astra 고정
 result = client.invoke(
     [
         chat.HumanMessage(
