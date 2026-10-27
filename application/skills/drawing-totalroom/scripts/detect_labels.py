@@ -592,6 +592,57 @@ def _apply_room_difference(inst: dict, diff) -> bool:
     return True
 
 
+# 기명 실이 X·/ 표식 칸과 겹치면 그 겹침만 뺀다(전실이 ST X 윗삼각형으로 새던 경우).
+X_ROOM_SUBTRACT_MIN_MM2 = 10_000.0  # 0.01 m²
+X_ROOM_SUBTRACT_MAX_HOST_FRAC = 0.75
+
+
+def _subtract_crossed_x_regions(msp, detected: list[dict]) -> list[dict]:
+    """교차 X·네모+/ 표식 bbox가 기명 실 면에 침범한 부분을 뺀다.
+
+    무명 fill 의 skip_x 와 같은 기하를 쓰되 pad 없이 표식 칸만 자른다.
+    라벨 점이 X 안에 있거나 겹침이 실의 75%를 넘으면 그 상자는 건너뛴다.
+    """
+    x_boxes = find_crossed_x_bboxes(msp, pad_mm=0.0) + find_slash_rect_bboxes(
+        msp, pad_mm=0.0
+    )
+    if not x_boxes or not detected:
+        return detected
+    for inst in detected:
+        host = _host_polygon(inst)
+        if host is None:
+            continue
+        seed = Point(inst["x"], inst["y"])
+        notes: list[str] = []
+        for xmin, ymin, xmax, ymax in x_boxes:
+            if xmax <= xmin or ymax <= ymin:
+                continue
+            region = box(xmin, ymin, xmax, ymax)
+            if region.covers(seed) or region.contains(seed):
+                continue
+            if not host.intersects(region):
+                continue
+            overlap = host.intersection(region)
+            if overlap.is_empty or overlap.area < X_ROOM_SUBTRACT_MIN_MM2:
+                continue
+            if overlap.area > host.area * X_ROOM_SUBTRACT_MAX_HOST_FRAC:
+                continue
+            diff = host.difference(overlap)
+            if not _apply_room_difference(inst, diff):
+                continue
+            host = _host_polygon(inst)
+            if host is None:
+                break
+            notes.append(f"X {overlap.area / 1_000_000.0:.2f} m2")
+        if notes:
+            print(
+                f"cut {inst['text']} {inst['area_m2']:.2f} m2, removed "
+                + ", ".join(notes),
+                flush=True,
+            )
+    return detected
+
+
 def _subtract_anchor_faces(msp, segs, detected: list[dict]) -> list[dict]:
     """벽 끝으로 못 가른 화장실은 그 글자에서 보이는 칸을 잡아 들어 있는 실에서 뺀다.
 
@@ -1174,14 +1225,18 @@ def _uniq_x_bboxes(
     return uniq
 
 
-def find_crossed_x_bboxes(msp) -> list[tuple[float, float, float, float]]:
+def find_crossed_x_bboxes(
+    msp, *, pad_mm: float = X_BBOX_PAD_MM
+) -> list[tuple[float, float, float, float]]:
     """교차 대각선(X) 영역의 mm bbox.
 
-    무명 라벨 제외용이다. 긴 변·대각 길이 상한은 두지 않는다(크기 무관).
-    문 두께 안 얇은 X 만 뺀다. 네모+/ 표식은 find_slash_rect_bboxes.
+    무명 라벨 제외·기명 실 X 침범 차감용이다. 긴 변·대각 길이 상한은
+    두지 않는다(크기 무관). 문 두께 안 얇은 X 만 뺀다.
+    네모+/ 표식은 find_slash_rect_bboxes.
     """
     diags = _diag_candidates(msp)
     crosses: list[tuple[float, float, float, float]] = []
+    pad = max(0.0, float(pad_mm))
     for index, left in enumerate(diags):
         for right in diags[index + 1 :]:
             short, long = sorted((left[4], right[4]))
@@ -1199,14 +1254,7 @@ def find_crossed_x_bboxes(msp) -> list[tuple[float, float, float, float]]:
                 continue
             if _is_door_x_span(thick, span):
                 continue
-            crosses.append(
-                (
-                    x0 - X_BBOX_PAD_MM,
-                    y0 - X_BBOX_PAD_MM,
-                    x1 + X_BBOX_PAD_MM,
-                    y1 + X_BBOX_PAD_MM,
-                )
-            )
+            crosses.append((x0 - pad, y0 - pad, x1 + pad, y1 + pad))
     return _uniq_x_bboxes(crosses)
 
 
@@ -1256,14 +1304,17 @@ def _axis_edge_covered(
     return covered >= cover_ratio * elen
 
 
-def find_slash_rect_bboxes(msp) -> list[tuple[float, float, float, float]]:
-    """네모 + 대각선 하나(/) 표식 bbox. 무명 제외용, 긴 변 상한 없음.
+def find_slash_rect_bboxes(
+    msp, *, pad_mm: float = X_BBOX_PAD_MM
+) -> list[tuple[float, float, float, float]]:
+    """네모 + 대각선 하나(/) 표식 bbox. 무명 제외·기명 실 차감용, 긴 변 상한 없음.
 
     맞은편 모서리를 잇는 대각만 있고(교차 X 아님), 네 변 중 3개 이상이
     도면에 있을 때만. 문 두께 얇은 / 는 뺀다.
     """
     diags = _diag_candidates(msp)
     edge_lines: list[tuple[float, float, float, float]] = []
+    pad = max(0.0, float(pad_mm))
     for entity in msp:
         if entity.dxftype() != "LINE":
             continue
@@ -1311,14 +1362,7 @@ def find_slash_rect_bboxes(msp) -> list[tuple[float, float, float, float]]:
                 side_hits += 1
         if side_hits < 3:
             continue
-        boxes.append(
-            (
-                ax0 - X_BBOX_PAD_MM,
-                ay0 - X_BBOX_PAD_MM,
-                ax1 + X_BBOX_PAD_MM,
-                ay1 + X_BBOX_PAD_MM,
-            )
-        )
+        boxes.append((ax0 - pad, ay0 - pad, ax1 + pad, ay1 + pad))
     return _uniq_x_bboxes(boxes)
 
 
@@ -2087,6 +2131,7 @@ def detect(
     detected = _divide_shared_faces(msp, boxes, segs, detected, door)
     detected = _divide_on_dividers(msp, boxes, segs, detected, door)
     detected = _subtract_anchor_faces(msp, segs, detected)
+    detected = _subtract_crossed_x_regions(msp, detected)
     detected, skipped = _drop_tiny_faces(detected, skipped)
 
     meta = resolve_label_meta_bbox(
