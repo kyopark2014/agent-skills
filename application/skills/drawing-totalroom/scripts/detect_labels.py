@@ -109,13 +109,12 @@ SINK_DEDUPE_MM = 200.0
 SINK_NEAR_POLY_MM = 100.0
 # 칸 안 TEXT 에 있으면 화장실로 보고 라벨을 붙이지 않음(집기 표기 포함).
 FILL_BATHROOM_TEXT = ("세면대", "세면", "화장실", "WC", "W.C", "변기")
-# 교차 대각선(X) — drawing-llmvalidator promote_x_cover_squares 와 같은 범위.
+# 교차 대각선(X) — 무명 라벨 제외용. 긴 변·대각 상한 없음(크기 무관).
+# 문 두께 안 얇은 X 만 빼고, WALL 승격 한도(llmvalidator ≤25 m)와는 별개다.
 X_DIAG_LEN_MIN_MM = 200.0
-X_DIAG_LEN_MAX_MM = 15000.0
 X_DIAG_ASPECT_MIN = 0.08
 X_CROSS_SHORT_FRAC = 0.75
 X_SPAN_MIN_MM = 499.0
-X_SPAN_MAX_MM = 12000.0
 X_DOOR_THICK_MIN_MM = 80.0
 X_DOOR_THICK_MAX_MM = 360.0
 X_DOOR_SPAN_MIN_MM = 650.0
@@ -1126,11 +1125,8 @@ def _poly_has_bathroom_text(msp, poly: Polygon) -> bool:
     return False
 
 
-def find_crossed_x_bboxes(msp) -> list[tuple[float, float, float, float]]:
-    """교차 대각선(X) 영역의 mm bbox.
-
-    drawing-llmvalidator 의 X 커버 규칙과 같다. 문 두께 안 얇은 X 는 뺀다.
-    """
+def _diag_candidates(msp) -> list[tuple[float, float, float, float, float]]:
+    """대각 후보 LINE (x0,y0,x1,y1,length)."""
     diags: list[tuple[float, float, float, float, float]] = []
     for entity in msp:
         if entity.dxftype() != "LINE":
@@ -1144,11 +1140,47 @@ def find_crossed_x_bboxes(msp) -> list[tuple[float, float, float, float]]:
             continue
         dx, dy = abs(x1 - x0), abs(y1 - y0)
         length = math.hypot(x1 - x0, y1 - y0)
-        if not (X_DIAG_LEN_MIN_MM <= length <= X_DIAG_LEN_MAX_MM) or max(dx, dy) <= 0.0:
+        if length < X_DIAG_LEN_MIN_MM or max(dx, dy) <= 0.0:
             continue
         if min(dx, dy) / max(dx, dy) < X_DIAG_ASPECT_MIN:
             continue
         diags.append((x0, y0, x1, y1, length))
+    return diags
+
+
+def _is_door_x_span(thick: float, span: float) -> bool:
+    if (
+        X_DOOR_THICK_MIN_MM <= thick <= X_DOOR_THICK_MAX_MM
+        and X_DOOR_SPAN_MIN_MM <= span <= X_DOOR_SPAN_MAX_MM
+        and thick / span <= X_DOOR_ASPECT_MAX
+    ):
+        return True
+    return False
+
+
+def _uniq_x_bboxes(
+    boxes: list[tuple[float, float, float, float]],
+) -> list[tuple[float, float, float, float]]:
+    uniq: list[tuple[float, float, float, float]] = []
+    for item in boxes:
+        cx = (item[0] + item[2]) * 0.5
+        cy = (item[1] + item[3]) * 0.5
+        if any(
+            abs(cx - (u[0] + u[2]) * 0.5) < 500.0 and abs(cy - (u[1] + u[3]) * 0.5) < 500.0
+            for u in uniq
+        ):
+            continue
+        uniq.append(item)
+    return uniq
+
+
+def find_crossed_x_bboxes(msp) -> list[tuple[float, float, float, float]]:
+    """교차 대각선(X) 영역의 mm bbox.
+
+    무명 라벨 제외용이다. 긴 변·대각 길이 상한은 두지 않는다(크기 무관).
+    문 두께 안 얇은 X 만 뺀다. 네모+/ 표식은 find_slash_rect_bboxes.
+    """
+    diags = _diag_candidates(msp)
     crosses: list[tuple[float, float, float, float]] = []
     for index, left in enumerate(diags):
         for right in diags[index + 1 :]:
@@ -1163,14 +1195,9 @@ def find_crossed_x_bboxes(msp) -> list[tuple[float, float, float, float]]:
             y0, y1 = min(ys), max(ys)
             width, height = x1 - x0, y1 - y0
             thick, span = min(width, height), max(width, height)
-            if thick < X_SPAN_MIN_MM or span > X_SPAN_MAX_MM:
+            if thick < X_SPAN_MIN_MM:
                 continue
-            # 벽 두께 안 문 X
-            if (
-                X_DOOR_THICK_MIN_MM <= thick <= X_DOOR_THICK_MAX_MM
-                and X_DOOR_SPAN_MIN_MM <= span <= X_DOOR_SPAN_MAX_MM
-                and thick / span <= X_DOOR_ASPECT_MAX
-            ):
+            if _is_door_x_span(thick, span):
                 continue
             crosses.append(
                 (
@@ -1180,17 +1207,119 @@ def find_crossed_x_bboxes(msp) -> list[tuple[float, float, float, float]]:
                     y1 + X_BBOX_PAD_MM,
                 )
             )
-    uniq: list[tuple[float, float, float, float]] = []
-    for item in crosses:
-        cx = (item[0] + item[2]) * 0.5
-        cy = (item[1] + item[3]) * 0.5
-        if any(
-            abs(cx - (u[0] + u[2]) * 0.5) < 500.0 and abs(cy - (u[1] + u[3]) * 0.5) < 500.0
-            for u in uniq
+    return _uniq_x_bboxes(crosses)
+
+
+def _slash_pts_match(
+    ax: float,
+    ay: float,
+    bx: float,
+    by: float,
+    cx: float,
+    cy: float,
+    dx: float,
+    dy: float,
+    *,
+    tol: float,
+) -> bool:
+    return (
+        math.hypot(ax - cx, ay - cy) <= tol and math.hypot(bx - dx, by - dy) <= tol
+    ) or (math.hypot(ax - dx, ay - dy) <= tol and math.hypot(bx - cx, by - cy) <= tol)
+
+
+def _axis_edge_covered(
+    side: tuple[tuple[float, float], tuple[float, float]],
+    lines: list[tuple[float, float, float, float]],
+    *,
+    tol_mm: float = 45.0,
+    cover_ratio: float = 0.55,
+) -> bool:
+    a, b = side
+    ex, ey = b[0] - a[0], b[1] - a[1]
+    elen = math.hypot(ex, ey)
+    if elen < 80.0:
+        return False
+    eux, euy = ex / elen, ey / elen
+    covered = 0.0
+    for x0, y0, x1, y1 in lines:
+        mx, my = (x0 + x1) * 0.5, (y0 + y1) * 0.5
+        wx, wy = mx - a[0], my - a[1]
+        perp = abs(wx * (-euy) + wy * eux)
+        if perp > tol_mm:
+            continue
+        if math.hypot(x1 - x0, y1 - y0) < 80.0:
+            continue
+        a0 = (x0 - a[0]) * eux + (y0 - a[1]) * euy
+        a1 = (x1 - a[0]) * eux + (y1 - a[1]) * euy
+        lo, hi = sorted((a0, a1))
+        covered += max(0.0, min(hi, elen) - max(lo, 0.0))
+    return covered >= cover_ratio * elen
+
+
+def find_slash_rect_bboxes(msp) -> list[tuple[float, float, float, float]]:
+    """네모 + 대각선 하나(/) 표식 bbox. 무명 제외용, 긴 변 상한 없음.
+
+    맞은편 모서리를 잇는 대각만 있고(교차 X 아님), 네 변 중 3개 이상이
+    도면에 있을 때만. 문 두께 얇은 / 는 뺀다.
+    """
+    diags = _diag_candidates(msp)
+    edge_lines: list[tuple[float, float, float, float]] = []
+    for entity in msp:
+        if entity.dxftype() != "LINE":
+            continue
+        try:
+            start = entity.dxf.start
+            end = entity.dxf.end
+            edge_lines.append((float(start.x), float(start.y), float(end.x), float(end.y)))
+        except Exception:  # noqa: BLE001
+            continue
+    boxes: list[tuple[float, float, float, float]] = []
+    for x0, y0, x1, y1, _length in diags:
+        ax0, ax1 = sorted((x0, x1))
+        ay0, ay1 = sorted((y0, y1))
+        width, height = ax1 - ax0, ay1 - ay0
+        thick, span = min(width, height), max(width, height)
+        if thick < X_SPAN_MIN_MM:
+            continue
+        if _is_door_x_span(thick, span):
+            continue
+        if span <= 800.0 and thick / max(span, 1.0) >= 0.75:
+            continue
+        tol = max(80.0, min(250.0, 0.02 * span))
+        if not (
+            _slash_pts_match(x0, y0, x1, y1, ax0, ay0, ax1, ay1, tol=tol)
+            or _slash_pts_match(x0, y0, x1, y1, ax1, ay0, ax0, ay1, tol=tol)
         ):
             continue
-        uniq.append(item)
-    return uniq
+        if _slash_pts_match(x0, y0, x1, y1, ax0, ay0, ax1, ay1, tol=tol):
+            other_a, other_b = (ax1, ay0), (ax0, ay1)
+        else:
+            other_a, other_b = (ax0, ay0), (ax1, ay1)
+        if any(
+            _slash_pts_match(ox0, oy0, ox1, oy1, other_a[0], other_a[1], other_b[0], other_b[1], tol=tol)
+            for ox0, oy0, ox1, oy1, _olen in diags
+        ):
+            continue
+        side_hits = 0
+        for side in (
+            ((ax0, ay0), (ax1, ay0)),
+            ((ax1, ay0), (ax1, ay1)),
+            ((ax1, ay1), (ax0, ay1)),
+            ((ax0, ay1), (ax0, ay0)),
+        ):
+            if _axis_edge_covered(side, edge_lines):
+                side_hits += 1
+        if side_hits < 3:
+            continue
+        boxes.append(
+            (
+                ax0 - X_BBOX_PAD_MM,
+                ay0 - X_BBOX_PAD_MM,
+                ax1 + X_BBOX_PAD_MM,
+                ay1 + X_BBOX_PAD_MM,
+            )
+        )
+    return _uniq_x_bboxes(boxes)
 
 
 def _raster_cell_mm(bounds: tuple[float, float, float, float], cell_mm: float) -> float:
@@ -1528,21 +1657,20 @@ def fill_unlabeled_rooms(
     """실명 없는 닫힌 칸을 래스터 CC 로 찾아 무명_N 을 붙인다.
 
     CC 로 칸을 찾은 뒤 씨앗에서 벽 안쪽 면(detect_one)을 다시 잡아 격자로
-    생기는 틈을 메운다. llm_review/review.json 의 계단·화장실·승강기·외벽·침대·X bbox,
-    기하 교차 대각선(X), 세면대 심볼·세면/화장실 TEXT 와 겹치면 라벨을 붙이지 않는다.
+    생기는 틈을 메운다. llm_review/review.json 의 계단·화장실·승강기·외벽·침대·X bbox
+    (X·샤프트는 크기 무관, 문 개구 X 제외), 기하 교차 대각선(X, 긴 변 상한 없음),
+    세면대 심볼·세면/화장실 TEXT 와 겹치면 라벨을 붙이지 않는다.
     """
     occupied = _occupied_polygons(detected)
     named_bboxes = _named_label_bboxes(detected)
     skip_area = load_skip_bboxes_from_review(
         review_path, labels=FILL_SKIP_REVIEW_AREA_LABELS
     )
-    skip_vision_x_raw = load_skip_bboxes_from_review(
+    # Vision X·샤프트는 크기와 관계없이 무명 라벨에서 뺀다(문 개구·문짝 X 크기만 제외).
+    skip_vision_x = load_skip_bboxes_from_review(
         review_path, labels=FILL_SKIP_REVIEW_X_LABELS
     )
-    skip_geom_x = find_crossed_x_bboxes(msp)
-    # review 의 X 는 문 스윙·좁은 통로를 덮는 오검이 많다. 기하 교차 X 와
-    # 겹칠 때만 vision X 를 쓰고, 아니면 기하 X 만으로 제외한다.
-    skip_vision_x = _bboxes_confirmed_by_geom(skip_vision_x_raw, skip_geom_x)
+    skip_geom_x = find_crossed_x_bboxes(msp) + find_slash_rect_bboxes(msp)
     skip_x = list(skip_vision_x) + list(skip_geom_x)
     sinks = find_sink_centers(msp)
     fill_segs = segs_with_door_close_bridges(segs, bbox, door=door, boxes=boxes)
@@ -1555,7 +1683,6 @@ def fill_unlabeled_rooms(
         f" door_bridge={'on' if door == 'close' else 'off'}"
         f" skip_area_bbox={len(skip_area)}"
         f" skip_vision_x_bbox={len(skip_vision_x)}"
-        f"/{len(skip_vision_x_raw)}"
         f" skip_geom_x_bbox={len(skip_geom_x)}"
         f" sinks={len(sinks)}",
         flush=True,

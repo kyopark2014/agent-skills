@@ -94,6 +94,7 @@ from correct._rules import (
     promote_waiting_store_wall, promote_wall_end_returns,
     promote_wall_face_continuations, promote_wall_mate_faces,
     promote_wall_square_columns, promote_wash_room_edges, promote_x_cover_squares,
+    promote_slash_cover_squares,
     promote_zigzag_door_sides, protect_corridor_wall_entities,
     protect_elevator_enclosure_entities, protect_stair_enclosure_entities,
     remove_swing_squares, review_demote_keep_ids, review_demote_ids,
@@ -671,6 +672,7 @@ def apply_corrections(
     n_promoted += promote_wall_end_returns(msp)
     n_promoted += promote_crossed_x_walls(msp)
     n_promoted += promote_x_cover_squares(msp)
+    n_promoted += promote_slash_cover_squares(msp)
     n_promoted += promote_triple_diagonal_walls(msp)
     n_promoted += promote_slanted_double_walls(msp)
     # 톱니 외벽 긴 사선은 창. 기울어진 이중선 승격이 벽으로 올린 뒤 되돌린다.
@@ -760,6 +762,7 @@ def apply_corrections(
 
     # 후반 promote 가 기운 승강기 X 네모를 지우거나 AABB로 덮을 수 있어 OBB 네모를 다시 쌓는다.
     n_promoted += promote_x_cover_squares(msp)
+    n_promoted += promote_slash_cover_squares(msp)
 
     marked = mark_doors_and_columns(msp)
 

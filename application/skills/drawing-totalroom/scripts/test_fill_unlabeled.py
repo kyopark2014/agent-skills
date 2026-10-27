@@ -392,8 +392,8 @@ class FillUnlabeledTest(unittest.TestCase):
                     [inst for inst in detected if inst.get("synthetic")], []
                 )
 
-    def test_vision_only_x_bbox_does_not_skip(self):
-        """기하 X 없이 review X 만 있으면 문 스윙 오검으로 보고 무명을 남긴다."""
+    def test_vision_x_bbox_skips_unlabeled_without_geom(self):
+        """Vision X 는 기하 교차 없이도 크기와 관계없이 무명 라벨에서 뺀다."""
         doc = ezdxf.new()
         msp = doc.modelspace()
         _wall_room(msp, [(0.0, 0.0), (6000.0, 0.0), (6000.0, 6000.0), (0.0, 6000.0)])
@@ -430,7 +430,53 @@ class FillUnlabeledTest(unittest.TestCase):
                 review_path=review,
             )
         synth = [inst for inst in detected if inst.get("synthetic")]
-        self.assertEqual(len(synth), 1)
+        self.assertEqual(synth, [])
+
+    def test_large_void_crossed_x_skips_unlabeled(self):
+        """지에스이형 ~23×4.5 m 상부오픈 X 도 크기와 관계없이 무명에서 뺀다."""
+        doc = ezdxf.new()
+        msp = doc.modelspace()
+        w, h = 23100.0, 4500.0
+        _wall_room(msp, [(0.0, 0.0), (w, 0.0), (w, h), (0.0, h)])
+        msp.add_line((0.0, 0.0), (w, h), dxfattribs={"layer": "0"})
+        msp.add_line((w, 0.0), (0.0, h), dxfattribs={"layer": "0"})
+        boxes = labels.room.column_boxes(msp)
+        segs = labels.room.wall_segments(msp, boxes)
+        self.assertEqual(len(labels.find_crossed_x_bboxes(msp)), 1)
+        detected, _skipped = labels.fill_unlabeled_rooms(
+            msp,
+            boxes,
+            segs,
+            [],
+            [],
+            "close",
+            {"xmin": -500.0, "ymin": -500.0, "xmax": w + 500.0, "ymax": h + 500.0},
+            sample_mm=100.0,
+        )
+        synth = [inst for inst in detected if inst.get("synthetic")]
+        self.assertEqual(synth, [])
+
+    def test_slash_rect_skips_unlabeled(self):
+        """네모 + 대각 / 하나 표식도 무명 라벨에서 뺀다."""
+        doc = ezdxf.new()
+        msp = doc.modelspace()
+        _wall_room(msp, [(0.0, 0.0), (1200.0, 0.0), (1200.0, 3000.0), (0.0, 3000.0)])
+        msp.add_line((0.0, 0.0), (1200.0, 3000.0), dxfattribs={"layer": "0"})
+        boxes = labels.room.column_boxes(msp)
+        segs = labels.room.wall_segments(msp, boxes)
+        self.assertEqual(len(labels.find_slash_rect_bboxes(msp)), 1)
+        detected, _skipped = labels.fill_unlabeled_rooms(
+            msp,
+            boxes,
+            segs,
+            [],
+            [],
+            "close",
+            {"xmin": -500.0, "ymin": -500.0, "xmax": 1700.0, "ymax": 3500.0},
+            sample_mm=100.0,
+        )
+        synth = [inst for inst in detected if inst.get("synthetic")]
+        self.assertEqual(synth, [])
 
     def test_load_skip_bboxes_reads_stair_from_promote(self):
         with tempfile.TemporaryDirectory() as tmp:

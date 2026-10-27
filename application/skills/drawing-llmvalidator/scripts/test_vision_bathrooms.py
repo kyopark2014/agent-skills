@@ -266,6 +266,30 @@ class VisionBathroomTests(unittest.TestCase):
         self.assertEqual(promoted, 0)
         self.assertEqual(edge.dxf.layer, "BASE")
 
+    def test_void_x_diagonal_not_split_by_grazing_outer_strip(self):
+        """상부오픈 X 대각이 외벽 띠를 스쳐도 쪼개지 않는다."""
+        doc = ezdxf.new()
+        msp = doc.modelspace()
+        # ~23.1 × 4.5 m 보이드 X (지에스이 신사옥 1F 조경)
+        w, h = 23100.0, 4500.0
+        d1 = msp.add_line((0, 0), (w, h), dxfattribs={"layer": "BASE"})
+        d2 = msp.add_line((w, 0), (0, h), dxfattribs={"layer": "BASE"})
+        # 위쪽 변만 얇게 감싼 외벽 띠 (대각 끝만 스침)
+        strip = {"label": "외벽", "xmin": -200.0, "ymin": h - 200.0, "xmax": w + 200.0, "ymax": h + 200.0}
+
+        promoted = lib_llm_correct.promote_vision_outer_walls(msp, [strip])
+
+        self.assertEqual(promoted, 0)
+        self.assertEqual(d1.dxf.layer, "BASE")
+        self.assertEqual(d2.dxf.layer, "BASE")
+        # 원본 대각 길이 유지
+        for entity in (d1, d2):
+            length = (
+                (entity.dxf.end.x - entity.dxf.start.x) ** 2
+                + (entity.dxf.end.y - entity.dxf.start.y) ** 2
+            ) ** 0.5
+            self.assertAlmostEqual(length, (w * w + h * h) ** 0.5, delta=1.0)
+
     def test_line_that_enters_the_building_keeps_only_the_outer_part(self):
         doc = ezdxf.new()
         msp = doc.modelspace()

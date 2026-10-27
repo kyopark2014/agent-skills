@@ -74,8 +74,8 @@ _MAX_SIDE = 8000
 _PATCH = 32
 _MAX_PATCHES = 30_000
 _MAX_PNG_BYTES = int(3.75 * 1024 * 1024)
-# chat 를 가져오기 전에 둔다. import 가 UI_MODEL_NAME 을 모듈 기본값으로 덮는다.
-_UI_MODEL = os.environ.get("UI_MODEL_NAME", "").strip()
+# Vision 판정은 UI 선택과 무관하게 GPT 6 Astra 로 고정한다.
+_VISION_MODEL = "OpenAI GPT 6 Astra"
 _UI_GATEWAY = os.environ.get("UI_LLM_GATEWAY")
 _UI_GUARDRAIL = os.environ.get("UI_GUARDRAIL")
 _CHAT_LOCK = threading.Lock()
@@ -108,7 +108,9 @@ def _prompt(criteria: str, tile_name: str) -> str:
         "계단이 보이면 label은 계단, 승강기가 보이면 label은 승강기로 그 칸 전체를 넣는다. 여러 개면 모두 넣는다.\n"
         "교차 대각선 X(승강기·EPS·PD·AD·보이드·덕트 표식)가 보이면 그 X를 감싼 칸(또는 X와 네모)을 "
         "promote_bboxes에 넣고 label은 X로 둔다. 여러 개면 모두 넣는다. "
-        "문 개구 안 벽 두께의 얇은 X·문짝 X·문 표식 X는 넣지 않는다. "
+        "네모 안에 대각선이 하나만 있는 표식(/ · 보이드·덕트)도 그 네모를 promote_bboxes에 넣고 "
+        "label은 X로 둔다. 교차 X와 같이 여러 개면 모두 넣는다. "
+        "문 개구 안 벽 두께의 얇은 X·문짝 X·문 표식 X·문짝 / 는 넣지 않는다. "
         "문이 있는 영역이면 label=X 로 promote하지 않는다.\n"
         "이 타일에 건물의 외벽이 보이면 그 벽 선만 promote_bboxes에 넣고 label은 외벽으로 둔다. "
         "외벽은 실내와 건물 밖을 나누는 벽이다. 도곽, 타일 가장자리, 빈 여백, 치수선, 도면 끝의 사각형은 외벽이 아니다. "
@@ -286,7 +288,7 @@ def _import_chat():
 
 
 def _configure_chat():
-    """UI에서 고른 모델로 클라이언트를 한 번만 만든다.
+    """Vision용 클라이언트를 OpenAI GPT 6 Astra 로 한 번만 만든다.
 
     워커가 동시에 chat.update 와 get_chat 을 호출하면 일부는 모듈 기본 모델로
     남는다. 스레드 풀을 열기 전에 이 함수를 호출한다.
@@ -296,7 +298,7 @@ def _configure_chat():
         if _CLIENT is not None:
             return _CHAT, _CLIENT
         chat = _import_chat()
-        name = _UI_MODEL or getattr(chat, "model_name", "") or "Claude 5.0 Sonnet"
+        name = _VISION_MODEL
         params = inspect.signature(chat.update).parameters
         kwargs: dict = {"modelName": name}
         if _UI_GUARDRAIL is not None and "guardrailEnabled" in params:

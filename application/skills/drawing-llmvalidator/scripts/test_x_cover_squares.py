@@ -186,6 +186,32 @@ class XCoverSquareTests(unittest.TestCase):
         for entity in (diag_a, diag_b, bot, top, left, right):
             self.assertEqual(entity.dxf.layer, "WALL")
 
+    def test_large_void_bare_x_gets_virtual_square(self):
+        """지에스이 신사옥 1F 상부오픈처럼 ~23×4.5 m 보이드 X도 네모를 그린다."""
+        doc = ezdxf.new()
+        msp = doc.modelspace()
+        w, h = 23100.0, 4500.0
+        diag_a = msp.add_line((0, 0), (w, h), dxfattribs={"layer": "BASE"})
+        diag_b = msp.add_line((w, 0), (0, h), dxfattribs={"layer": "BASE"})
+
+        promoted = lib_llm_correct.promote_x_cover_squares(msp)
+
+        self.assertEqual(promoted, 6)
+        self.assertEqual(diag_a.dxf.layer, "WALL")
+        self.assertEqual(diag_b.dxf.layer, "WALL")
+        walls = [
+            (
+                (round(entity.dxf.start.x), round(entity.dxf.start.y)),
+                (round(entity.dxf.end.x), round(entity.dxf.end.y)),
+            )
+            for entity in msp
+            if entity.dxftype() == "LINE" and entity.dxf.layer == "WALL"
+        ]
+        self.assertIn(((0, 0), (23100, 0)), walls)
+        self.assertIn(((23100, 0), (23100, 4500)), walls)
+        self.assertIn(((23100, 4500), (0, 4500)), walls)
+        self.assertIn(((0, 4500), (0, 0)), walls)
+
     def test_tall_elev_x_with_float_width_and_poly_edge(self):
         """승강기 옆처럼 짧은 변 ~500 mm(좌표 오차) X와 2점 폴리 변도 올린다."""
         doc = ezdxf.new()

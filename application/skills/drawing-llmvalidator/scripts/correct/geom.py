@@ -21,6 +21,7 @@ from correct._rules import (  # noqa: F401
     promote_curved_corner_walls,
     promote_crossed_x_walls,
     promote_x_cover_squares,
+    promote_slash_cover_squares,
     promote_triple_diagonal_walls,
     promote_capped_triple_walls,
     promote_diagonal_hatch_walls,

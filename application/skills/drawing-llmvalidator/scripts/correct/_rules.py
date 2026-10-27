@@ -3032,8 +3032,11 @@ def promote_wall_square_columns(msp) -> int:
         key=lambda t: t[0],
     )
     v_short = [t for t in v_all if 450.0 <= t[4] <= 1500.0]
-    h_wall = [t for t in h_all if t[3] == WALL_LAYER and t[4] >= 1200.0]
-    v_wall = [t for t in v_all if t[3] == WALL_LAYER and t[4] >= 1200.0]
+    # BASE 긴 면도 끊김 단서로 쓴다. 모서리 기둥은 바깥 이중면이 아직
+    # WALL이 아니어도 사각에서 멈추면 기둥이다(GSE 전산/통신실 좌상단).
+    _stop_layers = (WALL_LAYER, BASE_LAYER, COLUMN_LAYER)
+    h_wall = [t for t in h_all if t[3] in _stop_layers and t[4] >= 1200.0]
+    v_wall = [t for t in v_all if t[3] in _stop_layers and t[4] >= 1200.0]
 
     def pair_stops_on_vertical(x_edge: float, y0: float, y1: float, outward: int) -> bool:
         ends: list[float] = []
@@ -3284,7 +3287,11 @@ def promote_wall_square_columns(msp) -> int:
             )
 
             def _stopping_mates() -> tuple[bool, list]:
-                """회색 기둥 변에서 끊기는 이중선. 1600 mm 이하만 올린다."""
+                """회색 기둥 변에서 끊기는 이중선.
+
+                복도·외벽처럼 4.5 m를 넘는 면도 끊김 단서로 인정한다.
+                추가로 WALL로 올리는 것은 1600 mm 이하만이다.
+                """
                 paired = False
                 mates: list = []
 
@@ -3292,7 +3299,8 @@ def promote_wall_square_columns(msp) -> int:
                     nonlocal paired
                     ends: list[tuple[float, float, Any]] = []
                     for coord, a, b, _layer, length, ent in group:
-                        if not (300.0 <= length <= 4500.0):
+                        # 긴 외벽·복도 이중면(5–20 m)이 모서리 기둥에서 끊기는 경우 포함.
+                        if not (300.0 <= length <= 20000.0):
                             continue
                         if along_edge:
                             if not (y0 - 40.0 <= coord <= y1 + 40.0):
@@ -29387,6 +29395,87 @@ def _merge_spans(spans: list[tuple[float, float]]) -> list[tuple[float, float]]:
     return [(start, end) for start, end in merged]
 
 
+def _void_x_cover_crosses(msp) -> list[dict[str, Any]]:
+    """긴 보이드·덕트 X(짧은 변 ≥500 mm, 긴 변 ≤25 m) OBB 목록.
+
+    promote_x_cover_squares 와 같은 교차·크기 기준이다. Vision 외벽 띠가
+    이 X를 감싼 네모 변을 쪼개지 않게 할 때 쓴다.
+    """
+    diags: list[tuple[Any, float, float, float, float, float, bool]] = []
+    for entity in _entities(msp):
+        if getattr(entity.dxf, "layer", None) not in (BASE_LAYER, DOOR_LAYER, WALL_LAYER):
+            continue
+        kind = _dxftype(entity)
+        edges: list[tuple[float, float, float, float]] = []
+        if kind == "LINE":
+            try:
+                edges.append(_line_xy(entity))
+            except Exception:  # noqa: BLE001
+                continue
+        elif kind == "LWPOLYLINE":
+            pts = _polyline_xy(entity)
+            if len(pts) >= 2 and math.hypot(pts[0][0] - pts[-1][0], pts[0][1] - pts[-1][1]) <= 1.0:
+                pts = pts[:-1]
+            count = len(pts)
+            for index in range(count - 1 + (1 if entity.closed and count > 2 else 0)):
+                start, end = pts[index], pts[(index + 1) % count]
+                edges.append((start[0], start[1], end[0], end[1]))
+        else:
+            continue
+        for x0, y0, x1, y1 in edges:
+            dx, dy = abs(x1 - x0), abs(y1 - y0)
+            length = math.hypot(x1 - x0, y1 - y0)
+            if not (200.0 <= length <= 30000.0) or max(dx, dy) <= 0.0:
+                continue
+            if min(dx, dy) / max(dx, dy) < 0.08:
+                continue
+            diags.append((entity, x0, y0, x1, y1, length, (x1 - x0) * (y1 - y0) > 0.0))
+    crosses: list[dict[str, Any]] = []
+    for index, left in enumerate(diags):
+        for right in diags[index + 1 :]:
+            if left[0] is right[0] or left[6] == right[6]:
+                continue
+            short, long = sorted((left[5], right[5]))
+            if short < long * 0.75:
+                continue
+            if not _segment_cross(left[1:5], right[1:5]):
+                continue
+            obb = _x_obb_from_diags(left[1:5], right[1:5])
+            if obb is None:
+                continue
+            thick, span = obb["short"], obb["long"]
+            if thick < 499.0 or span > 25000.0:
+                continue
+            if 80.0 <= thick <= 360.0 and 650.0 <= span <= 1750.0 and thick / span <= 0.5:
+                continue
+            if (
+                span <= 800.0
+                and thick / max(span, 1.0) >= 0.75
+                and getattr(left[0].dxf, "layer", None) == DOOR_LAYER
+                and getattr(right[0].dxf, "layer", None) == DOOR_LAYER
+            ):
+                continue
+            crosses.append(obb)
+    return crosses
+
+
+def _line_on_void_x_cover(
+    x0: float,
+    y0: float,
+    x1: float,
+    y1: float,
+    crosses: list[dict[str, Any]],
+) -> bool:
+    """선이 보이드 X 감싼 네모 변 위이면 True(외벽 띠로 쪼개지 않음)."""
+    if not crosses:
+        return False
+    return any(
+        _line_on_obb_edge(x0, y0, x1, y1, cross)
+        or _line_on_x_box_edge(x0, y0, x1, y1, cross["aabb"])
+        for cross in crosses
+    )
+
+
 def _outer_wall_spans(
     x0: float,
     y0: float,
@@ -29396,12 +29485,22 @@ def _outer_wall_spans(
     *,
     margin_mm: float = 3000.0,
 ) -> list[tuple[float, float]]:
-    """Vision이 건물의 외벽으로 얇게 잡은 상자 안의 구간만 돌려준다."""
+    """Vision이 건물의 외벽으로 얇게 잡은 상자 안의 구간만 돌려준다.
+
+    문 X(~0.4–6 m)와 긴 보이드 X·`/` 대각(aspect ≥ 0.08·길이 > 6 m)은
+    외벽 띠로 쪼개지 않는다. 지에스이 신사옥 1F 조경 상부오픈(~23 m)이
+    외벽 promote에 잘리면 promote_x_cover_squares 가 네모를 못 만든다.
+    감싼 네모 변 보호는 `_promote_vision_strip_walls` 가 `_line_on_void_x_cover`
+    로 따로 한다.
+    """
     length = math.hypot(x1 - x0, y1 - y0)
     dx, dy = abs(x1 - x0), abs(y1 - y0)
     if not (80.0 <= length <= 80000.0):
         return []
-    if max(dx, dy) > 0.0 and min(dx, dy) / max(dx, dy) > 0.35 and 400.0 <= length <= 6000.0:
+    aspect = min(dx, dy) / max(dx, dy) if max(dx, dy) > 0.0 else 0.0
+    if aspect > 0.35 and 400.0 <= length <= 6000.0:
+        return []
+    if aspect >= 0.08 and length > 6000.0:
         return []
     spans: list[tuple[float, float]] = []
     for box in boxes:
@@ -29412,12 +29511,11 @@ def _outer_wall_spans(
         outer = _clip_segment_t(x0, y0, x1, y1, box["xmin"], box["ymin"], box["xmax"], box["ymax"])
         if outer is not None:
             spans.append(outer)
-    kept = [
+    return [
         (start, end)
         for start, end in _merge_spans(spans)
         if (end - start) * length >= 80.0
     ]
-    return kept
 
 
 def _span_covers_all(spans: list[tuple[float, float]]) -> bool:
@@ -29469,10 +29567,15 @@ def _split_outer_segment(msp, x0: float, y0: float, x1: float, y1: float, spans:
 
 
 def _promote_vision_strip_walls(msp, boxes: list[dict]) -> int:
-    """얇은 vision 띠 상자 안의 선만 WALL로 올린다. 외벽·사무실 둘레 공통."""
+    """얇은 vision 띠 상자 안의 선만 WALL로 올린다. 외벽·사무실 둘레 공통.
+
+    긴 보이드 X를 감싼 네모 변은 외벽 띠로 쪼개거나 부분 승격하지 않는다.
+    (지에스이 1F 상부오픈: Vision이 X 윗띠를 외벽으로 잡아 왼쪽 변이 잘리던 경우)
+    """
     if not boxes:
         return 0
 
+    void_crosses = _void_x_cover_crosses(msp)
     n = 0
     for entity in list(_entities(msp)):
         if getattr(entity.dxf, "layer", None) != BASE_LAYER:
@@ -29481,6 +29584,8 @@ def _promote_vision_strip_walls(msp, boxes: list[dict]) -> int:
         try:
             if kind == "LINE":
                 x0, y0, x1, y1 = _line_xy(entity)
+                if _line_on_void_x_cover(x0, y0, x1, y1, void_crosses):
+                    continue
                 spans = _outer_wall_spans(x0, y0, x1, y1, boxes)
                 if not spans:
                     continue
@@ -29505,6 +29610,9 @@ def _promote_vision_strip_walls(msp, boxes: list[dict]) -> int:
                     (raw[index][0], raw[index][1], raw[index + 1][0], raw[index + 1][1])
                     for index in range(len(raw) - 1)
                 ]
+                if any(_line_on_void_x_cover(*edge, void_crosses) for edge in edges):
+                    # 보이드 네모 한 변이라도 있으면 폴리선 통째로 외벽 분할하지 않는다.
+                    continue
                 edge_spans = [_outer_wall_spans(*edge, boxes) for edge in edges]
                 if not any(edge_spans):
                     continue
@@ -31999,7 +32107,7 @@ def promote_x_cover_squares(msp) -> int:
     네모가 없고 X만 있으면 대각선 끝에 맞춘 사각형을 새로 그어 네 변을 벽으로 둔다.
     X가 기울어져 있으면 감싼 네모도 같은 각도의 OBB로 그린다(축정렬 AABB 금지).
     벽 두께 안에서 교차하는 문 X의 네모는 그대로 둔다.
-    긴 덕트 X(짧은 변 ≥500 mm, 긴 변 ≤12 m)도 올린다.
+    긴 덕트·상부오픈 보이드 X(짧은 변 ≥500 mm, 긴 변 ≤25 m)도 올린다.
     가구·개구 안 정사각 문 X(~0.5×0.5 m)는 올리지 않는다(경주 부티크
     호텔 501호 옷장 옆 DOOR X → 가구 윤곽 통째 승격 오탐).
     """
@@ -32027,7 +32135,8 @@ def promote_x_cover_squares(msp) -> int:
         for x0, y0, x1, y1 in edges:
             dx, dy = abs(x1 - x0), abs(y1 - y0)
             length = math.hypot(x1 - x0, y1 - y0)
-            if not (200.0 <= length <= 15000.0) or max(dx, dy) <= 0.0:
+            # 상부오픈 보이드(~23 m 대각)까지. totalroom X_DIAG_LEN_MAX_MM 과 같다.
+            if not (200.0 <= length <= 30000.0) or max(dx, dy) <= 0.0:
                 continue
             if min(dx, dy) / max(dx, dy) < 0.08:
                 continue
@@ -32048,7 +32157,8 @@ def promote_x_cover_squares(msp) -> int:
                 continue
             thick, span = obb["short"], obb["long"]
             # 499: 좌표 오차로 짧은 변이 499.999인 승강기 X(~500×2050)도 통과.
-            if thick < 499.0 or span > 12000.0:
+            # 25 m: 지에스이 신사옥 1F 상부오픈(~23.1×4.5 m) 보이드. totalroom X_SPAN_MAX_MM.
+            if thick < 499.0 or span > 25000.0:
                 continue
             if 80.0 <= thick <= 360.0 and 650.0 <= span <= 1750.0 and thick / span <= 0.5:
                 continue
@@ -32162,6 +32272,159 @@ def promote_x_cover_squares(msp) -> int:
 
     # 기운 X 둘레에 남은 축정렬 AABB 가상 변은 지운다.
     promoted += _strip_rotated_x_aabb_walls(msp, crosses)
+    return promoted
+
+
+def _slash_corner_tol(span: float) -> float:
+    """네모+/ 대각 끝점·모서리 허용. 큰 보이드는 조금 느슨하게."""
+    return max(80.0, min(250.0, 0.02 * span))
+
+
+def _slash_pts_match(
+    ax: float,
+    ay: float,
+    bx: float,
+    by: float,
+    cx: float,
+    cy: float,
+    dx: float,
+    dy: float,
+    *,
+    tol: float,
+) -> bool:
+    """선분 (a–b) 양 끝이 점 쌍 (c,d) 모서리와 맞으면 True (순서 무관)."""
+    return (
+        math.hypot(ax - cx, ay - cy) <= tol and math.hypot(bx - dx, by - dy) <= tol
+    ) or (math.hypot(ax - dx, ay - dy) <= tol and math.hypot(bx - cx, by - cy) <= tol)
+
+
+def promote_slash_cover_squares(msp) -> int:
+    """네모 안 대각선 하나(/) 표식도 벽이다.
+
+    축정렬 사각의 맞은편 모서리를 잇는 대각선 하나만 있고(교차 X 아님),
+    네 변 중 3개 이상이 이미 있거나 감싼 LWPOLYLINE 네모가 있으면
+    대각선·네모 변을 WALL로 둔다. 없는 변은 가상으로 긋는다.
+    짧은 변 ≥500 mm·긴 변 ≤25 m. 문 두께 안 얇은 X·정사각 문짝 X는 제외.
+    교차 X는 promote_x_cover_squares 가 담당한다.
+    """
+    diags: list[tuple[Any, float, float, float, float, float]] = []
+    edge_lines: list[tuple[float, float, float, float]] = []
+    edge_entities: list[tuple[Any, float, float, float, float]] = []
+    for entity in _entities(msp):
+        if getattr(entity.dxf, "layer", None) not in (BASE_LAYER, DOOR_LAYER, WALL_LAYER):
+            continue
+        kind = _dxftype(entity)
+        edges: list[tuple[float, float, float, float]] = []
+        if kind == "LINE":
+            try:
+                edges.append(_line_xy(entity))
+            except Exception:  # noqa: BLE001
+                continue
+        elif kind == "LWPOLYLINE":
+            pts = _polyline_xy(entity)
+            if len(pts) >= 2 and math.hypot(pts[0][0] - pts[-1][0], pts[0][1] - pts[-1][1]) <= 1.0:
+                pts = pts[:-1]
+            count = len(pts)
+            for index in range(count - 1 + (1 if entity.closed and count > 2 else 0)):
+                start, end = pts[index], pts[(index + 1) % count]
+                edges.append((start[0], start[1], end[0], end[1]))
+        else:
+            continue
+        for x0, y0, x1, y1 in edges:
+            edge_lines.append((x0, y0, x1, y1))
+            edge_entities.append((entity, x0, y0, x1, y1))
+            dx, dy = abs(x1 - x0), abs(y1 - y0)
+            length = math.hypot(x1 - x0, y1 - y0)
+            if not (200.0 <= length <= 30000.0) or max(dx, dy) <= 0.0:
+                continue
+            if min(dx, dy) / max(dx, dy) < 0.08:
+                continue
+            diags.append((entity, x0, y0, x1, y1, length))
+
+    aabb_covers: list[tuple[float, float, float, float]] = []
+    cover_entities: list[tuple[Any, tuple[float, float, float, float]]] = []
+    for entity in _entities(msp):
+        box = _covering_rect_bbox(entity)
+        if box is None:
+            continue
+        aabb_covers.append(box)
+        cover_entities.append((entity, box))
+
+    chosen: set[int] = set()
+    seeds: list[tuple[float, float, float, float]] = []
+    for entity, x0, y0, x1, y1, _length in diags:
+        ax0, ax1 = sorted((x0, x1))
+        ay0, ay1 = sorted((y0, y1))
+        width, height = ax1 - ax0, ay1 - ay0
+        thick, span = min(width, height), max(width, height)
+        if thick < 499.0 or span > 25000.0:
+            continue
+        if 80.0 <= thick <= 360.0 and 650.0 <= span <= 1750.0 and thick / span <= 0.5:
+            continue
+        if span <= 800.0 and thick / max(span, 1.0) >= 0.75:
+            continue
+        tol = _slash_corner_tol(span)
+        # 대각 끝이 AABB 맞은편 모서리(축정렬 네모)에 맞아야 한다.
+        if not (
+            _slash_pts_match(x0, y0, x1, y1, ax0, ay0, ax1, ay1, tol=tol)
+            or _slash_pts_match(x0, y0, x1, y1, ax1, ay0, ax0, ay1, tol=tol)
+        ):
+            continue
+        # 반대 대각이 있으면 교차 X — 여기선 건너뛴다.
+        other_a, other_b = (ax1, ay0), (ax0, ay1)
+        if _slash_pts_match(x0, y0, x1, y1, ax0, ay0, ax1, ay1, tol=tol):
+            other_a, other_b = (ax1, ay0), (ax0, ay1)
+        else:
+            other_a, other_b = (ax0, ay0), (ax1, ay1)
+        has_other = False
+        for _ent, ox0, oy0, ox1, oy1, _olen in diags:
+            if _slash_pts_match(ox0, oy0, ox1, oy1, other_a[0], other_a[1], other_b[0], other_b[1], tol=tol):
+                has_other = True
+                break
+        if has_other:
+            continue
+        box = (ax0, ay0, ax1, ay1)
+        side_hits = 0
+        for sx0, sy0, sx1, sy1 in (
+            (ax0, ay0, ax1, ay0),
+            (ax1, ay0, ax1, ay1),
+            (ax1, ay1, ax0, ay1),
+            (ax0, ay1, ax0, ay0),
+        ):
+            if _obb_edge_covered(((sx0, sy0), (sx1, sy1)), edge_lines):
+                side_hits += 1
+        has_cover = any(_x_box_covers(cover, box) for cover in aabb_covers)
+        if side_hits < 3 and not has_cover:
+            continue
+        chosen.add(id(entity))
+        for cover_ent, cover_box in cover_entities:
+            if _x_box_covers(cover_box, box):
+                chosen.add(id(cover_ent))
+        for edge_ent, ex0, ey0, ex1, ey1 in edge_entities:
+            if _line_on_x_box_edge(ex0, ey0, ex1, ey1, box):
+                chosen.add(id(edge_ent))
+        seeds.append(box)
+
+    promoted = sum(
+        1
+        for entity in _entities(msp)
+        if id(entity) in chosen and _paint_layer(entity, WALL_LAYER, WALL_COLOR)
+    )
+    # 이미 수집한 edge_lines 에 승격·추가분을 반영한다.
+    live_edges = list(edge_lines)
+    for box in seeds:
+        ax0, ay0, ax1, ay1 = box
+        for start, end in (
+            ((ax0, ay0), (ax1, ay0)),
+            ((ax1, ay0), (ax1, ay1)),
+            ((ax1, ay1), (ax0, ay1)),
+            ((ax0, ay1), (ax0, ay0)),
+        ):
+            if _obb_edge_covered((start, end), live_edges):
+                continue
+            msp.add_line(start, end, dxfattribs={"layer": WALL_LAYER, "color": WALL_COLOR})
+            promoted += 1
+            live_edges.append((start[0], start[1], end[0], end[1]))
     return promoted
 
 
