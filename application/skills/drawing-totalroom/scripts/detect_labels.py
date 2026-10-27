@@ -1828,6 +1828,33 @@ def fill_unlabeled_rooms(
                 or _poly_has_bathroom_text(msp, refined_poly)
             ):
                 refined = None
+            elif _hits_skip_bbox(refined_poly, label_x, label_y, skip_area):
+                # CC 는 EPS 만이다가 refine 이 분리벽을 넘어 계단실까지
+                # 키운 경우. 확장된 면에 대해 계단·화장실 제외를 다시 본다.
+                skipped_area += 1
+                print(
+                    f"[fill {index}/{len(components)}] skip area review "
+                    f"(after refine) {float(refined['area_m2']):.2f} m2 "
+                    f"@ ({label_x:.0f},{label_y:.0f})",
+                    flush=True,
+                )
+                continue
+            elif _hits_skip_bbox(
+                refined_poly,
+                label_x,
+                label_y,
+                skip_x,
+                overlap_ratio=0.50,
+                max_poly_to_box=4.0,
+            ):
+                skipped_x += 1
+                print(
+                    f"[fill {index}/{len(components)}] skip X "
+                    f"(after refine) {float(refined['area_m2']):.2f} m2 "
+                    f"@ ({label_x:.0f},{label_y:.0f})",
+                    flush=True,
+                )
+                continue
             else:
                 poly = refined_poly
         synth_n += 1

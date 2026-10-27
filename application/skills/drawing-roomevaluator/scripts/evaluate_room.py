@@ -883,6 +883,13 @@ def entity_segments(msp, boxes, *, open_doors=None) -> list[tuple[float, float, 
 
 
 def _axis_snapper(values: list[float], tol: float):
+    """가까운 가로·세로 벽 좌표를 tol 안으로 묶는다.
+
+    단링크만 쓰면 15 mm씩 이어진 긴 체인이 한 그룹이 되고, 중앙값에서
+    tol 밖인 가장자리 벽(분리 가로벽·X 윗변 등)이 snap None 으로 통째
+    버려진다. 그룹 span 이 tol 을 넘으면 잘라 각 조각의 중앙값을 쓰고,
+    그래도 못 맞추면 그 좌표 자체를 축으로 남겨 벽을 버리지 않는다.
+    """
     ordered = sorted(values)
     groups: list[list[float]] = []
     for v in ordered:
@@ -890,18 +897,28 @@ def _axis_snapper(values: list[float], tol: float):
             groups[-1].append(v)
         else:
             groups.append([v])
-    centers = [sorted(g)[len(g) // 2] for g in groups]
+    centers: list[float] = []
+    for group in groups:
+        start = 0
+        for index in range(1, len(group)):
+            if group[index] - group[start] > tol:
+                chunk = group[start:index]
+                centers.append(sorted(chunk)[len(chunk) // 2])
+                start = index
+        chunk = group[start:]
+        centers.append(sorted(chunk)[len(chunk) // 2])
 
     def snap(v: float) -> float | None:
         best = None
-        best_d = tol + 1
+        best_d = tol + 1.0
         for c in centers:
             d = abs(v - c)
             if d < best_d:
                 best, best_d = c, d
         if best is not None and best_d <= tol:
             return best
-        return None
+        # 벽을 버리지 않는다. 오차 묶음에서 떨어진 실제 벽면 좌표를 유지.
+        return v
 
     return snap, centers
 
