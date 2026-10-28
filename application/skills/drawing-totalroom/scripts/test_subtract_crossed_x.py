@@ -32,30 +32,35 @@ class SubtractCrossedXTest(unittest.TestCase):
         x_box = box(0.0, 0.0, 600.0, 950.0)
         self.assertGreater(room_poly.intersection(x_box).area, 50_000.0)
 
-        labels._subtract_crossed_x_regions(msp, [room])
-        after = Polygon(room["pts"])
-        self.assertLess(room["area_m2"], before)
+        kept, skipped = labels._subtract_crossed_x_regions(msp, [room], [])
+        self.assertEqual(len(kept), 1)
+        self.assertEqual(skipped, [])
+        after = Polygon(kept[0]["pts"])
+        self.assertLess(kept[0]["area_m2"], before)
         self.assertLess(after.intersection(x_box).area, 5_000.0)
-        self.assertTrue(labels.room.point_in_poly(1200.0, 500.0, room["pts"]))
+        self.assertTrue(labels.room.point_in_poly(1200.0, 500.0, kept[0]["pts"]))
 
-    def test_skips_when_label_is_inside_x(self):
+    def test_drops_when_label_is_inside_x(self):
         doc = ezdxf.new()
         msp = doc.modelspace()
         msp.add_line((0.0, 0.0), (600.0, 950.0), dxfattribs={"layer": "WALL"})
         msp.add_line((0.0, 950.0), (600.0, 0.0), dxfattribs={"layer": "WALL"})
         room = {
-            "text": "홀",
+            "text": "수영장",
             "x": 300.0,
             "y": 475.0,
-            "name": "홀",
-            "pts": [(0.0, 0.0), (2000.0, 0.0), (2000.0, 2000.0), (0.0, 2000.0)],
+            "name": "수영장",
+            "pts": [(0.0, 0.0), (600.0, 0.0), (600.0, 950.0), (0.0, 950.0)],
             "holes": [],
-            "area_m2": 4.0,
-            "width_m": 2.0,
-            "height_m": 2.0,
+            "area_m2": 0.57,
+            "width_m": 0.6,
+            "height_m": 0.95,
         }
-        labels._subtract_crossed_x_regions(msp, [room])
-        self.assertAlmostEqual(room["area_m2"], 4.0)
+        kept, skipped = labels._subtract_crossed_x_regions(msp, [room], [])
+        self.assertEqual(kept, [])
+        self.assertEqual(len(skipped), 1)
+        self.assertEqual(skipped[0]["text"], "수영장")
+        self.assertEqual(skipped[0]["reason"], labels.X_LABEL_SKIP_REASON)
 
 
 if __name__ == "__main__":

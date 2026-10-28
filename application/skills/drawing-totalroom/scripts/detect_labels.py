@@ -597,29 +597,60 @@ X_ROOM_SUBTRACT_MIN_MM2 = 10_000.0  # 0.01 m²
 X_ROOM_SUBTRACT_MAX_HOST_FRAC = 0.75
 
 
-def _subtract_crossed_x_regions(msp, detected: list[dict]) -> list[dict]:
+X_LABEL_SKIP_REASON = "라벨이 X·/ 표식 칸 안에 있습니다"
+
+
+def _subtract_crossed_x_regions(
+    msp, detected: list[dict], skipped: list[dict] | None = None
+) -> tuple[list[dict], list[dict]]:
     """교차 X·네모+/ 표식 bbox가 기명 실 면에 침범한 부분을 뺀다.
 
     무명 fill 의 skip_x 와 같은 기하를 쓰되 pad 없이 표식 칸만 자른다.
-    라벨 점이 X 안에 있거나 겹침이 실의 75%를 넘으면 그 상자는 건너뛴다.
+    라벨 점이 X 안에 있으면 기명 실도 버린다. 겹침이 실의 75%를 넘으면
+    그 상자는 자르지 않는다.
     """
+    if skipped is None:
+        skipped = []
     x_boxes = find_crossed_x_bboxes(msp, pad_mm=0.0) + find_slash_rect_bboxes(
         msp, pad_mm=0.0
     )
     if not x_boxes or not detected:
-        return detected
+        return detected, skipped
+    kept: list[dict] = []
     for inst in detected:
         host = _host_polygon(inst)
         if host is None:
+            kept.append(inst)
             continue
         seed = Point(inst["x"], inst["y"])
-        notes: list[str] = []
+        seed_in_x = False
         for xmin, ymin, xmax, ymax in x_boxes:
             if xmax <= xmin or ymax <= ymin:
                 continue
             region = box(xmin, ymin, xmax, ymax)
             if region.covers(seed) or region.contains(seed):
+                seed_in_x = True
+                break
+        if seed_in_x:
+            skipped.append(
+                {
+                    "text": inst.get("text") or inst.get("name") or "",
+                    "x": round(float(inst.get("x") or 0.0), 1),
+                    "y": round(float(inst.get("y") or 0.0), 1),
+                    "reason": X_LABEL_SKIP_REASON,
+                }
+            )
+            print(
+                f"[drop] {inst.get('text') or inst.get('name')}  "
+                f"{float(inst.get('area_m2') or 0.0):.2f} m2: {X_LABEL_SKIP_REASON}",
+                flush=True,
+            )
+            continue
+        notes: list[str] = []
+        for xmin, ymin, xmax, ymax in x_boxes:
+            if xmax <= xmin or ymax <= ymin:
                 continue
+            region = box(xmin, ymin, xmax, ymax)
             if not host.intersects(region):
                 continue
             overlap = host.intersection(region)
@@ -640,7 +671,8 @@ def _subtract_crossed_x_regions(msp, detected: list[dict]) -> list[dict]:
                 + ", ".join(notes),
                 flush=True,
             )
-    return detected
+        kept.append(inst)
+    return kept, skipped
 
 
 def _subtract_anchor_faces(msp, segs, detected: list[dict]) -> list[dict]:
@@ -2158,7 +2190,7 @@ def detect(
     detected = _divide_shared_faces(msp, boxes, segs, detected, door)
     detected = _divide_on_dividers(msp, boxes, segs, detected, door)
     detected = _subtract_anchor_faces(msp, segs, detected)
-    detected = _subtract_crossed_x_regions(msp, detected)
+    detected, skipped = _subtract_crossed_x_regions(msp, detected, skipped)
     detected, skipped = _drop_tiny_faces(detected, skipped)
 
     meta = resolve_label_meta_bbox(
