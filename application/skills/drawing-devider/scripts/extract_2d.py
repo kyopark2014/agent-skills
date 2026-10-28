@@ -172,6 +172,50 @@ def find_floor_inserts(
     return hits
 
 
+def insert_xclip_bbox(
+    insert: Insert,
+) -> tuple[float, float, float, float] | None:
+    """INSERT에 켜진 XCLIP의 WCS 축정렬 bbox. 없거나 비활성이면 None.
+
+    Autodesk는 이 창 밖 기하를 숨긴다. 층(도곽) 자르기·explode 시 동일하게 존중한다.
+    """
+    try:
+        from ezdxf.xclip import XClip
+    except ImportError:
+        return None
+    try:
+        xc = XClip(insert)
+    except Exception:  # noqa: BLE001
+        return None
+    if not xc.has_clipping_path or not xc.is_clipping_enabled:
+        return None
+    try:
+        path = xc.get_wcs_clipping_path()
+    except Exception:  # noqa: BLE001
+        return None
+    if path is None:
+        return None
+    try:
+        if path.is_inverted_clip:
+            box = path.outer_bounds()
+            if not box.has_data:
+                return None
+            return (
+                float(box.extmin.x),
+                float(box.extmin.y),
+                float(box.extmax.x),
+                float(box.extmax.y),
+            )
+        verts = list(path.vertices or ())
+        if len(verts) < 2:
+            return None
+        xs = [float(v.x) for v in verts]
+        ys = [float(v.y) for v in verts]
+        return min(xs), min(ys), max(xs), max(ys)
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def explode_insert(
     insert: Insert,
     *,
@@ -179,16 +223,23 @@ def explode_insert(
     max_depth: int = 12,
     only_floor: str | None = None,
     strict_floor: bool = False,
+    respect_xclip: bool = True,
 ) -> list[DXFEntity]:
     """INSERT를 재귀 explode. 가구 블록은 건너뛴다.
 
     only_floor가 있으면 블록명에 다른 층만 적힌 하위 INSERT는 건너뛴다.
     strict_floor면 층 단서 없는 하위 INSERT도 건너뛴다(공유 멀티층 평면용).
+    respect_xclip이면 Autodesk와 같이 상위 INSERT XCLIP 밖의 기하는 버린다.
     """
     from lib_sheet import floors_mentioned_in_name
 
     out: list[DXFEntity] = []
     target = (only_floor or "").strip().upper()
+    clip = insert_xclip_bbox(insert) if respect_xclip else None
+    if clip is not None:
+        # 테두리 선이 잘리지 않도록 약간 여유
+        pad = 50.0
+        clip = (clip[0] - pad, clip[1] - pad, clip[2] + pad, clip[3] + pad)
 
     def walk(ins: Insert, depth: int) -> None:
         if depth > max_depth:
@@ -215,6 +266,12 @@ def explode_insert(
                 # 공유 평면 루트의 무태그 선·해치는 전 층 복사본이라 겹침을 키운다.
                 if strict_floor and depth == 0:
                     continue
+                if clip is not None:
+                    c = _centroid(e)
+                    if c is None or not (
+                        clip[0] <= c[0] <= clip[2] and clip[1] <= c[1] <= clip[3]
+                    ):
+                        continue
                 out.append(e)
 
     walk(insert, 0)
@@ -1159,17 +1216,39 @@ def extract_sheet_floor(
         if skip_furniture and is_furniture(name):
             return
         used_inserts.add(id(ins))
-        # 시트 안 INSERT는 대상 층으로만 걸러 도곽·설비를 유지하고,
-        # 여러 열을 덮는 공유 평면은 strict로 해당 층 태그만 남긴다.
+        # XCLIP이 켜져 있으면 Autodesk처럼 공간 clip만 쓴다.
+        # 이름 기반 only_floor/strict_floor는 XF_PLAN B5~B2·ARCH-TEXT 등
+        # 공유 패키지(실명·치수)를 통째로 버려 도면이 성기게 나온다.
+        # XCLIP이 없을 때만 시트 안 INSERT를 층 태그로 거르고,
+        # mega 공유 평면은 strict로 해당 층 태그만 남긴다.
+        xclip = insert_xclip_bbox(ins)
+        spatial_only = xclip is not None
+        use_strict = False if spatial_only else strict_floor
+        only = None if spatial_only else floor
         ents = explode_insert(
             ins,
             skip_furniture=skip_furniture,
-            only_floor=floor,
-            strict_floor=strict_floor,
+            only_floor=only,
+            strict_floor=use_strict,
+            respect_xclip=True,
         )
         kept = filter_by_bbox(ents, clip)
-        mode = "strict-floor" if strict_floor else f"floor={floor}"
-        print(f"  exploded {name}: {len(ents)} → {len(kept)} inside frame ({mode})")
+        if spatial_only:
+            mode = "xclip+bbox"
+        elif use_strict:
+            mode = "strict-floor"
+        else:
+            mode = f"floor={floor}"
+        xclip_note = ""
+        if xclip is not None:
+            xclip_note = (
+                f", XCLIP {xclip[0]:.0f},{xclip[1]:.0f}"
+                f"-{xclip[2]:.0f},{xclip[3]:.0f}"
+            )
+        print(
+            f"  exploded {name}: {len(ents)} → {len(kept)} inside frame "
+            f"({mode}{xclip_note})"
+        )
         entities.extend(kept)
 
     if not structural_mode:
@@ -1180,6 +1259,11 @@ def extract_sheet_floor(
                 except Exception:  # noqa: BLE001
                     continue
                 if clip[0] <= ix <= clip[2] and clip[1] <= iy <= clip[3]:
+                    # 삽입점이 도곽 안이어도 XCLIP이 도곽과 안 겹치면
+                    # Autodesk처럼 이 시트에는 평면을 넣지 않는다.
+                    xclip = insert_xclip_bbox(entity)
+                    if xclip is not None and not _bbox_intersects(xclip, clip):
+                        continue
                     absorb_insert(entity)
                 continue
             center = _centroid(entity)
@@ -1187,10 +1271,10 @@ def extract_sheet_floor(
                 entities.append(entity)
 
         # 멀티층 평면 블록(XR_PLAN 등)은 삽입점이 (0,0)이고 층별 기하는
-        # 블록 내부 Y 오프셋에만 있다. 삽입점이 clip 밖이어도 extent가
-        # 도곽과 교차하면 explode 후 clip으로 자른다. 도곽선만으로
-        # LINE≥30이 되어 예전 center-in-clip fallback이 스킵되던 경우도 포함한다.
-        # 여러 시트 열을 덮으면 해당 층 태그가 있는 하위 블록만 남긴다.
+        # 블록 내부 Y 오프셋에만 있다. 삽입점이 clip 밖이어도 Autodesk 표시
+        # 범위(XCLIP이 있으면 XCLIP, 없으면 full extent)가 도곽과 교차하면
+        # explode 후 clip으로 자른다. XCLIP 밖 도곽은 평면을 넣지 않는다.
+        # XCLIP이 없으면 mega 공유 INSERT만 strict-floor로 층 태그를 거른다.
         try:
             from ezdxf import bbox as ezbbox
         except Exception:  # noqa: BLE001
@@ -1224,17 +1308,32 @@ def extract_sheet_floor(
                     float(ext.extmax.x),
                     float(ext.extmax.y),
                 )
-                if not _bbox_intersects(ext_bb, clip):
+                xclip = insert_xclip_bbox(entity)
+                # Autodesk 표시 창: XCLIP 우선. 없으면 full extent.
+                vis_bb = xclip if xclip is not None else ext_bb
+                if not _bbox_intersects(vis_bb, clip):
                     continue
                 ew = ext_bb[2] - ext_bb[0]
                 eh = ext_bb[3] - ext_bb[1]
                 mega = ew > clip_w * 1.5 or eh > clip_h * 1.5
+                # XCLIP이 있으면 absorb_insert가 공간 clip만 쓰므로 strict 요청 안 함.
+                want_strict = mega and xclip is None
+                xclip_note = ""
+                if xclip is not None:
+                    xclip_note = (
+                        f" XCLIP {xclip[0]:.0f},{xclip[1]:.0f}"
+                        f"-{xclip[2]:.0f},{xclip[3]:.0f}"
+                    )
+                tag = ""
+                if xclip is not None:
+                    tag = " (xclip+bbox)"
+                elif want_strict:
+                    tag = " (strict-floor)"
                 print(
                     f"  extent-hit INSERT {name} @ ({ix:.0f},{iy:.0f}) "
-                    f"∩ clip → absorb"
-                    + (" (strict-floor)" if mega else "")
+                    f"∩ clip → absorb{tag}{xclip_note}"
                 )
-                absorb_insert(entity, strict_floor=mega)
+                absorb_insert(entity, strict_floor=want_strict)
 
     entities, skipped_hidden = drop_off_layer_hidden(doc, entities)
     if skipped_hidden:

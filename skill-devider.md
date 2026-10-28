@@ -164,7 +164,11 @@ extract_2d.py --dxf … --floor 12F --drawing-id …
 2. 중첩 `INSERT`는 재귀 진입합니다.
 3. (clean만) 블록명에 가구 키워드가 있으면 스킵  
    (`가구`, `DOOR`, `락커`, `회의`, … — `FURNITURE_KEYWORDS`).
-4. 펼친 `LINE` / `LWPOLYLINE` / `ARC` / `CIRCLE` / `TEXT` … 를 수집합니다.
+4. 켜진 **XCLIP**이 있으면 Autodesk와 같이 창 밖 기하는 버립니다 (`respect_xclip=True`).
+5. 펼친 `LINE` / `LWPOLYLINE` / `ARC` / `CIRCLE` / `TEXT` … 를 수집합니다.
+
+도곽(sheet) 층 자르기에서도 INSERT 흡수 전에 XCLIP↔도곽 교차를 보고, XCLIP 밖 시트에는 공유 평면을 넣지 않습니다.  
+XCLIP이 켜진 INSERT는 `strict_floor`/`only_floor` 이름 필터를 끄고 XCLIP+도곽 bbox만 씁니다(공유 `ARCH-TEXT` 실명 유지).
 
 원본 INSERT는 그대로 두고, **좌표를 읽어 새 R2010 DXF에 복사**합니다 (`write_clean_dxf`).
 
