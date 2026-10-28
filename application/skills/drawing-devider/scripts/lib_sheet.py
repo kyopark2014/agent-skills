@@ -205,6 +205,12 @@ _MIN_INSERT_GEOM = 200
 _MIN_FRAME_GEOM = 30
 _INSERT_BBOX_SAMPLE = 40_000
 _INSERT_BBOX_TRIM = 0.02
+# Defpoints 도곽과 INSERT 삽입점이 1e-6 mm 어긋나는 도면용.
+_FRAME_GEOM_PAD_MM = 1.0
+# 시트 열 전체를 덮는 공유 평면 INSERT(XR_평면도 등)는 빈 도곽 판정에서 제외.
+_INSERT_MEGA_RATIO = 1.5
+# 시트 크기 INSERT가 도곽과 이 비율 이상 겹치면 내용이 있는 것으로 본다.
+_INSERT_OVERLAP_RATIO = 0.25
 # 층 제목이 도곽 테두리 바로 위(약 12–20 m)에 있는 도면용.
 _TITLE_ABOVE_GAP_MM = 25_000.0
 _TITLE_ABOVE_BAND_MM = 5_000.0
@@ -1302,6 +1308,113 @@ def parse_floor_from_block_name(name: str) -> str | None:
     return None
 
 
+_NAME_BASEMENT = re.compile(r"지하\s*(\d+)\s*층")
+_NAME_GROUND = re.compile(r"지상\s*(\d+)\s*층")
+_NAME_BF = re.compile(r"(?<![A-Z0-9])B(\d+)F\b", re.I)
+_NAME_NF = re.compile(r"(?<![A-Z0-9])(\d+)F\b", re.I)
+_NAME_COL_B = re.compile(r"COL_B(\d+)F?\b", re.I)
+_NAME_B_TOKEN = re.compile(r"(?<![A-Z0-9])B(\d+)(?![0-9F])", re.I)
+_NAME_B_RANGE = re.compile(r"B(\d+)F?\s*[~\-～〜]\s*B?(\d+)F?\b", re.I)
+_NAME_DIGIT_RANGE = re.compile(r"지하\s*(\d)\s*(\d)\s*(\d)(?!\d)")
+_NAME_RF = re.compile(r"(?:옥상|지붕층|\bROOF\b|(?<![A-Z0-9])RF(?![A-Z0-9]))", re.I)
+_NAME_PH = re.compile(r"(?:옥탑|(?<![A-Z0-9])PH(?![A-Z0-9])|\bPENTHOUSE\b)", re.I)
+
+
+def _floor_range_tokens(a: int, b: int, *, basement: bool) -> set[str]:
+    lo, hi = (a, b) if a <= b else (b, a)
+    if basement:
+        return {f"B{n}F" for n in range(lo, hi + 1)}
+    return {f"{n}F" for n in range(lo, hi + 1)}
+
+
+def _floors_in_name_fragment(raw: str) -> frozenset[str] | None:
+    """이름 조각 하나에 적힌 층 집합. 없으면 None."""
+    if not raw:
+        return None
+    found: set[str] = set()
+    for matched in _NAME_B_RANGE.finditer(raw):
+        found |= _floor_range_tokens(
+            int(matched.group(1)), int(matched.group(2)), basement=True
+        )
+    for matched in _NAME_DIGIT_RANGE.finditer(raw):
+        found |= {f"B{int(d)}F" for d in matched.groups()}
+    for matched in _NAME_BASEMENT.finditer(raw):
+        found.add(f"B{int(matched.group(1))}F")
+    for matched in _NAME_GROUND.finditer(raw):
+        found.add(f"{int(matched.group(1))}F")
+    for matched in _NAME_BF.finditer(raw):
+        found.add(f"B{int(matched.group(1))}F")
+    for matched in _NAME_COL_B.finditer(raw):
+        found.add(f"B{int(matched.group(1))}F")
+    spanned = {
+        n
+        for matched in _NAME_B_RANGE.finditer(raw)
+        for n in _floor_range_tokens(
+            int(matched.group(1)), int(matched.group(2)), basement=True
+        )
+    }
+    for matched in _NAME_B_TOKEN.finditer(raw):
+        token = f"B{int(matched.group(1))}F"
+        if token not in spanned:
+            found.add(token)
+    for matched in _NAME_NF.finditer(raw):
+        found.add(f"{int(matched.group(1))}F")
+    if _NAME_RF.search(raw):
+        found.add("RF")
+    if _NAME_PH.search(raw):
+        found.add("PH")
+    label = parse_floor_label(raw)
+    if label:
+        found.add(label)
+    return frozenset(found) if found else None
+
+
+def floors_mentioned_in_name(name: str) -> frozenset[str] | None:
+    """블록·레이어명에 적힌 층 집합. 층 단서가 없으면 None(층 무관·유지).
+
+    XREF bind(`A$0$B$0$leaf`)는 **leaf → 부모** 순으로 보고, 가장 안쪽
+    조각의 층 단서만 쓴다. `XF_PLAN B5~B2$0$B3F~B4F 램프`는 B3·B4만.
+    """
+    raw = str(name or "")
+    if not raw:
+        return None
+    parts = raw.split("$0$") if "$0$" in raw else [raw]
+    for part in reversed(parts):
+        found = _floors_in_name_fragment(part)
+        if found is not None:
+            return found
+    return None
+
+
+def name_matches_floor(name: str, floor: str) -> bool:
+    """대상 층에 맞는 블록이면 True.
+
+    - leaf에 층이 있으면 그 집합만 본다.
+    - leaf가 무태그인데 부모만 `B5~B2`처럼 여러 층이면 False
+      (한 패키지에 쌓인 전 층 기하가 매 시트로 새는 것을 막는다).
+    - 경로 전체에 층 단서가 없으면 True(도곽·설비 심볼 등).
+    """
+    target = _base_floor_token(str(floor or "").strip().upper())
+    if not target or target.startswith("sheet"):
+        return True
+    raw = str(name or "")
+    if not raw:
+        return True
+    parts = raw.split("$0$") if "$0$" in raw else [raw]
+    leaf = _floors_in_name_fragment(parts[-1])
+    if leaf is not None:
+        return target in leaf
+    for part in reversed(parts[:-1]):
+        found = _floors_in_name_fragment(part)
+        if found is None:
+            continue
+        if len(found) == 1:
+            return target in found
+        # 멀티층 패키지 아래 무태그 자식은 건너뛴다.
+        return False
+    return True
+
+
 def _ezbbox_module():
     try:
         from ezdxf import bbox as ezbbox
@@ -1479,19 +1592,84 @@ def _point_in_bbox(bbox, x: float, y: float, pad: float = 0.0) -> bool:
     return bbox[0] - pad <= x <= bbox[2] + pad and bbox[1] - pad <= y <= bbox[3] + pad
 
 
-def _frame_geometry_count(doc, bbox: tuple[float, float, float, float]) -> int:
+def _bbox_intersection(
+    a: tuple[float, float, float, float],
+    b: tuple[float, float, float, float],
+) -> tuple[float, float, float, float] | None:
+    x0, y0 = max(a[0], b[0]), max(a[1], b[1])
+    x1, y1 = min(a[2], b[2]), min(a[3], b[3])
+    if x1 <= x0 or y1 <= y0:
+        return None
+    return x0, y0, x1, y1
+
+
+def _insert_counts_in_frame(entity, bbox: tuple[float, float, float, float], cache) -> bool:
+    """빈 도곽 판정용: 이 INSERT가 해당 시트 내용으로 보이는지.
+
+    삽입점만 보면 Defpoints 도곽이 1e-6 mm 어긋날 때 XR_FORM이 빠지고,
+    extent만 보면 전 열을 덮는 XR_평면도·옆 시트와 모서리만 맞닿은 FORM이
+    빈 칸까지 채운 것처럼 보인다. local extent 겹침 + 작은 pad를 같이 쓴다.
+    """
+    try:
+        ix = float(entity.dxf.insert.x)
+        iy = float(entity.dxf.insert.y)
+    except Exception:
+        return False
+    # 도곽 안쪽(모서리 pad 밖) 삽입점은 설비·심볼로 바로 인정.
+    if _point_in_bbox(
+        (
+            bbox[0] + _FRAME_GEOM_PAD_MM * 2,
+            bbox[1] + _FRAME_GEOM_PAD_MM * 2,
+            bbox[2] - _FRAME_GEOM_PAD_MM * 2,
+            bbox[3] - _FRAME_GEOM_PAD_MM * 2,
+        ),
+        ix,
+        iy,
+    ):
+        return True
+    point_hit = _point_in_bbox(bbox, ix, iy, pad=_FRAME_GEOM_PAD_MM)
+    ext = _insert_extents_bbox(entity, cache)
+    if ext is None:
+        return point_hit
+    fw = bbox[2] - bbox[0]
+    fh = bbox[3] - bbox[1]
+    ew = ext[2] - ext[0]
+    eh = ext[3] - ext[1]
+    # 여러 시트를 덮는 공유 평면 INSERT는 삽입점이 이 도곽 안에 있을 때만.
+    if ew > fw * _INSERT_MEGA_RATIO or eh > fh * _INSERT_MEGA_RATIO:
+        return point_hit
+    inter = _bbox_intersection(ext, bbox)
+    if inter is None:
+        return False
+    iw = inter[2] - inter[0]
+    ih = inter[3] - inter[1]
+    # 옆 시트 FORM과 공유하는 모서리만 맞닿은 경우는 제외.
+    if iw <= _FRAME_GEOM_PAD_MM * 2 or ih <= _FRAME_GEOM_PAD_MM * 2:
+        return False
+    inter_area = iw * ih
+    ref = min(max(fw * fh, 1.0), max(ew * eh, 1.0))
+    if inter_area >= _INSERT_OVERLAP_RATIO * ref:
+        return True
+    return point_hit
+
+
+def _frame_geometry_count(
+    doc,
+    bbox: tuple[float, float, float, float],
+    cache=None,
+) -> int:
     """도곽 clip 안에 잡힐 modelspace 기하·INSERT 개수(대략)."""
     count = 0
+    if cache is None:
+        ezbbox = _ezbbox_module()
+        cache = ezbbox.Cache() if ezbbox is not None else None
     for entity in doc.modelspace():
         kind = entity.dxftype()
         if kind == "INSERT":
-            try:
-                ix = float(entity.dxf.insert.x)
-                iy = float(entity.dxf.insert.y)
-            except Exception:
-                continue
-            if _point_in_bbox(bbox, ix, iy):
+            if _insert_counts_in_frame(entity, bbox, cache):
                 count += _MIN_FRAME_GEOM
+                if count >= _MIN_FRAME_GEOM:
+                    break
             continue
         if kind not in {"LINE", "LWPOLYLINE", "ARC", "CIRCLE", "POLYLINE", "TEXT", "MTEXT"}:
             continue
@@ -1504,7 +1682,7 @@ def _frame_geometry_count(doc, bbox: tuple[float, float, float, float]) -> int:
                 my = float(entity.dxf.insert.y)
         except Exception:
             continue
-        if _point_in_bbox(bbox, mx, my):
+        if _point_in_bbox(bbox, mx, my, pad=_FRAME_GEOM_PAD_MM):
             count += 1
             if count >= _MIN_FRAME_GEOM * 4:
                 break
@@ -1521,10 +1699,12 @@ def _drop_empty_frames(
     """
     if not frames:
         return frames
+    ezbbox = _ezbbox_module()
+    cache = ezbbox.Cache() if ezbbox is not None else None
     kept: list[SheetFrame] = []
     dropped: list[str] = []
     for frame in frames:
-        if _frame_geometry_count(doc, frame.bbox) >= _MIN_FRAME_GEOM:
+        if _frame_geometry_count(doc, frame.bbox, cache=cache) >= _MIN_FRAME_GEOM:
             kept.append(frame)
         else:
             dropped.append(frame.floor)
@@ -1818,10 +1998,14 @@ def discover_sheet_floors(doc) -> LayoutDiscovery:
     # 큰 시트만 남기거나 빈 칸을 뺀 뒤 접미(1F_2)를 다시 매긴다.
     renumber: list[str] = []
     frames = _assign_sheet_ids(_rebase_floor_frames(frames), renumber)
+    has_unresolved = any(
+        frame.floor == "sheet" or frame.floor.startswith("sheet_") for frame in frames
+    )
     warnings[:] = [
         note
         for note in warnings
-        if "도곽이" not in note or "왼쪽부터" not in note
+        if ("도곽이" not in note or "왼쪽부터" not in note)
+        and (has_unresolved or "층 이름을 확정하지 못한 도곽" not in note)
     ]
     warnings.extend(renumber)
     if not frames:

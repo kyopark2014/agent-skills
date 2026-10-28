@@ -19,11 +19,13 @@ class SharedPlanInsertTests(unittest.TestCase):
     def test_plan_insert_at_origin_absorbed_into_upper_sheet(self):
         doc = ezdxf.new()
         plan = doc.blocks.new("XR_PLAN")
-        # 1F-band geometry (should be clipped out of 2F)
-        plan.add_line((1000, 1000), (8000, 1000))
-        # 2F-band geometry (must be kept)
-        plan.add_line((1000, 200_000), (80_000, 200_000))
-        plan.add_line((1000, 200_000), (1000, 250_000))
+        band_1f = doc.blocks.new("1F 평면코어")
+        band_1f.add_line((1000, 1000), (8000, 1000))
+        band_2f = doc.blocks.new("2F 평면코어")
+        band_2f.add_line((1000, 200_000), (80_000, 200_000))
+        band_2f.add_line((1000, 200_000), (1000, 250_000))
+        plan.add_blockref("1F 평면코어", insert=(0, 0))
+        plan.add_blockref("2F 평면코어", insert=(0, 0))
 
         msp = doc.modelspace()
         msp.add_blockref("XR_PLAN", insert=(0, 0))
@@ -80,6 +82,53 @@ class SharedPlanInsertTests(unittest.TestCase):
         self.assertFalse(
             extract_2d._bbox_intersects((0, 0, 10, 10), (11, 0, 20, 10))
         )
+
+    def test_mega_plan_skips_other_floor_nested_inserts(self):
+        """공유 평면 INSERT 안 다른 층 블록은 대상 층 추출에서 빠진다."""
+        doc = ezdxf.new()
+        plan = doc.blocks.new("XR_평면도")
+        b5 = doc.blocks.new("B5 지하외벽")
+        b5.add_line((10_000, 10_000), (80_000, 10_000))
+        b4 = doc.blocks.new("B4 지하외벽")
+        b4.add_line((10_000, 20_000), (80_000, 20_000))
+        plan.add_blockref("B5 지하외벽", insert=(0, 0))
+        plan.add_blockref("B4 지하외벽", insert=(0, 0))
+        # 시트보다 훨씬 넓은 extent가 되도록 양끝 점
+        plan.add_line((-50_000, 0), (400_000, 0))
+
+        msp = doc.modelspace()
+        msp.add_blockref("XR_평면도", insert=(0, 0))
+        for i in range(40):
+            y = 1000 + i * 100
+            msp.add_line((-1000, y), (120_000, y))
+
+        sheet = lib_sheet.SheetFrame(
+            "B5F",
+            "지하5층 평면도",
+            (0.0, 0.0, 120_000.0, 90_000.0),
+            500.0,
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp)
+            extract_2d.extract_sheet_floor(
+                doc,
+                "B5F",
+                out,
+                sheet,
+                do_png=False,
+                do_dxf=True,
+                do_json=False,
+            )
+            out_doc = ezdxf.readfile(str(out / "floor_B5F_original.dxf"))
+            ys = sorted(
+                {
+                    round(float(e.dxf.start.y))
+                    for e in out_doc.modelspace()
+                    if e.dxftype() == "LINE"
+                }
+            )
+        self.assertIn(10_000, ys)
+        self.assertNotIn(20_000, ys)
 
 
 if __name__ == "__main__":

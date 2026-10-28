@@ -67,8 +67,9 @@ def drop_off_layer_hidden(doc: Drawing, entities: list) -> tuple[list, int]:
 
 
 # 구조 축선·버블·축치수. 'A-ST-AXIS-CEN', 'A-ST-AXIS-BUB', 'AXIS-DIM',
-# 'AA-AXIS-LINE'(가산동 EHP 등), 단독 'CEN' 등.
-# 단독 CEN은 CENTER* 격자 축선(예: 전남대 예술대). G-CEN·*_CEN 벽 중심선은 제외.
+# 'AA-AXIS-LINE'(가산동 EHP 등), 단독 'CEN', 'A-CEN'/'A-CEN-*' 등.
+# 단독 CEN·A-CEN은 CENTER* 격자 축선(예: 전남대 예술대, 어린이집 동력배치).
+# G-CEN·ARCH_*_CEN 벽 중심선은 제외.
 # N-CNTL / N-CNTL-CEN* / N-CNTL-AXIS / GRID: CEN linetype 구조 축(예: 중화5구역 부대시설).
 _AXIS_LAYER = re.compile(
     r"(?:^|[^A-Za-z0-9])(?:A[_-]?)?ST[_-]?AXIS|"
@@ -76,6 +77,7 @@ _AXIS_LAYER = re.compile(
     r"(?:[_-](?:CEN|CENTER|BUB|BUBBLE|DIM|LINE|IDEN))?(?:$|[^A-Za-z0-9])|"
     r"축선|축버블|구조축|"
     r"^CEN$|"
+    r"(?:^|\$0\$)A-CEN(?:$|[-_])|"
     r"(?:^|[^A-Za-z0-9])N-CNTL(?:-CEN\d*|-AXIS)?(?:$|[^A-Za-z0-9])|"
     r"(?:^|\$0\$)GRID$",
     re.IGNORECASE,
@@ -83,7 +85,7 @@ _AXIS_LAYER = re.compile(
 
 
 def is_axis_layer(name: str) -> bool:
-    """구조 그리드 축선·버블·축치수 레이어. 벽·중심선(G-CEN·*_CEN)과는 별개."""
+    """구조 그리드 축선·버블·축치수 레이어. 벽·중심선(G-CEN·ARCH_*_CEN)과는 별개."""
     return bool(_AXIS_LAYER.search(name or ""))
 
 
@@ -105,6 +107,12 @@ AXIS_TRAIT_PITCH_MAX_MM = 12000.0
 AXIS_TRAIT_OVERLAP_RATIO = 0.50
 AXIS_TRAIT_SPAN_RATIO = 0.40
 AXIS_TRAIT_ORTHO_TOL_MM = 1.0
+# Vision 잔여 축·짧은 격자(예: 6–8 m A-CEN)용
+AXIS_RESIDUAL_MIN_LEN_MM = 5000.0
+WALL_PAIR_GAP_MIN_MM = 30.0
+WALL_PAIR_GAP_MAX_MM = 480.0
+WALL_PAIR_MIN_OVERLAP_MM = 400.0
+WALL_PAIR_MIN_COUNT = 2
 
 
 def is_center_linetype(name: str) -> bool:
@@ -323,6 +331,245 @@ def drop_axis_layers(
         kept2.append(entity)
     info["trait_layers"] = trait_layers
     return kept2, skipped, info
+
+
+def layer_leaf_name(name: str) -> str:
+    """XREF `…$0$A-CEN` → `A-CEN`."""
+    text = name or ""
+    if "$0$" in text:
+        return text.rsplit("$0$", 1)[-1]
+    return text
+
+
+def drop_named_layers(entities: list, layer_names: set[str] | list[str]) -> tuple[list, int]:
+    """지정 레이어 엔티티를 뺀다. (kept, skipped_count)."""
+    drop = set(layer_names)
+    if not drop:
+        return list(entities), 0
+    kept: list = []
+    skipped = 0
+    for entity in entities:
+        layer = str(getattr(entity.dxf, "layer", "") or "")
+        if layer in drop:
+            skipped += 1
+            continue
+        kept.append(entity)
+    return kept, skipped
+
+
+def _layer_linetype(doc: Drawing | None, layer_name: str) -> str:
+    if doc is None:
+        return ""
+    try:
+        return str(doc.layers.get(layer_name).dxf.linetype or "")
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def _layer_ortho_segs(entities: list, layer_name: str) -> list[tuple[float, float, float, float, float, bool, bool]]:
+    segs: list[tuple[float, float, float, float, float, bool, bool]] = []
+    for entity in entities:
+        if str(getattr(entity.dxf, "layer", "") or "") != layer_name:
+            continue
+        segs.extend(_entity_ortho_segs(entity))
+    return segs
+
+
+def layer_has_wall_thickness_pairs(
+    entities: list,
+    layer_name: str,
+    *,
+    min_count: int = WALL_PAIR_MIN_COUNT,
+) -> bool:
+    """벽 두께(30–480 mm) 평행 이중선 짝이 있으면 True."""
+    segs = _layer_ortho_segs(entities, layer_name)
+    if len(segs) < 2:
+        return False
+
+    def _count_pairs(vertical: bool) -> int:
+        group = [s for s in segs if (s[6] if vertical else s[5]) and s[4] >= WALL_PAIR_MIN_OVERLAP_MM]
+        pairs = 0
+        for i, a in enumerate(group):
+            ao = (a[0] + a[2]) * 0.5 if vertical else (a[1] + a[3]) * 0.5
+            a0 = min(a[1], a[3]) if vertical else min(a[0], a[2])
+            a1 = max(a[1], a[3]) if vertical else max(a[0], a[2])
+            for b in group[i + 1 :]:
+                bo = (b[0] + b[2]) * 0.5 if vertical else (b[1] + b[3]) * 0.5
+                gap = abs(bo - ao)
+                if not (WALL_PAIR_GAP_MIN_MM <= gap <= WALL_PAIR_GAP_MAX_MM):
+                    continue
+                b0 = min(b[1], b[3]) if vertical else min(b[0], b[2])
+                b1 = max(b[1], b[3]) if vertical else max(b[0], b[2])
+                overlap = max(0.0, min(a1, b1) - max(a0, b0))
+                if overlap >= WALL_PAIR_MIN_OVERLAP_MM:
+                    pairs += 1
+                    if pairs >= min_count:
+                        return pairs
+        return pairs
+
+    return _count_pairs(True) >= min_count or _count_pairs(False) >= min_count
+
+
+def layer_has_residual_axis_grid(
+    entities: list,
+    layer_name: str,
+    *,
+    min_len_mm: float = AXIS_RESIDUAL_MIN_LEN_MM,
+    span: tuple[float, float] | None = None,
+) -> bool:
+    """이름·CENTER 없이도 피치 격자(완화 길이)면 True. Vision 잔여 귀속용."""
+    segs = _layer_ortho_segs(entities, layer_name)
+    long = [s for s in segs if s[4] >= min_len_mm]
+    if len(long) < AXIS_TRAIT_MIN_COUNT:
+        return False
+    if span is None:
+        span = _entities_span(entities)
+    min_len_v = min_len_mm
+    min_len_h = min_len_mm
+    if span is not None:
+        width, height = span
+        # 잔여 패스는 층 span 비율을 강제하지 않고 하한만 둔다.
+        min_len_v = max(min_len_mm, min(height * 0.15, AXIS_TRAIT_MIN_LEN_MM))
+        min_len_h = max(min_len_mm, min(width * 0.15, AXIS_TRAIT_MIN_LEN_MM))
+    return _parallel_axis_grid(segs, vertical=True, min_len_mm=min_len_v) or _parallel_axis_grid(
+        segs, vertical=False, min_len_mm=min_len_h
+    )
+
+
+def layer_uses_center_linetype(doc: Drawing | None, entities: list, layer_name: str) -> bool:
+    """레이어 기본 또는 엔티티 linetype 이 CENTER/CEN 계열이면 True."""
+    layer_lt = _layer_linetype(doc, layer_name)
+    if is_center_linetype(layer_lt):
+        return True
+    if doc is None:
+        return False
+    for entity in entities:
+        if str(getattr(entity.dxf, "layer", "") or "") != layer_name:
+            continue
+        if is_center_linetype(_effective_linetype(doc, entity)):
+            return True
+    return False
+
+
+_AXIS_UNSAFE_LEAF = re.compile(
+    r"일람|범례|범레|NOTE|NOTES|LEGEND|TITLE|표제|장비|SCHEDULE|TEXT|DIMS?$|치수",
+    re.IGNORECASE,
+)
+
+
+def layer_is_safe_to_drop_as_axis(
+    doc: Drawing | None,
+    entities: list,
+    layer_name: str,
+    *,
+    span: tuple[float, float] | None = None,
+) -> tuple[bool, str]:
+    """Vision이 후보로 준 레이어를 이번 추출에서 지워도 되는지.
+
+    Continuous 표·장비일람 격자는 제거하지 않는다. CENTER/CEN 선종류이거나
+    leaf 이름이 축 패턴일 때만 허용한다.
+
+    Returns:
+        (ok, reason) reason 은 ok면 'center'|'axis_name', 아니면 거절 사유.
+    """
+    if not layer_name:
+        return False, "empty"
+    if is_keep_centerline_layer(layer_name):
+        return False, "keep_centerline"
+    leaf = layer_leaf_name(layer_name)
+    if _AXIS_UNSAFE_LEAF.search(leaf):
+        return False, "annotation_leaf"
+    if layer_has_wall_thickness_pairs(entities, layer_name):
+        return False, "wall_pairs"
+    if layer_uses_center_linetype(doc, entities, layer_name):
+        # CENTER 선종류면 격자 개수가 모자라도 Vision 귀속만으로 허용.
+        return True, "center"
+    # Continuous 피치 격자만으로는 장비일람·표 선을 축으로 오인하므로 거절.
+    # 이름 패턴 축은 is_axis_layer 로 이미 1차 제거된다.
+    if is_axis_layer(layer_name):
+        return True, "axis_name"
+    return False, "no_center_linetype"
+
+
+def has_residual_axis_candidates(doc: Drawing | None, entities: list) -> bool:
+    """Vision 호출 전: CENTER 축 후보가 남아 있으면 True.
+
+    후보가 없으면 LLM 을 건너뛴다(속도). Continuous 표 격자는 후보가 아니다.
+    """
+    if not entities:
+        return False
+    seen: set[str] = set()
+    for entity in entities:
+        layer = str(getattr(entity.dxf, "layer", "") or "")
+        if not layer or layer in seen:
+            continue
+        seen.add(layer)
+        if is_keep_centerline_layer(layer) or is_axis_layer(layer):
+            continue
+        leaf = layer_leaf_name(layer)
+        if _AXIS_UNSAFE_LEAF.search(leaf):
+            continue
+        if layer_uses_center_linetype(doc, entities, layer):
+            return True
+    return False
+
+
+def layers_near_bboxes(
+    entities: list,
+    bboxes_mm: list[tuple[float, float, float, float]],
+    *,
+    min_len_mm: float = AXIS_RESIDUAL_MIN_LEN_MM,
+    pad_mm: float = 200.0,
+) -> dict[str, int]:
+    """Vision bbox(mm)와 겹치는 긴 직교 선분의 레이어 집계."""
+    from collections import Counter
+
+    counts: Counter[str] = Counter()
+    if not bboxes_mm:
+        return {}
+    for entity in entities:
+        layer = str(getattr(entity.dxf, "layer", "") or "")
+        if not layer:
+            continue
+        for x0, y0, x1, y1, length, _h, _v in _entity_ortho_segs(entity):
+            if length < min_len_mm:
+                continue
+            sx0, sx1 = min(x0, x1), max(x0, x1)
+            sy0, sy1 = min(y0, y1), max(y0, y1)
+            for bx0, by0, bx1, by1 in bboxes_mm:
+                px0, px1 = bx0 - pad_mm, bx1 + pad_mm
+                py0, py1 = by0 - pad_mm, by1 + pad_mm
+                if sx1 < px0 or sx0 > px1 or sy1 < py0 or sy0 > py1:
+                    continue
+                counts[layer] += 1
+                break
+    return dict(counts)
+
+
+def select_droppable_axis_layers(
+    doc: Drawing | None,
+    entities: list,
+    candidate_layers: list[str] | dict[str, int],
+) -> tuple[list[str], list[dict]]:
+    """후보 중 안전하게 drop 가능한 레이어와 거절 목록."""
+    if isinstance(candidate_layers, dict):
+        names = sorted(candidate_layers.keys(), key=lambda n: (-candidate_layers[n], n))
+    else:
+        names = list(dict.fromkeys(candidate_layers))
+    span = _entities_span(entities)
+    dropped: list[str] = []
+    skipped: list[dict] = []
+    for name in names:
+        if is_axis_layer(name):
+            # 이름 패턴이면 이미 1차 drop 대상. Vision 패스에서도 지우도록 허용.
+            dropped.append(name)
+            continue
+        ok, reason = layer_is_safe_to_drop_as_axis(doc, entities, name, span=span)
+        if ok:
+            dropped.append(name)
+        else:
+            skipped.append({"layer": name, "reason": reason})
+    return dropped, skipped
 
 
 def is_arch_layer(name: str) -> bool:

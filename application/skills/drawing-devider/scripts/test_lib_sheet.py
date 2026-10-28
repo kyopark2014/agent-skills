@@ -568,6 +568,146 @@ class BlockNameAndSheetInsertTests(unittest.TestCase):
         self.assertGreater(found.sheets[0].bbox[2] - found.sheets[0].bbox[0], 10_000)
 
 
+class FloorNameMentionTests(unittest.TestCase):
+    def test_floors_mentioned_in_block_names(self):
+        cases = {
+            "B5 지하외벽": {"B5F"},
+            "코어_지하5층": {"B5F"},
+            "지하4층 주차": {"B4F"},
+            "COL_B5": {"B5F"},
+            "COL_B4F": {"B4F"},
+            "COL_B3~B1": {"B1F", "B2F", "B3F"},
+            "B3F~B4F 램프": {"B3F", "B4F"},
+            # leaf 우선: B5~B2 부모가 있어도 leaf 범위만
+            "XF_PLAN B5~B2$0$B3F~B4F 램프": {"B3F", "B4F"},
+            "XF_PLAN B5~B2$0$From": {"B2F", "B3F", "B4F", "B5F"},
+            "DOOR_1100": None,
+            "XR_평면도$0$주차_일반": None,
+        }
+        for name, expected in cases.items():
+            with self.subTest(name=name):
+                got = lib_sheet.floors_mentioned_in_name(name)
+                if expected is None:
+                    self.assertIsNone(got)
+                else:
+                    self.assertEqual(set(got or ()), expected)
+
+    def test_name_matches_floor(self):
+        self.assertTrue(lib_sheet.name_matches_floor("DOOR_1100", "B5F"))
+        self.assertTrue(lib_sheet.name_matches_floor("B5 지하외벽", "B5F"))
+        self.assertFalse(lib_sheet.name_matches_floor("B4 지하외벽", "B5F"))
+        self.assertTrue(lib_sheet.name_matches_floor("B3F~B4F 램프", "B3F"))
+        self.assertFalse(lib_sheet.name_matches_floor("B3F~B4F 램프", "B5F"))
+        # 멀티층 패키지 아래 무태그는 겹침 방지를 위해 제외
+        self.assertFalse(
+            lib_sheet.name_matches_floor("XF_PLAN B5~B2$0$주차_일반", "B5F")
+        )
+        self.assertTrue(
+            lib_sheet.name_matches_floor("XF_PLAN B5~B2$0$B5 지하외벽", "B5F")
+        )
+        self.assertFalse(
+            lib_sheet.name_matches_floor("XF_PLAN B5~B2$0$B3F~B4F 램프", "B5F")
+        )
+
+
+class EmptyFrameGeometryTests(unittest.TestCase):
+    def _sheet_form_block(self, doc, name: str = "XR_FORM"):
+        if name in doc.blocks:
+            return
+        block = doc.blocks.new(name)
+        # 시트 크기(168×118.8 m) FORM. 삽입점이 왼쪽 아래.
+        block.add_lwpolyline(
+            [(0, 0), (168_000, 0), (168_000, 118_800), (0, 118_800)],
+            close=True,
+        )
+        for index in range(40):
+            block.add_line((2_000 + index * 3_000, 10_000), (3_000 + index * 3_000, 100_000))
+
+    def test_float_edge_form_keeps_sheet_and_drops_empty_neighbor(self):
+        """Defpoints 도곽이 FORM 삽입점보다 1e-6 mm 커도 해당 층은 남기고,
+        모서리만 맞닿은 빈 옆 칸·전열 공유 평면 INSERT만 있는 칸은 뺀다.
+        """
+        import ezdxf
+
+        doc = ezdxf.new()
+        msp = doc.modelspace()
+        self._sheet_form_block(doc, "XR_FORM")
+        shared = doc.blocks.new("XR_PLAN")
+        shared.add_lwpolyline(
+            [(0, 0), (500_000, 0), (500_000, 120_000), (0, 120_000)],
+            close=True,
+        )
+
+        # B5F: 도곽 xmin이 FORM 삽입점보다 약간 큼(실도면 float 어긋남).
+        form_x = 1_260_000.0
+        frame_xmin = form_x + 1e-6
+        msp.add_lwpolyline(
+            [
+                (frame_xmin, 0.0),
+                (frame_xmin + 168_000, 0.0),
+                (frame_xmin + 168_000, 118_800),
+                (frame_xmin, 118_800),
+            ],
+            close=True,
+            dxfattribs={"layer": "Defpoints"},
+        )
+        msp.add_text(
+            "지하5층 평면도",
+            dxfattribs={"insert": (form_x + 30_000, 5_000), "height": 2000},
+        )
+        msp.add_blockref("XR_FORM", insert=(form_x, 0.0))
+
+        # 빈 옆 칸: 제목만 있고 FORM 내용은 왼쪽 시트에만 있다.
+        empty_x0 = form_x - 168_000
+        msp.add_lwpolyline(
+            [
+                (empty_x0, 0.0),
+                (form_x + 1e-6, 0.0),
+                (form_x + 1e-6, 118_800),
+                (empty_x0, 118_800),
+            ],
+            close=True,
+            dxfattribs={"layer": "Defpoints"},
+        )
+        msp.add_text(
+            "PIT층 평면도",
+            dxfattribs={"insert": (empty_x0 + 30_000, 5_000), "height": 2000},
+        )
+        # 전 열을 덮는 공유 평면 — 빈 칸을 채우면 안 된다.
+        msp.add_blockref("XR_PLAN", insert=(form_x - 50_000, -20_000))
+
+        found = lib_sheet.discover_layout(doc, mode="sheet")
+        self.assertEqual(found.floors, ["B5F"])
+        self.assertTrue(
+            any("기하가 없어 제외" in note for note in found.warnings)
+            or "PIT" not in ",".join(found.floors)
+        )
+
+    def test_insert_counts_in_frame_ignores_edge_touch_and_mega(self):
+        import ezdxf
+        from ezdxf import bbox as ezbbox
+
+        doc = ezdxf.new()
+        msp = doc.modelspace()
+        self._sheet_form_block(doc, "XR_FORM")
+        shared = doc.blocks.new("XR_PLAN")
+        shared.add_lwpolyline(
+            [(0, 0), (500_000, 0), (500_000, 120_000), (0, 120_000)],
+            close=True,
+        )
+        form = msp.add_blockref("XR_FORM", insert=(0.0, 0.0))
+        mega = msp.add_blockref("XR_PLAN", insert=(-10_000.0, -10_000.0))
+        bbox = (168_000.0, 0.0, 336_000.0, 118_800.0)  # 오른쪽 빈 칸
+        cache = ezbbox.Cache()
+        self.assertFalse(lib_sheet._insert_counts_in_frame(form, bbox, cache))
+        self.assertFalse(lib_sheet._insert_counts_in_frame(mega, bbox, cache))
+        own = (0.0, 0.0, 168_000.0, 118_800.0)
+        self.assertTrue(lib_sheet._insert_counts_in_frame(form, own, cache))
+        # float 어긋난 도곽도 FORM local extent로 잡는다.
+        floated = (1e-6, 0.0, 168_000.0 + 1e-6, 118_800.0)
+        self.assertTrue(lib_sheet._insert_counts_in_frame(form, floated, cache))
+
+
 class PaperspaceFloorTests(unittest.TestCase):
     def _doc(self, *, status: int = 1, viewport_id: int | None = None):
         import ezdxf

@@ -9,6 +9,7 @@ DWG는 도면 폴더의 DXF로 바꾼 뒤 같은 경로로 추출한다.
 (가구·카세트 배관·등고선은 제외). 미리보기 이름은 floor_original.png 만 쓴다.
 XA-S-{N}F 평면 블록이 없으면 도곽(축정렬 테두리)과 층 제목으로 영역을 자른다.
 기본으로 같은 경로에 `floor_original.png` / `_meta.json`도 렌더한다 (`--no-png`로 생략).
+PNG 직후 잔여 축 Vision 검사를 한다 (`--no-axis-vision`으로 생략).
 
 레거시 `--variant clean`(가구 제외)은 비권장 — 기본 워크플로에서 제거됨.
 
@@ -51,8 +52,9 @@ if str(_SKILLS_DIR) not in sys.path:
 from lib_dwg import DwgConvertError, ensure_dxf  # noqa: E402
 from lib_korean_dxf import apply_korean_text, read_dxf  # noqa: E402
 from lib_render import render_floor_original_preview  # noqa: E402
-from lib_sheet import discover_layout, normalize_floor_token  # noqa: E402
+from lib_sheet import discover_layout, name_matches_floor, normalize_floor_token  # noqa: E402
 from lib_split import find_primary_floor_bbox, find_primary_line_bbox  # noqa: E402
+from lib_axis_vision import run_axis_vision_pass  # noqa: E402
 from lib_structure import (  # noqa: E402
     collect_structural_sheet,
     drop_axis_layers,
@@ -175,9 +177,18 @@ def explode_insert(
     *,
     skip_furniture: bool = True,
     max_depth: int = 12,
+    only_floor: str | None = None,
+    strict_floor: bool = False,
 ) -> list[DXFEntity]:
-    """INSERT를 재귀 explode. 가구 블록은 건너뛴다."""
+    """INSERT를 재귀 explode. 가구 블록은 건너뛴다.
+
+    only_floor가 있으면 블록명에 다른 층만 적힌 하위 INSERT는 건너뛴다.
+    strict_floor면 층 단서 없는 하위 INSERT도 건너뛴다(공유 멀티층 평면용).
+    """
+    from lib_sheet import floors_mentioned_in_name
+
     out: list[DXFEntity] = []
+    target = (only_floor or "").strip().upper()
 
     def walk(ins: Insert, depth: int) -> None:
         if depth > max_depth:
@@ -192,8 +203,18 @@ def explode_insert(
                 name = e.dxf.name
                 if skip_furniture and is_furniture(name):
                     continue
+                if only_floor:
+                    if strict_floor:
+                        mentioned = floors_mentioned_in_name(name)
+                        if mentioned is None or target not in mentioned:
+                            continue
+                    elif not name_matches_floor(name, only_floor):
+                        continue
                 walk(e, depth + 1)
             else:
+                # 공유 평면 루트의 무태그 선·해치는 전 층 복사본이라 겹침을 키운다.
+                if strict_floor and depth == 0:
+                    continue
                 out.append(e)
 
     walk(insert, 0)
@@ -853,6 +874,7 @@ def extract_floor(
     do_dxf: bool = True,
     do_json: bool = False,
     do_png: bool = True,
+    do_axis_vision: bool = True,
     include_text: bool = True,
     origin_shift_mode: str = "none",
 ) -> dict:
@@ -1019,6 +1041,32 @@ def extract_floor(
                     "size_m": meta["size_m"],
                     "n_labels": meta["n_labels"],
                 }
+                if do_axis_vision:
+                    floor_dir = dxf_path.parent
+                    entities, axis_report = run_axis_vision_pass(
+                        entities=entities,
+                        doc=doc,
+                        floor_dir=floor_dir,
+                        floor=floor,
+                        origin=origin,
+                        include_text=include_text,
+                        write_dxf=write_clean_dxf,
+                        render_png=lambda path, floor=floor, plan_bbox=plan_bb_dict: (
+                            render_floor_original_preview(
+                                path, floor=floor, plan_bbox=plan_bbox
+                            )
+                        ),
+                        plan_bbox=plan_bb_dict,
+                    )
+                    result["axis_vision"] = {
+                        "present": axis_report.get("present"),
+                        "dropped_layers": axis_report.get("dropped_layers"),
+                        "leaf_name_candidates": axis_report.get("leaf_name_candidates"),
+                        "error": axis_report.get("error"),
+                    }
+                    if axis_report.get("dropped_layers"):
+                        type_counts = Counter(e.dxftype() for e in entities)
+                        result["entity_counts"] = dict(type_counts)
             except Exception as exc:  # noqa: BLE001
                 print(f"  [warn] floor_original.png 실패: {exc}", file=sys.stderr)
                 result["preview_error"] = str(exc)
@@ -1066,6 +1114,7 @@ def extract_sheet_floor(
     do_dxf: bool = True,
     do_json: bool = False,
     do_png: bool = True,
+    do_axis_vision: bool = True,
     include_text: bool = True,
     origin_shift_mode: str = "none",
 ) -> dict:
@@ -1100,16 +1149,27 @@ def extract_sheet_floor(
     elif variant == "original":
         print("  mechanical plan title → full sheet geometry (skip ARCH-only filter)")
 
-    def absorb_insert(ins: Insert) -> None:
+    clip_w = clip[2] - clip[0]
+    clip_h = clip[3] - clip[1]
+
+    def absorb_insert(ins: Insert, *, strict_floor: bool = False) -> None:
         if id(ins) in used_inserts:
             return
         name = ins.dxf.name
         if skip_furniture and is_furniture(name):
             return
         used_inserts.add(id(ins))
-        ents = explode_insert(ins, skip_furniture=skip_furniture)
+        # 시트 안 INSERT는 대상 층으로만 걸러 도곽·설비를 유지하고,
+        # 여러 열을 덮는 공유 평면은 strict로 해당 층 태그만 남긴다.
+        ents = explode_insert(
+            ins,
+            skip_furniture=skip_furniture,
+            only_floor=floor,
+            strict_floor=strict_floor,
+        )
         kept = filter_by_bbox(ents, clip)
-        print(f"  exploded {name}: {len(ents)} → {len(kept)} inside frame")
+        mode = "strict-floor" if strict_floor else f"floor={floor}"
+        print(f"  exploded {name}: {len(ents)} → {len(kept)} inside frame ({mode})")
         entities.extend(kept)
 
     if not structural_mode:
@@ -1130,6 +1190,7 @@ def extract_sheet_floor(
         # 블록 내부 Y 오프셋에만 있다. 삽입점이 clip 밖이어도 extent가
         # 도곽과 교차하면 explode 후 clip으로 자른다. 도곽선만으로
         # LINE≥30이 되어 예전 center-in-clip fallback이 스킵되던 경우도 포함한다.
+        # 여러 시트 열을 덮으면 해당 층 태그가 있는 하위 블록만 남긴다.
         try:
             from ezdxf import bbox as ezbbox
         except Exception:  # noqa: BLE001
@@ -1165,11 +1226,15 @@ def extract_sheet_floor(
                 )
                 if not _bbox_intersects(ext_bb, clip):
                     continue
+                ew = ext_bb[2] - ext_bb[0]
+                eh = ext_bb[3] - ext_bb[1]
+                mega = ew > clip_w * 1.5 or eh > clip_h * 1.5
                 print(
                     f"  extent-hit INSERT {name} @ ({ix:.0f},{iy:.0f}) "
                     f"∩ clip → absorb"
+                    + (" (strict-floor)" if mega else "")
                 )
-                absorb_insert(entity)
+                absorb_insert(entity, strict_floor=mega)
 
     entities, skipped_hidden = drop_off_layer_hidden(doc, entities)
     if skipped_hidden:
@@ -1251,6 +1316,32 @@ def extract_sheet_floor(
                     "size_m": meta["size_m"],
                     "n_labels": meta["n_labels"],
                 }
+                if do_axis_vision:
+                    floor_dir = dxf_path.parent
+                    entities, axis_report = run_axis_vision_pass(
+                        entities=entities,
+                        doc=doc,
+                        floor_dir=floor_dir,
+                        floor=floor,
+                        origin=origin,
+                        include_text=include_text,
+                        write_dxf=write_clean_dxf,
+                        render_png=lambda path, floor=floor, plan_bbox=plan_bb_dict: (
+                            render_floor_original_preview(
+                                path, floor=floor, plan_bbox=plan_bbox
+                            )
+                        ),
+                        plan_bbox=plan_bb_dict,
+                    )
+                    result["axis_vision"] = {
+                        "present": axis_report.get("present"),
+                        "dropped_layers": axis_report.get("dropped_layers"),
+                        "leaf_name_candidates": axis_report.get("leaf_name_candidates"),
+                        "error": axis_report.get("error"),
+                    }
+                    if axis_report.get("dropped_layers"):
+                        type_counts = Counter(e.dxftype() for e in entities)
+                        result["entity_counts"] = dict(type_counts)
             except Exception as exc:  # noqa: BLE001
                 print(f"  [warn] floor_original.png 실패: {exc}", file=sys.stderr)
                 result["preview_error"] = str(exc)
@@ -1321,6 +1412,7 @@ def _execute_extract_job(doc: Drawing, job: dict) -> dict:
                 do_dxf=job["do_dxf"],
                 do_json=job["do_json"],
                 do_png=job["do_png"],
+                do_axis_vision=job.get("do_axis_vision", True),
                 include_text=job["include_text"],
                 origin_shift_mode=job["origin_shift"],
             )
@@ -1333,6 +1425,7 @@ def _execute_extract_job(doc: Drawing, job: dict) -> dict:
             do_dxf=job["do_dxf"],
             do_json=job["do_json"],
             do_png=job["do_png"],
+            do_axis_vision=job.get("do_axis_vision", True),
             include_text=job["include_text"],
             origin_shift_mode=job["origin_shift"],
             **job["clean_kwargs"],
@@ -1438,6 +1531,11 @@ def main() -> int:
         help="floor_original.png 렌더 생략 (기본은 DXF와 함께 생성)",
     )
     parser.add_argument(
+        "--no-axis-vision",
+        action="store_true",
+        help="PNG 잔여 축 Vision 검사·레이어 drop 생략 (기본은 매 층 실행)",
+    )
+    parser.add_argument(
         "--geom-json",
         action="store_true",
         help="디버그용 floor_*_geom.json 생성 (기본 끔)",
@@ -1524,6 +1622,7 @@ def main() -> int:
             "do_dxf": not args.no_dxf,
             "do_json": args.geom_json,
             "do_png": not args.no_png,
+            "do_axis_vision": not args.no_axis_vision and not args.no_png,
             "include_text": not args.no_text,
             "origin_shift": args.origin_shift,
         }
