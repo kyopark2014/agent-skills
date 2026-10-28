@@ -610,6 +610,53 @@ class FloorNameMentionTests(unittest.TestCase):
         )
 
 
+class AutodeskFormSheetTests(unittest.TestCase):
+    def test_stacked_xr_form_beats_merged_outer_rect(self):
+        """Autodesk 표제란 xr-form이 세로로 3장이면 합본 큰 도곽 대신 3시트로 나눈다."""
+        import ezdxf
+
+        doc = ezdxf.new()
+        msp = doc.modelspace()
+        form = doc.blocks.new("xr-form")
+        form.add_lwpolyline(
+            [(0, 0), (126_000, 0), (126_000, 89_100), (0, 89_100)],
+            close=True,
+        )
+        for index in range(40):
+            form.add_line((2_000 + index * 2_000, 5_000), (3_000 + index * 2_000, 80_000))
+
+        # 세로로 이어 붙인 합본 테두리(옛 파이프라인이 하나로 잡던 패턴)
+        msp.add_lwpolyline(
+            [(0, -89_100), (126_000, -89_100), (126_000, 178_200), (0, 178_200)],
+            close=True,
+            dxfattribs={"layer": "Defpoints"},
+        )
+        titles = ("지하1층 평면도", "1층 평면도", "2층 평면도")
+        for index, (title, y0) in enumerate(
+            zip(titles, (89_100.0, 0.0, -89_100.0), strict=True)
+        ):
+            msp.add_blockref("xr-form", insert=(0.0, y0))
+            msp.add_text(
+                title,
+                dxfattribs={"insert": (20_000, y0 + 5_000), "height": 2000},
+            )
+
+        found = lib_sheet.discover_layout(doc, mode="sheet")
+        self.assertEqual(found.floors, ["B1F", "1F", "2F"])
+        self.assertTrue(
+            any("Autodesk 표제란 FORM" in note for note in found.warnings)
+        )
+        heights = sorted(s.bbox[3] - s.bbox[1] for s in found.sheets)
+        self.assertTrue(all(80_000 < h < 100_000 for h in heights))
+
+    def test_is_form_sheet_name(self):
+        self.assertTrue(lib_sheet._is_form_sheet_name("xr-form"))
+        self.assertTrue(lib_sheet._is_form_sheet_name("XR_FORM"))
+        self.assertTrue(lib_sheet._is_form_sheet_name("XF_FORM"))
+        self.assertFalse(lib_sheet._is_form_sheet_name("XR_평면도"))
+        self.assertFalse(lib_sheet._is_form_sheet_name("XR_PLAN"))
+
+
 class EmptyFrameGeometryTests(unittest.TestCase):
     def _sheet_form_block(self, doc, name: str = "XR_FORM"):
         if name in doc.blocks:

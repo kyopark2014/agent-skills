@@ -6,7 +6,8 @@ modelspace와 얕은 INSERT에서 큰 축정렬 사각형과
 '1층 평면도', 'B1F', '지하1층' 같은 제목을 짝짓는다.
 제목이 도곽 바로 위(바깥)에 있어도 붙인다.
 '4~5층'은 시작 층, '옥탑지붕'은 PH로 읽는다.
-시트 블록(ooa-sheet 등) INSERT의 전역 bbox도 도곽으로 쓴다.
+Autodesk 표제란 FORM(xr-form/XR_FORM) INSERT가 2곳 이상이면 그 bbox로 시트를 나눈다.
+시트 블록(ooa-sheet·xr-form 등) INSERT의 전역 bbox도 도곽으로 쓴다.
 건물 평면이 최상위 INSERT에만 있을 때는 그 INSERT의 기하 bbox로 층을 둔다.
 층 표기가 없고 시설 평면도 제목과 도면번호만 있으면 도면번호로 나눈다.
 제목·도면번호가 없어도 크기 조건을 만족하는 도곽이면 sheet_01부터 남긴다.
@@ -192,9 +193,25 @@ _PLAN_WORD = re.compile(
 _REPEATED_FLOOR_NOTE = 8
 _SHEET_INSERT_NAME = re.compile(
     r"(?:^|[^A-Za-z0-9])(?:ooa[_-]?)?sheet(?:$|[^A-Za-z0-9])|"
-    r"도[곽각]|a-sheet|x-sheet|dwg.?sheet",
+    r"도[곽각]|a-sheet|x-sheet|dwg.?sheet|"
+    # Autodesk 표제란 틀 (xr-form / XR_FORM / XF_FORM). XR_평면도 등은 제외.
+    r"(?:^|[^A-Za-z0-9])(?:xr|xf)[_-]?form(?:$|[^A-Za-z0-9])|"
+    r"(?:^|[^A-Za-z0-9])form(?:$|[^A-Za-z0-9])",
     re.I,
 )
+
+
+def _is_form_sheet_name(name: str) -> bool:
+    """표제란(FORM) INSERT 이름이면 True. 평면 XREF(XR_평면도)는 False."""
+    raw = str(name or "")
+    if not raw or "평면" in raw:
+        return False
+    token = raw.upper().replace(" ", "").replace("-", "_")
+    if "PLAN" in token:
+        return False
+    return bool(_SHEET_INSERT_NAME.search(raw)) and (
+        "FORM" in token or "SHEET" in token or "도곽" in raw or "도각" in raw
+    )
 _BUILDING_INSERT_NAME = re.compile(
     r"^PL\d+|평면|클럽|관리동?|스타트|티하우스|티\d|경비|골프|club|building",
     re.I,
@@ -1502,7 +1519,7 @@ def _primary_insert_bbox(entity, cache) -> tuple[float, float, float, float] | N
 
 
 def _collect_sheet_insert_rects(doc) -> list[tuple[float, float, float, float]]:
-    """시트 틀 블록(ooa-sheet 등) INSERT의 전역 bbox를 도곽으로 모은다."""
+    """시트 틀 블록(ooa-sheet·xr-form 등) INSERT의 전역 bbox를 도곽으로 모은다."""
     ezbbox = _ezbbox_module()
     if ezbbox is None:
         return []
@@ -1511,6 +1528,31 @@ def _collect_sheet_insert_rects(doc) -> list[tuple[float, float, float, float]]:
     for entity in doc.modelspace().query("INSERT"):
         name = str(getattr(entity.dxf, "name", "") or "")
         if not _SHEET_INSERT_NAME.search(name):
+            continue
+        if "평면" in name or "PLAN" in name.upper().replace(" ", ""):
+            continue
+        box = _insert_extents_bbox(entity, cache)
+        if box is None:
+            continue
+        if _accept_size(box[2] - box[0], box[3] - box[1]):
+            rects.append(box)
+    return rects
+
+
+def _collect_form_insert_rects(doc) -> list[tuple[float, float, float, float]]:
+    """Autodesk 표제란 FORM(xr-form / XR_FORM) INSERT bbox만 모은다."""
+    ezbbox = _ezbbox_module()
+    if ezbbox is None:
+        return []
+    cache = ezbbox.Cache()
+    rects: list[tuple[float, float, float, float]] = []
+    for entity in doc.modelspace().query("INSERT"):
+        name = str(getattr(entity.dxf, "name", "") or "")
+        if not _is_form_sheet_name(name):
+            continue
+        # FORM 이름만 (sheet/도곽 일반 시트 블록은 _collect_sheet_insert_rects)
+        token = name.upper().replace(" ", "").replace("-", "_")
+        if "FORM" not in token:
             continue
         box = _insert_extents_bbox(entity, cache)
         if box is None:
@@ -1952,6 +1994,32 @@ def discover_sheet_floors(doc) -> LayoutDiscovery:
         )
     if truncated:
         warnings.append("긴 선이 많아 일부 선분 도곽은 건너뛰고 폴리라인 테두리를 우선합니다.")
+
+    # Autodesk 표제란: FORM INSERT가 2곳 이상이면 그 bbox로 시트를 나눈다.
+    # (선분으로 잡힌 세로 합본 큰 도곽보다 우선)
+    form_rects = _collect_form_insert_rects(doc)
+    if len(form_rects) >= 2:
+        form_notes: list[str] = []
+        form_frames = _frames_from_sheet_rects(
+            form_rects, texts, plans, numbers, form_notes
+        )
+        form_frames = _prefer_largest_same_floor(form_frames)
+        form_frames = _drop_empty_frames(doc, form_frames, form_notes)
+        renumber: list[str] = []
+        form_frames = _assign_sheet_ids(_rebase_floor_frames(form_frames), renumber)
+        if len(form_frames) >= 2:
+            warnings.append(
+                f"Autodesk 표제란 FORM INSERT {len(form_rects)}곳을 도곽으로 사용했습니다."
+            )
+            warnings.extend(form_notes)
+            warnings.extend(renumber)
+            return LayoutDiscovery(
+                method="sheet",
+                floors=[f.floor for f in form_frames],
+                sheets=form_frames,
+                warnings=warnings,
+            )
+
     rects.extend(_rects_from_lines(lines))
     sheet_inserts = _collect_sheet_insert_rects(doc)
     if sheet_inserts:

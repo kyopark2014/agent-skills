@@ -5,9 +5,10 @@ DWG는 도면 폴더의 DXF로 바꾼 뒤 같은 경로로 추출한다.
 
 원본은 XREF/블록 중심(277MB)이라 modelspace 순회만으로는 도면이 거의 없다.
 해당 층 INSERT만 골라 explode한 뒤 `floors/<F>/floor_original.dxf`를 만든다.
-도곽 안에 건축 레이어가 있으면 벽·창·실명·문 스윙만 남긴다
-(가구·카세트 배관·등고선은 제외). 미리보기 이름은 floor_original.png 만 쓴다.
-XA-S-{N}F 평면 블록이 없으면 도곽(축정렬 테두리)과 층 제목으로 영역을 자른다.
+기본(Autodesk): 도곽·XCLIP 창 안 전체 기하를 남긴다.
+``--arch-only`` 이면 건축 레이어가 있을 때 벽·창·실명·문만 남긴다.
+미리보기 이름은 floor_original.png 만 쓴다.
+XA-S-{N}F 평면 블록이 없으면 도곽(FORM/시트·축정렬 테두리)과 층 제목으로 영역을 자른다.
 기본으로 같은 경로에 `floor_original.png` / `_meta.json`도 렌더한다 (`--no-png`로 생략).
 PNG 직후 잔여 축 Vision 검사를 한다 (`--no-axis-vision`으로 생략).
 
@@ -1174,11 +1175,13 @@ def extract_sheet_floor(
     do_axis_vision: bool = True,
     include_text: bool = True,
     origin_shift_mode: str = "none",
+    arch_only: bool = False,
 ) -> dict:
     """도곽 bbox를 층으로 저장. 결과는 floor_original.dxf / floor_original.png.
 
-    건축 레이어가 있으면 벽·창·실명·문만 남긴다. 창선은 벽과 같이 둔다.
-    다만 냉난방·배관 등 설비 평면도 제목이면 도곽 안 전체 기하를 남긴다.
+    기본(Autodesk): 도곽·XCLIP 창 안 전체 기하를 남긴다.
+    ``arch_only=True`` 이면 건축 레이어가 있을 때 벽·창·실명·문만 남긴다.
+    설비 평면도 제목이면 arch_only여도 전체 기하를 남긴다.
     floor_structure.* 는 쓰지 않는다.
     """
     if variant not in {"clean", "original"}:
@@ -1193,7 +1196,8 @@ def extract_sheet_floor(
     entities: list[DXFEntity] = []
     used_inserts: set[int] = set()
     structural_mode = False
-    if variant == "original" and not is_mechanical_plan_title(getattr(sheet, "title", None)):
+    mech = is_mechanical_plan_title(getattr(sheet, "title", None))
+    if variant == "original" and arch_only and not mech:
         packed = collect_structural_sheet(doc, clip)
         if packed is not None:
             entities, info = packed
@@ -1203,8 +1207,10 @@ def extract_sheet_floor(
                 f"doors={info['n_door_entities']} layers={info['layers']}"
             )
             print(f"  door blocks: {info['door_blocks']}")
-    elif variant == "original":
+    elif variant == "original" and arch_only and mech:
         print("  mechanical plan title → full sheet geometry (skip ARCH-only filter)")
+    elif variant == "original":
+        print("  Autodesk mode → full sheet geometry")
 
     clip_w = clip[2] - clip[0]
     clip_h = clip[3] - clip[1]
@@ -1514,6 +1520,7 @@ def _execute_extract_job(doc: Drawing, job: dict) -> dict:
                 do_axis_vision=job.get("do_axis_vision", True),
                 include_text=job["include_text"],
                 origin_shift_mode=job["origin_shift"],
+                arch_only=bool(job.get("arch_only", False)),
             )
         return extract_floor(
             doc,
@@ -1640,6 +1647,11 @@ def main() -> int:
         help="디버그용 floor_*_geom.json 생성 (기본 끔)",
     )
     parser.add_argument("--no-text", action="store_true", help="TEXT/MTEXT 제외")
+    parser.add_argument(
+        "--arch-only",
+        action="store_true",
+        help="레거시: 건축 레이어가 있으면 벽·창·실명·문만 남김 (기본은 Autodesk처럼 도곽 안 전체 기하)",
+    )
     args = parser.parse_args()
 
     source_path = args.dxf or default_dxf_path()
@@ -1724,6 +1736,7 @@ def main() -> int:
             "do_axis_vision": not args.no_axis_vision and not args.no_png,
             "include_text": not args.no_text,
             "origin_shift": args.origin_shift,
+            "arch_only": bool(args.arch_only),
         }
         for floor in targets
     ]

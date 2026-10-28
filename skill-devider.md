@@ -119,28 +119,7 @@ XA-S-12F 평면 → 12F
 
 같은 제목이 떨어진 도곽에 반복되면 왼쪽부터 `1F`, `1F_2`입니다. 한 도곽 안에서 층을 나누지 못하면 `sheet_01`, `sheet_02`로 두고 층 이름만 미확정입니다. `sheet_XX`도 그 이름으로 추출합니다.
 
-도곽 방식이고 `--variant original`이며 도곽 안에 건축 레이어(`ARCH`, `*_BG`·`*_CEN` 제외)가 있으면 `lib_structure.collect_structural_sheet`가 벽·창·실명·문 스윙만 남깁니다. 창선은 벽과 같이 둡니다. 파일명은 그대로 `floor_original.*`입니다. 건축 레이어가 없으면 도곽 안 기하를 그대로 둡니다. 지원동처럼 `XA-S` 블록 도면은 이 필터를 타지 않고, 가구 INSERT를 유지합니다.
-
-```25:34:agent-skills/application/skills/drawing-devider/scripts/lib_structure.py
-def is_arch_layer(name: str) -> bool:
-    """벽·실명에 쓰는 건축 레이어. 등고(BG)·중심선(CEN)은 제외."""
-    upper = name.upper()
-    if "ARCH" not in upper:
-        return False
-    if "ARCH_BG" in upper or upper.endswith("_BG"):
-        return False
-    if "ARCH_CEN" in upper or upper.endswith("_CEN"):
-        return False
-    return True
-```
-
-```946:950:agent-skills/application/skills/drawing-devider/scripts/extract_2d.py
-    if variant == "original":
-        packed = collect_structural_sheet(doc, clip)
-        if packed is not None:
-            entities, info = packed
-            structural_mode = True
-```
+도곽 방식이고 `--variant original`이면 **기본(Autodesk)** 으로 도곽·XCLIP 창 안 **전체 기하**를 남깁니다. Autodesk 표제란 FORM(`xr-form`/`XR_FORM`) INSERT가 2곳 이상이면 그 bbox로 시트를 나눕니다. 레거시 벽만 남기려면 `--arch-only`를 줍니다. 그때만 도곽 안에 건축 레이어(`ARCH`, `*_BG`·`*_CEN` 제외)가 있으면 `lib_structure.collect_structural_sheet`가 벽·창·실명·문 스윙만 남깁니다. 설비 평면도 제목이면 `--arch-only`여도 전체 기하입니다. 지원동처럼 `XA-S` 블록 도면은 이 필터를 타지 않고, 가구 INSERT를 유지합니다.
 
 ---
 
