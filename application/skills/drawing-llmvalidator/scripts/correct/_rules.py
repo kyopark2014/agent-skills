@@ -19724,7 +19724,7 @@ def close_leaking_wall_ends(msp) -> int:
             continue
         name = ev.norm_name(text)
         folded = name.upper()
-        if ev.is_excluded_area_label(text) or any(token in folded for token in ("도로", "부지", "인승", "ELEV", "승강기", "창고", "차고", "화장실", "입구", "출구", "상부OPEN")):
+        if ev.is_excluded_area_label(text) or any(token in folded for token in ("도로", "부지", "인승", "ELEV", "승강기", "차고", "화장실", "입구", "출구", "상부OPEN")):
             continue
         if folded in {"WC", "W.C", "W.C."} or folded.startswith("WC(") or folded.startswith("W.C("):
             continue
@@ -29769,7 +29769,7 @@ def promote_curved_corner_walls(msp) -> int:
 def _nonarea_room_anchor(text: str) -> bool:
     folded = text.replace(" ", "")
     token = folded.upper()
-    if _is_bathroom_label(text) or any(word in folded for word in ("창고", "차고")) or _excluded_area_text(text):
+    if _is_bathroom_label(text) or any(word in folded for word in ("차고",)) or _excluded_area_text(text):
         return True
     return token in {"DA", "D.A", "D.A."}
 
@@ -30486,7 +30486,7 @@ def promote_office_label_walls(msp) -> int:
 
 
 def promote_nonarea_enclosures(msp) -> int:
-    """화장실·창고·차고·방풍실·보관실·퇴식대·DA는 면적에서 빠지므로 둘러싼 벽을 WALL로 올린다.
+    """화장실·차고·방풍실·보관실·퇴식대·DA는 면적에서 빠지므로 둘러싼 벽을 WALL로 올린다.
 
     사방으로 처음 만나는 긴 선의 바깥에 벽이 한 겹 더 있을 때만 올린다.
     샤프트 안 X와 짧은 가구선은 남긴다.
@@ -30495,7 +30495,7 @@ def promote_nonarea_enclosures(msp) -> int:
     room_anchors: list[tuple[float, float]] = []
     for x, y, text in _iter_text_labels(msp):
         token = text.strip().upper().replace(" ", "")
-        if "창고" in text.replace(" ", "") or token in {"DA", "D.A", "D.A."}:
+        if token in {"DA", "D.A", "D.A."}:
             anchors.append((x, y))
         if _nonarea_room_anchor(text):
             room_anchors.append((x, y))

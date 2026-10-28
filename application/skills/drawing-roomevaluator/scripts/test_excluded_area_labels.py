@@ -30,6 +30,11 @@ class ExcludedAreaLabelTests(unittest.TestCase):
         self.assertTrue(evaluate_room.is_fixture_label("미니바1"))
         self.assertIn("화장실", evaluate_room.NON_ROOM_TOKENS)
         self.assertFalse(evaluate_room.is_room_label("화장실"))
+        self.assertNotIn("창고", evaluate_room.REGION_AREA_TOKENS)
+        self.assertFalse(evaluate_room.is_excluded_area_label("창고"))
+        self.assertTrue(evaluate_room.is_room_label("창고"))
+        self.assertTrue(evaluate_room.is_room_label("창고-1"))
+        self.assertTrue(evaluate_room.is_room_label("창고#2"))
 
     def test_named_non_area_rooms_are_not_labels(self):
         for text in ("방풍실-1", "소모품보관실", "퇴식대", "샤워실", "남샤워실-1", "고압", "저압반", "계단실-2", "E.P.S", "EPS", "P.S", "OPEN", "상부 OPEN", "홀-4", "홈-1", "입구", "출구", "장비반입구", "비상출구", "양치공간", "양치공간-1", "양치 공간-2", "청소도구함", "청소 도구함", "청소도구함-1", "청소도구실", "청소 도구실", "청소도구실-1", "청소도구실#1", "실외기실", "실외기 실", "실외기실-1", "실외기실#1", "오픈", "상부 오픈", "조경", "외부조경", "배경", "평면도", "1층 평면도", "비품고을", "비품 고을", "승강기", "승강기-1", "승강기#2", "항습기", "항습기-1", "화물", "화물-1", "계단실#2", "계단실＃2", "E.V", "E.V#2", "E.V-1", "EV＃2", "휠체어", "휠체어#2", "린넨실", "린넨실#2", "오물처리실", "오물처리실#1", "(장애인)", "(장애인)화장실", "구급자", "응급환자", "의료가스실", "의료가스실-1", "기계실", "기계실#2", "분전함", "분전함-1", "세척실", "세척실(남)", "장비보관실", "물품보관실", "보관실#1", "탕비실", "탕비실#2", "물품", "물품#1", "스트레쳐", "스트레쳐#2", "스트레처#1"):

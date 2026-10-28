@@ -265,7 +265,7 @@ def _latin_multiword_room(text: str) -> bool:
 def is_room_label(text: str) -> bool:
     """한글 실명, 영문 2자 이상+숫자, 또는 공백 구분 영문 다단어. 축선·치수·안내는 제외."""
     name = norm_name(text)
-    # 마감·비치·주차 안내, 창고, 차고, 화장실, 방풍실, 보관실, 퇴식대, 샤워실, 고압, 저압, 계단실, EPS, WC, 입구, 출구, 상부 OPEN, DA는 면적 실이 아니다.
+    # 마감·비치·주차 안내, 차고, 화장실, 방풍실, 보관실, 퇴식대, 샤워실, 고압, 저압, 계단실, EPS, WC, 입구, 출구, 상부 OPEN, DA는 면적 실이 아니다.
     folded = name.upper()
     if is_excluded_area_label(text) or is_fixture_label(text):
         return False
