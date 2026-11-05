@@ -2568,7 +2568,11 @@ async def _run_langgraph_agent_impl(
             stream = custom_payload
         chunk = stream[0] if isinstance(stream, (list, tuple)) and stream else stream
 
-        if isinstance(chunk, AIMessageChunk):
+        # AIMessageChunk subclasses AIMessage. Non-streaming models (ChatBedrockConverse
+        # with streaming=False, used for GPT without the gateway) emit one whole AIMessage
+        # instead of chunks; matching only AIMessageChunk dropped its text and the run
+        # ended with "답변을 찾지 못하였습니다." even though the model had answered.
+        if isinstance(chunk, AIMessage):
             message = chunk
             remember_stop_reason(chunk)
             handled_tool_input = False
