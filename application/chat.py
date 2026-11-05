@@ -852,11 +852,21 @@ def _build_llm_gateway_chat(profile: dict, max_output_tokens: int):
         return None
 
     if model_kind == "openai":
+        # GPT-6 family (Astra/Sol/Luna) rejects function tools on /v1/chat/completions
+        # ("Function tools with reasoning_effort are not supported ... use /v1/responses"),
+        # so call the Responses API instead.
+        #
+        # The `originator` header is required: awsome-ai-gateway identifies the client from
+        # it and only serves /v1/responses to the `codex` routing profile. Without it the
+        # client is classed "other" and every call fails with
+        # 404 "No Responses backend for this client".
         return ChatOpenAI(
             model=gw_model,
             api_key=gateway_key,
             base_url=f"{gateway_url}/v1",
+            use_responses_api=True,
             max_tokens=max_output_tokens,
+            default_headers={"originator": "codex_cli_rs"},
         )
 
     if model_kind == "claude":
@@ -866,6 +876,9 @@ def _build_llm_gateway_chat(profile: dict, max_output_tokens: int):
             api_key=gateway_key,
             base_url=gateway_url,
             max_tokens=max_output_tokens,
+            # awsome-ai-gateway accepts Authorization: Bearer only; the SDK's
+            # default x-api-key header alone returns 401 auth_failed.
+            default_headers={"Authorization": f"Bearer {gateway_key}"},
         )
 
     logger.warning(
