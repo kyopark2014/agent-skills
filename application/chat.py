@@ -702,7 +702,11 @@ def uses_adaptive_thinking(model_id: str | None = None) -> bool:
 
 # Content block types that Bedrock Claude/Nova reject on replay (e.g. after
 # OpenAI Responses API turns leave type='reasoning', or signed thinking is gone).
-_BEDROCK_NON_REPLAYABLE_CONTENT_TYPES = frozenset({"thinking", "reasoning"})
+# ``function_call`` is the Responses API's own tool-call block. The same call is already
+# carried in AIMessage.tool_calls, which LangChain re-serialises per provider, so dropping
+# the raw block is lossless — and keeping it makes Bedrock Claude reject the history
+# ("Input tag 'function_call' ... does not match any of the expected tags").
+_BEDROCK_NON_REPLAYABLE_CONTENT_TYPES = frozenset({"thinking", "reasoning", "function_call"})
 
 
 def sanitize_adaptive_thinking_messages(messages: list) -> list:
