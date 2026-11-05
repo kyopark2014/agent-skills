@@ -1431,8 +1431,13 @@ async def call_model(state: State, config):
 
         # Strip thinking/reasoning blocks before Bedrock Claude/Nova (GPT history
         # leaves type='reasoning'; which Bedrock rejects with ValidationException).
-        if active_model_type in ("claude", "nova") or chat.uses_adaptive_thinking(
-            active_model_id
+        # Also needed for GPT served via Bedrock Converse (gateway off): a session that
+        # ran through the gateway's Responses API keeps raw 'function_call' blocks, which
+        # ChatBedrockConverse rejects ("Unsupported content block type").
+        if (
+            active_model_type in ("claude", "nova")
+            or chat.uses_adaptive_thinking(active_model_id)
+            or chat.uses_bedrock_converse_openai()
         ):
             messages = chat.sanitize_adaptive_thinking_messages(messages)
 

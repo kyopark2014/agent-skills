@@ -709,6 +709,23 @@ def uses_adaptive_thinking(model_id: str | None = None) -> bool:
 _BEDROCK_NON_REPLAYABLE_CONTENT_TYPES = frozenset({"thinking", "reasoning", "function_call"})
 
 
+def uses_bedrock_converse_openai() -> bool:
+    """True when the active OpenAI model is served through ChatBedrockConverse.
+
+    That is the non-gateway path of _build_openai_chat for profiles without
+    ``mantle_api == "responses"``. Converse cannot replay the Responses API blocks
+    (``function_call``/``reasoning``) that earlier gateway turns left in the session
+    history, so those must be stripped before the call.
+    """
+    if llm_gateway_enabled or not models:
+        return False
+    profile = models[0]
+    return (
+        profile.get("model_type") == "openai"
+        and profile.get("mantle_api", "chat") != "responses"
+    )
+
+
 def sanitize_adaptive_thinking_messages(messages: list) -> list:
     """Remove content blocks that cannot be replayed to Bedrock on later turns.
 
