@@ -1,8 +1,6 @@
 # MCP Apps 기능 확장
 
-MCP Apps 확장 스펙(SEP-1865)과 이 스펙 위에서 Anthropic이 확장한 Interactive Connectors(2026-11-10 발표)를 정리한 노트입니다. 앞부분은 호스트에 상관없이 적용되는 **표준 스펙**이고, 뒷부분은 **Claude에만 해당하는 확장과 제약**입니다.
-
-관련 노트: [[MCP OAuth 인증]] · [[AgentCore Gateway — 인바운드 인증, OAuth 2.0 접속(Claude Code 포함), 승인 흐름 (Interceptor Lambda)]] · [[Agent Plugins 스펙]] · [[Claude Tag]]
+MCP Apps 확장 스펙(SEP-1865)을 바탕으로 Anthropic이 확장된 Interactive Connectors(2026-11-10)을 발표하였습니다. 여기서는 MCP Apps의 표준 스펙과 Claude의 Interactive Connector에 대해 설명합니다.
 
 ## 목차
 
