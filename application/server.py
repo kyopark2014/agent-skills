@@ -18,6 +18,7 @@ from application.api.routes_graph import router as graph_router
 from application.api.routes_documents import router as documents_router
 from application.api.routes_artifacts import router as artifacts_router
 from application.api.routes_drawings import router as drawings_router
+from application.api.routes_mcp_apps import router as mcp_apps_router
 from application.task_store import init_db
 from application.task_store_persistence import (
     flush_persist,
@@ -68,6 +69,7 @@ app.include_router(graph_router)
 app.include_router(documents_router)
 app.include_router(artifacts_router)
 app.include_router(drawings_router)
+app.include_router(mcp_apps_router)
 
 
 @app.get("/api/health")

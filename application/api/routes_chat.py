@@ -262,12 +262,24 @@ def _map_sink_event(event: dict[str, Any]) -> dict[str, Any] | None:
             }
         result_match = _TOOL_RESULT_RE.match(str(data))
         if result_match:
-            return {
+            mapped: dict[str, Any] = {
                 "type": "tool_result",
                 "toolUseId": _normalize_tool_use_id(event.get("toolUseId", "")),
                 "data": result_match.group(1),
             }
-        return {"type": "info", "data": data}
+            if event.get("mcpApp"):
+                mapped["mcpApp"] = event["mcpApp"]
+            if event.get("mcpServer"):
+                mapped["mcpServer"] = event["mcpServer"]
+            if event.get("skillName"):
+                mapped["skillName"] = event["skillName"]
+            return mapped
+        info_mapped: dict[str, Any] = {"type": "info", "data": data}
+        if event.get("mcpServer"):
+            info_mapped["mcpServer"] = event["mcpServer"]
+        if event.get("skillName"):
+            info_mapped["skillName"] = event["skillName"]
+        return info_mapped
 
     return event
 

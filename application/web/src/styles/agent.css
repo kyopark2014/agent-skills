@@ -1045,6 +1045,37 @@ select {
   margin-top: 0;
 }
 
+.tool-card-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 100%;
+  min-width: 0;
+}
+
+.mcp-app-frame {
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  overflow: hidden;
+  background: #0b1f33;
+  width: 100%;
+}
+
+.mcp-app-status {
+  padding: 6px 12px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.mcp-app-iframe {
+  display: block;
+  width: 100%;
+  border: 0;
+  background: transparent;
+  min-height: 280px;
+}
+
 .tool-card {
   border: 1px solid var(--border);
   border-radius: 8px;

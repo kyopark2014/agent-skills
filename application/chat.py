@@ -2265,6 +2265,16 @@ def append_tool_guidance_to_prompt(
             "경로는 vault 상대경로(예: Meeting/Note.md)이며 YAML frontmatter는 넣지 마세요."
         )
 
+    if "weather" in selected:
+        extras.append(
+            "날씨 조회 시 weather MCP 도구를 우선 사용하세요: "
+            "`get_metropolitan_weather` 또는 `get_weather`. "
+            "이 도구들은 채팅에 인터랙티브 UI(MCP Apps)를 렌더합니다. "
+            "대상이 수도권(서울/인천/수원/파주/동두천/백령도/강화/양평/이천)이면 "
+            "반드시 위 MCP 도구를 호출하고, korea-weather skill/`execute_code`로 대체하지 마세요. "
+            "제주·부산 등 수도권 밖 지역만 korea-weather skill을 사용하세요."
+        )
+
     if not extras:
         return system_prompt
 
@@ -2341,6 +2351,9 @@ async def create_agent(
             params["env"] = env
             logger.info(f"{server_name} MCP AGENTCORE_USER_ID={user_id}")
 
+    from application import mcp_apps_host
+
+    mcp_apps_host.clear()
     for server_name, params in server_params.items():
         try:
             # One server per adapter so tool names stay unprefixed (MCPConfig
@@ -2348,6 +2361,20 @@ async def create_agent(
             async with MCPAdapter({"mcpServers": {server_name: params}}) as adapter:
                 logger.info(f"MCP client initialized for server: {server_name}")
                 mcp_tools = await adapter.list_tools()
+                try:
+                    n_apps = await mcp_apps_host.cache_apps_from_adapter(
+                        adapter,
+                        mcp_tools,
+                        fallback_server_name=server_name,
+                    )
+                    if n_apps:
+                        logger.info(
+                            f"Cached {n_apps} MCP App UI resource(s) from {server_name}"
+                        )
+                except Exception as app_exc:
+                    logger.warning(
+                        f"MCP Apps cache skipped for {server_name}: {app_exc}"
+                    )
             for tool in mcp_tools:
                 logger.info(f"mcp_tool: {tool.name} (from {server_name})")
                 if tool.name not in [t.name for t in tools]:
@@ -2405,9 +2432,21 @@ def _notify_stream(notification_queue, message: str) -> None:
         notification_queue.stream(message)
 
 
-def _notify_tool(notification_queue, tool_use_id: str, message: str) -> None:
+def _notify_tool(
+    notification_queue,
+    tool_use_id: str,
+    message: str,
+    *,
+    mcp_app: dict | None = None,
+    mcp_server: str | None = None,
+) -> None:
     if notification_queue is not None:
-        notification_queue.tool_update(tool_use_id, message)
+        notification_queue.tool_update(
+            tool_use_id,
+            message,
+            mcp_app=mcp_app,
+            mcp_server=mcp_server,
+        )
 
 
 def _notify_result(notification_queue, message: str) -> None:
@@ -2683,13 +2722,19 @@ async def _run_langgraph_agent_impl(
             toolResult = message.content
             toolUseId = message.tool_call_id
             tool_used = True
+            from application import mcp_apps_host
+
+            tool_result_text = mcp_apps_host.normalize_tool_result_text(toolResult)
+            mcp_app = mcp_apps_host.build_app_payload(tool_name, tool_result_text)
             _notify_tool(
                 notification_queue,
                 toolUseId or tool_name,
-                f"Tool Result: {toolResult}",
+                f"Tool Result: {tool_result_text}",
+                mcp_app=mcp_app,
+                mcp_server=(mcp_app or {}).get("mcpServer"),
             )
 
-            content, urls, refs = get_tool_info(tool_name, toolResult)
+            content, urls, refs = get_tool_info(tool_name, tool_result_text)
             if refs:
                 references.extend(refs)
             if urls:

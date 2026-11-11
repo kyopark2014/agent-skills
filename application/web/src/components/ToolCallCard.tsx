@@ -1,4 +1,5 @@
 import type { ToolEvent } from "../types";
+import { McpAppFrame } from "./McpAppFrame";
 
 interface Props {
   event: ToolEvent;
@@ -89,13 +90,17 @@ export function ToolCallCard({ event }: Props) {
     );
   }
   if (event.type === "tool_result") {
+    const hasApp = Boolean(event.mcpApp?.html);
     return (
-      <details className="tool-card">
-        <summary>
-          {formatToolResultLabel(event.tool, event.mcpServer, skillName)}
-        </summary>
-        <pre>{formatToolPayload(event.data)}</pre>
-      </details>
+      <div className="tool-card-stack">
+        {hasApp && event.mcpApp ? <McpAppFrame app={event.mcpApp} /> : null}
+        <details className="tool-card" open={!hasApp}>
+          <summary>
+            {formatToolResultLabel(event.tool, event.mcpServer, skillName)}
+          </summary>
+          <pre>{formatToolPayload(event.data)}</pre>
+        </details>
+      </div>
     );
   }
   return (

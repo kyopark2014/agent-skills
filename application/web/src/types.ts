@@ -14,6 +14,19 @@ export interface Task {
   updated_at: string;
 }
 
+export interface McpAppPayload {
+  resourceUri: string;
+  html: string;
+  tool: string;
+  mcpServer?: string;
+  mimeType?: string;
+  csp?: Record<string, unknown>;
+  toolResult?: {
+    content: Array<{ type: string; text?: string; [key: string]: unknown }>;
+    isError?: boolean;
+  };
+}
+
 export interface ToolEvent {
   type: "text" | "tool" | "tool_result" | "info";
   tool?: string;
@@ -24,6 +37,8 @@ export interface ToolEvent {
   input?: unknown;
   toolUseId?: string;
   data?: string;
+  /** MCP Apps UI payload (html + initial tool result). */
+  mcpApp?: McpAppPayload;
 }
 
 export interface Message {
@@ -110,6 +125,9 @@ export interface StreamEvent {
   tool?: string;
   input?: unknown;
   toolUseId?: string;
+  mcpServer?: string;
+  skillName?: string;
+  mcpApp?: McpAppPayload;
 }
 
 export type TaskRunStatus =
