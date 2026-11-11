@@ -480,15 +480,10 @@ export default function App() {
     if (!config) {
       throw new Error("로그인이 필요합니다.");
     }
-    const defaults = buildNewTaskDefaults(config, activeTask);
-    const canEnableGateway =
-      Boolean(config.llm_gateway_configured) && llmGatewayReady;
+    // Use per-user Settings defaults (shared across tasks), not activeTask.
     const task = await appDataService.createTask({
-      ...defaults,
+      ...buildNewTaskDefaults(config),
       title: titleFromFileName(file.file_name),
-      llm_gateway_enabled: canEnableGateway
-        ? (activeTask?.llm_gateway_enabled ?? true)
-        : false,
     });
     seedTaskLoadedFile(task.id, {
       path: file.workspace_path,
@@ -512,8 +507,12 @@ export default function App() {
       prev
         ? {
             ...prev,
+            default_model: task.model_name,
             default_skills: task.skills,
             default_mcp_servers: task.mcp_servers,
+            default_guardrail_enabled: task.guardrail_enabled,
+            default_memory_enabled: task.memory_enabled,
+            default_llm_gateway_enabled: task.llm_gateway_enabled,
           }
         : prev,
     );
@@ -545,15 +544,10 @@ export default function App() {
   async function handleNewTask() {
     if (!config) return;
     try {
-      const defaults = buildNewTaskDefaults(config, activeTask);
-      const canEnableGateway =
-        Boolean(config.llm_gateway_configured) && llmGatewayReady;
-      const task = await appDataService.createTask({
-        ...defaults,
-        llm_gateway_enabled: canEnableGateway
-          ? (activeTask?.llm_gateway_enabled ?? true)
-          : false,
-      });
+      // Use per-user Settings defaults (shared across tasks), not activeTask.
+      const task = await appDataService.createTask(
+        buildNewTaskDefaults(config),
+      );
       setTasks((prev) => [task, ...prev]);
       setActiveTaskId(task.id);
       setMessages([]);
@@ -561,8 +555,12 @@ export default function App() {
         prev
           ? {
               ...prev,
+              default_model: task.model_name,
               default_skills: task.skills,
               default_mcp_servers: task.mcp_servers,
+              default_guardrail_enabled: task.guardrail_enabled,
+              default_memory_enabled: task.memory_enabled,
+              default_llm_gateway_enabled: task.llm_gateway_enabled,
             }
           : prev,
       );
@@ -585,17 +583,82 @@ export default function App() {
   }
 
   async function handlePatchTask(taskId: string, patch: Partial<Task>) {
+    const globalFields: Partial<
+      Pick<
+        Task,
+        | "model_name"
+        | "guardrail_enabled"
+        | "memory_enabled"
+        | "llm_gateway_enabled"
+      >
+    > = {};
+    if (patch.model_name !== undefined) {
+      globalFields.model_name = patch.model_name;
+    }
+    if (patch.guardrail_enabled !== undefined) {
+      globalFields.guardrail_enabled = patch.guardrail_enabled;
+    }
+    if (patch.memory_enabled !== undefined) {
+      globalFields.memory_enabled = patch.memory_enabled;
+    }
+    if (patch.llm_gateway_enabled !== undefined) {
+      globalFields.llm_gateway_enabled = patch.llm_gateway_enabled;
+    }
+    const applyGlobal = Object.keys(globalFields).length > 0;
+
+    // Optimistic update: Model / Guardrail / Memory / LLM Gateway apply to every
+    // task, and the checkbox is controlled by task state.
+    setTasks((prev) =>
+      sortTasks(
+        prev.map((t) => {
+          if (t.id === taskId) {
+            return { ...t, ...patch, ...(applyGlobal ? globalFields : {}) };
+          }
+          return applyGlobal ? { ...t, ...globalFields } : t;
+        }),
+      ),
+    );
+
     try {
       const updated = await appDataService.patchTask(taskId, patch);
       setTasks((prev) =>
-        sortTasks(prev.map((t) => (t.id === updated.id ? updated : t))),
+        sortTasks(
+          prev.map((t) => {
+            if (t.id === updated.id) {
+              return applyGlobal ? { ...updated, ...globalFields } : updated;
+            }
+            return applyGlobal ? { ...t, ...globalFields } : t;
+          }),
+        ),
       );
       // Keep config defaults in sync with settings.json (server persists on patch).
-      if (patch.skills !== undefined || patch.mcp_servers !== undefined) {
+      if (
+        applyGlobal ||
+        patch.skills !== undefined ||
+        patch.mcp_servers !== undefined
+      ) {
         setConfig((prev) =>
           prev
             ? {
                 ...prev,
+                ...(globalFields.model_name !== undefined
+                  ? { default_model: globalFields.model_name }
+                  : {}),
+                ...(globalFields.guardrail_enabled !== undefined
+                  ? {
+                      default_guardrail_enabled:
+                        globalFields.guardrail_enabled,
+                    }
+                  : {}),
+                ...(globalFields.memory_enabled !== undefined
+                  ? { default_memory_enabled: globalFields.memory_enabled }
+                  : {}),
+                ...(globalFields.llm_gateway_enabled !== undefined
+                  ? {
+                      default_llm_gateway_enabled:
+                        globalFields.llm_gateway_enabled,
+                    }
+                  : {}),
                 ...(patch.skills !== undefined
                   ? { default_skills: updated.skills }
                   : {}),
@@ -608,6 +671,11 @@ export default function App() {
       }
     } catch (err) {
       uiError("task:patch failed", err);
+      try {
+        await refreshTasks();
+      } catch (refreshErr) {
+        uiError("task:refresh after patch failed", refreshErr);
+      }
       const message =
         err instanceof Error && err.message
           ? err.message
@@ -737,11 +805,9 @@ export default function App() {
         return;
       }
       if (!config) return;
-      const task = await appDataService.createTask({
-        ...buildFallbackTaskDefaults(config),
-        llm_gateway_enabled:
-          Boolean(config.llm_gateway_configured) && llmGatewayReady,
-      });
+      const task = await appDataService.createTask(
+        buildFallbackTaskDefaults(config),
+      );
       setTasks([task]);
       setActiveTaskId(task.id);
       setMessages([]);
@@ -749,8 +815,12 @@ export default function App() {
         prev
           ? {
               ...prev,
+              default_model: task.model_name,
               default_skills: task.skills,
               default_mcp_servers: task.mcp_servers,
+              default_guardrail_enabled: task.guardrail_enabled,
+              default_memory_enabled: task.memory_enabled,
+              default_llm_gateway_enabled: task.llm_gateway_enabled,
             }
           : prev,
       );
