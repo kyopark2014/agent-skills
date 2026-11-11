@@ -49,7 +49,11 @@ def get_tool_app(tool_name: str | None) -> dict[str, Any] | None:
 
 def _fallback_weather_app(tool_name: str) -> dict[str, Any] | None:
     """Last-resort UI for weather tools when Apps cache was not warmed."""
-    if tool_name not in {"get_weather", "get_metropolitan_weather"}:
+    if tool_name not in {
+        "get_weather",
+        "get_short_term_forecast",
+        "get_metropolitan_weather",
+    }:
         return None
     try:
         from application.mcp_server_weather import VIEW_URI, WEATHER_HTML

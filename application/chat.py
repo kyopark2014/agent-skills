@@ -2268,11 +2268,14 @@ def append_tool_guidance_to_prompt(
     if "weather" in selected:
         extras.append(
             "날씨 조회 시 weather MCP 도구를 우선 사용하세요: "
-            "`get_metropolitan_weather` 또는 `get_weather`. "
-            "이 도구들은 채팅에 인터랙티브 UI(MCP Apps)를 렌더합니다. "
-            "대상이 수도권(서울/인천/수원/파주/동두천/백령도/강화/양평/이천)이면 "
-            "반드시 위 MCP 도구를 호출하고, korea-weather skill/`execute_code`로 대체하지 마세요. "
-            "제주·부산 등 수도권 밖 지역만 korea-weather skill을 사용하세요."
+            "`get_weather` 또는 `get_short_term_forecast` "
+            "(호환: `get_metropolitan_weather`). "
+            "이 도구들은 기상청 단기예보 종합"
+            "(https://www.weather.go.kr/w/forecast/overall/short-term.do)을 "
+            "지역별로 조회하고 채팅에 인터랙티브 UI(MCP Apps)를 렌더합니다. "
+            "전국/서울/부산/제주/강원 등 권역 예보에는 반드시 위 MCP 도구를 호출하고, "
+            "korea-weather skill/`execute_code`로 대체하지 마세요. "
+            "읍면동 단위 상세 동네예보가 필요할 때만 korea-weather skill을 사용하세요."
         )
 
     if not extras:
