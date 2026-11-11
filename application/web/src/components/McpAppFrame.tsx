@@ -16,26 +16,75 @@ type JsonRpcMessage = {
 
 const PROTOCOL_VERSION = "2026-01-26";
 
-function buildSrcDoc(html: string): string {
-  // Keep the app HTML intact; hosts typically inject via sandbox proxy, but
-  // srcdoc + sandboxed iframe is enough for our trusted local MCP servers.
-  return html;
+/**
+ * Embed the initial tool result in the document so the app can render even when
+ * the host↔iframe postMessage handshake fails (common with sandboxed srcdoc).
+ */
+function buildSrcDoc(
+  html: string,
+  toolResult?: McpAppPayload["toolResult"],
+): string {
+  if (!toolResult) return html;
+  const payload = JSON.stringify(toolResult).replace(/</g, "\\u003c");
+  const boot = `<script>(function(){
+  var result = ${payload};
+  window.__MCP_HOST_BOOTSTRAP__ = { toolResult: result };
+  function deliver(){
+    try {
+      if (typeof applyResult === "function") {
+        applyResult(result);
+        return;
+      }
+    } catch (err) {}
+    try {
+      window.dispatchEvent(new MessageEvent("message", {
+        data: {
+          jsonrpc: "2.0",
+          method: "ui/notifications/tool-result",
+          params: result
+        }
+      }));
+    } catch (err) {}
+  }
+  // Run after the app script has registered applyResult / message listener.
+  setTimeout(deliver, 0);
+  setTimeout(deliver, 50);
+})();</script>`;
+  const lower = html.toLowerCase();
+  const idx = lower.lastIndexOf("</body>");
+  if (idx >= 0) return html.slice(0, idx) + boot + html.slice(idx);
+  return html + boot;
 }
 
 export function McpAppFrame({ app }: Props) {
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const [height, setHeight] = useState(420);
   const [status, setStatus] = useState("UI 연결 중…");
+  const [srcDoc, setSrcDoc] = useState<string | undefined>(undefined);
   const initializedRef = useRef(false);
   const pendingToolResultRef = useRef(app.toolResult);
+  const hostInfoName = "agent-skills";
 
   useEffect(() => {
     pendingToolResultRef.current = app.toolResult;
+    if (!initializedRef.current || !app.toolResult) return;
+    const win = iframeRef.current?.contentWindow;
+    if (!win) return;
+    win.postMessage(
+      {
+        jsonrpc: "2.0",
+        method: "ui/notifications/tool-result",
+        params: app.toolResult,
+      },
+      "*",
+    );
+    setStatus("");
   }, [app.toolResult]);
 
   useEffect(() => {
     initializedRef.current = false;
-    setStatus("UI 연결 중…");
+    setStatus(app.toolResult ? "" : "UI 연결 중…");
+    setSrcDoc(undefined);
 
     function reply(id: string | number | undefined, result: unknown) {
       const win = iframeRef.current?.contentWindow;
@@ -65,7 +114,7 @@ export function McpAppFrame({ app }: Props) {
     function sendToolResult() {
       const result = pendingToolResultRef.current;
       if (!result) return;
-      notify("ui/notifications/tool-result", result);
+      notify("ui/notifications/tool-result", result as Record<string, unknown>);
       setStatus("");
     }
 
@@ -111,7 +160,10 @@ export function McpAppFrame({ app }: Props) {
 
     function onMessage(event: MessageEvent) {
       const iframe = iframeRef.current;
-      if (!iframe || event.source !== iframe.contentWindow) return;
+      if (!iframe) return;
+      // Sandboxed srcdoc frames sometimes report event.source as null.
+      // Reject only when we can positively identify a different window.
+      if (event.source != null && event.source !== iframe.contentWindow) return;
       const data = event.data as JsonRpcMessage;
       if (!data || data.jsonrpc !== "2.0") return;
 
@@ -123,7 +175,7 @@ export function McpAppFrame({ app }: Props) {
             serverTools: {},
             logging: {},
           },
-          hostInfo: { name: "agent-skills", version: "1.0.0" },
+          hostInfo: { name: hostInfoName, version: "1.0.0" },
           hostContext: {
             theme:
               document.documentElement.getAttribute("data-theme") === "light"
@@ -132,7 +184,10 @@ export function McpAppFrame({ app }: Props) {
             platform: "web",
             displayMode: "inline",
             availableDisplayModes: ["inline"],
-            containerDimensions: { maxHeight: 720, width: iframe.clientWidth || 640 },
+            containerDimensions: {
+              maxHeight: 720,
+              width: iframe.clientWidth || 640,
+            },
           },
         });
         return;
@@ -168,15 +223,18 @@ export function McpAppFrame({ app }: Props) {
         return;
       }
 
-      // Ignore other notifications/requests for now.
       if (data.id !== undefined && data.method) {
         replyError(data.id, `Unsupported method: ${data.method}`);
       }
     }
 
     window.addEventListener("message", onMessage);
-    return () => window.removeEventListener("message", onMessage);
-  }, [app.html, app.mcpServer, app.tool, app.resourceUri]);
+    setSrcDoc(buildSrcDoc(app.html, app.toolResult));
+    return () => {
+      window.removeEventListener("message", onMessage);
+      setSrcDoc(undefined);
+    };
+  }, [app.html, app.mcpServer, app.tool, app.resourceUri, app.toolResult]);
 
   return (
     <div className="mcp-app-frame">
@@ -185,8 +243,8 @@ export function McpAppFrame({ app }: Props) {
         ref={iframeRef}
         className="mcp-app-iframe"
         title={app.resourceUri || "MCP App"}
-        sandbox="allow-scripts allow-forms allow-popups allow-popups-to-escape-sandbox"
-        srcDoc={buildSrcDoc(app.html)}
+        sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox"
+        srcDoc={srcDoc}
         style={{ height }}
       />
     </div>

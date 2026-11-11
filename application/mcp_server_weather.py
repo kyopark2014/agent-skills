@@ -602,6 +602,10 @@ WEATHER_HTML = r"""<!doctype html>
     regionFilter.addEventListener("change", () => reload(regionFilter.value));
 
     (async function connect() {
+      const boot = window.__MCP_HOST_BOOTSTRAP__;
+      if (boot && boot.toolResult) {
+        applyResult(boot.toolResult);
+      }
       try {
         await request("ui/initialize", {
           appInfo: { name: "KMA Short-term Forecast", version: "2.1.0" },
@@ -611,7 +615,10 @@ WEATHER_HTML = r"""<!doctype html>
         post({ jsonrpc: "2.0", method: "ui/notifications/initialized" });
         reportSize();
       } catch (err) {
-        statusEl.textContent = "호스트 연결 실패: " + (err && err.message ? err.message : err);
+        // Keep bootstrapped forecast visible when host handshake fails.
+        if (!payload) {
+          statusEl.textContent = "호스트 연결 실패: " + (err && err.message ? err.message : err);
+        }
       }
     })();
   </script>
