@@ -52,7 +52,7 @@ def load_multiple_mcp_server_parameters(mcp_json: dict):
                 }
                 if config.get("auth_type") == "aws_sigv4":
                     connection["auth"] = agentcore_sigv4_auth.AgentCoreSigV4Auth(
-                        region=config.get("auth_region", "us-east-1"),
+                        region=config.get("auth_region", "us-west-2"),
                         service=config.get("auth_service", "bedrock-agentcore"),
                     )
                 server_info[server_name] = connection
@@ -212,9 +212,9 @@ installer 실행 시 위 Gateway 정보는 `application/config.json`에 저장�
 ```json
 {
   "agentcore_websearch_gateway_name": "gateway-websearch",
-  "agentcore_websearch_gateway_region": "us-east-1",
+  "agentcore_websearch_gateway_region": "us-west-2",
   "agentcore_websearch_gateway_id": "<gateway-id>",
-  "agentcore_websearch_gateway_url": "https://<gateway-id>.gateway.bedrock-agentcore.us-east-1.amazonaws.com/mcp",
+  "agentcore_websearch_gateway_url": "https://<gateway-id>.gateway.bedrock-agentcore.us-west-2.amazonaws.com/mcp",
   "agentcore_websearch_gateway_role": "arn:aws:iam::<account-id>:role/role-agentcore-gateway-websearch-for-agent-skills"
 }
 ```
@@ -243,11 +243,11 @@ def get_agentcore_gateway_mcp_url(gateway_name: str, gateway_region: str) -> str
 
 ```python
 elif mcp_type == "websearch":
-    gateway_url = get_agentcore_gateway_mcp_url("gateway-websearch", "us-east-1")
+    gateway_url = get_agentcore_gateway_mcp_url("gateway-websearch", "us-west-2")
     if not gateway_url:
         logger.info(
             "AgentCore gateway websearch MCP skipped: "
-            "gateway-websearch not found in us-east-1."
+            "gateway-websearch not found in us-west-2."
         )
         return {}
     return {
@@ -256,7 +256,7 @@ elif mcp_type == "websearch":
                 "type": "streamable_http",
                 "url": gateway_url,
                 "auth_type": "aws_sigv4",
-                "auth_region": "us-east-1",
+                "auth_region": "us-west-2",
                 "auth_service": "bedrock-agentcore",
             }
         }
