@@ -1,0 +1,88 @@
+{
+  "source_root": "/mnt/workspace/src",
+  "applications": [
+    {
+      "name": "ob-note",
+      "description": "Obsidian형 마크다운 vault 웹앱 (FastAPI + ECS + CloudFront, Google 로그인, use-vault MCP)",
+      "repo": {
+        "url": "https://github.com/kyopark2014/ob-note",
+        "branch": "main",
+        "local_path": "/mnt/workspace/src/ob-note",
+        "clone_command": "git clone https://github.com/kyopark2014/ob-note.git /mnt/workspace/src/ob-note"
+      },
+      "server": {
+        "url": "https://vault.my-agentic-ai.click",
+        "health_check": "https://vault.my-agentic-ai.click/api/health",
+        "cloudfront_id": "EA8ZO1UL3NFZU",
+        "cloudfront_domain": "dtb56c7qbqntd.cloudfront.net",
+        "alb_dns": "alb-for-ob-note-489241016.us-west-2.elb.amazonaws.com",
+        "route53_hosted_zone_id": "Z04327013V8HP1JSXPGNM",
+        "route53_profile": "stock"
+      },
+      "aws": {
+        "account_id": "262976740991",
+        "region": "us-west-2",
+        "ecs_cluster": "cluster-for-ob-note",
+        "ecs_service": "service-for-ob-note",
+        "target_group": "TG-for-ob-note",
+        "ecr_repository_uri": "262976740991.dkr.ecr.us-west-2.amazonaws.com/ecr-for-ob-note",
+        "s3_bucket": "storage-for-ob-note-262976740991-us-west-2",
+        "s3_files_app_data_file_system_id": "fs-095ea87615ddd8e07",
+        "s3_files_app_data_mount_path": "/mnt/app-data",
+        "s3_files_vault_mount_path": "/mnt/vault"
+      },
+      "use_vault_mcp": {
+        "runtime_arn": "arn:aws:bedrock-agentcore:us-west-2:262976740991:runtime/use_vault_of_ob_note-n7fevGGI5a",
+        "ecr_repository": "use_vault_of_ob_note",
+        "region": "us-west-2"
+      },
+      "deploy": {
+        "command": "python installer.py",
+        "working_dir": "/mnt/workspace/src/ob-note",
+        "config_file": "/mnt/workspace/src/ob-note/config.json",
+        "note": "installer.py가 이미지 빌드/ECR push/ECS 서비스 갱신/CloudFront 배포를 수행합니다. 변경 후 git commit/push 하고 배포하세요."
+      },
+      "logs": {
+        "ecs_log_group_hint": "ECS 서비스 service-for-ob-note 의 task definition에서 awslogs group 확인"
+      }
+    },
+    {
+      "name": "agentic-work",
+      "description": "Agentic 업무 보조 웹앱 (FastAPI + React + ECS + CloudFront, LangGraph 기반, 스케줄/LLM 게이트웨이 연동). 공개 도메인은 cowork.my-agentic-ai.click",
+      "repo": {
+        "url": "https://github.com/kyopark2014/agentic-work",
+        "branch": "main",
+        "local_path": "/mnt/workspace/src/agentic-work",
+        "clone_command": "git clone https://github.com/kyopark2014/agentic-work.git /mnt/workspace/src/agentic-work"
+      },
+      "server": {
+        "url": "https://cowork.my-agentic-ai.click",
+        "health_check": "https://cowork.my-agentic-ai.click/api/health",
+        "cloudfront_id": "E1QJ7YTURWZOS3",
+        "cloudfront_domain": "d2jl9dmwkqb28d.cloudfront.net",
+        "alb_dns": "alb-for-agentic-work-408044468.us-west-2.elb.amazonaws.com",
+        "route53_hosted_zone_id": "Z04327013V8HP1JSXPGNM",
+        "route53_profile": "stock"
+      },
+      "aws": {
+        "account_id": "262976740991",
+        "region": "us-west-2",
+        "ecs_cluster": "cluster-for-agentic-work",
+        "ecs_service": "service-for-agentic-work",
+        "target_group": "TG-for-agentic-work",
+        "ecr_repository_uri": "262976740991.dkr.ecr.us-west-2.amazonaws.com/ecr-for-agentic-work",
+        "s3_bucket": "storage-for-agentic-work-262976740991-us-west-2",
+        "note": "같은 ECS 클러스터(cluster-for-agentic-work)에 service-for-ob-docs 도 존재하니 점검/배포 시 서비스명을 혼동하지 않도록 주의"
+      },
+      "deploy": {
+        "command": "python installer.py",
+        "working_dir": "/mnt/workspace/src/agentic-work",
+        "config_file": "/mnt/workspace/src/agentic-work/config.json",
+        "note": "installer.py가 이미지 빌드/ECR push/ECS 서비스 갱신/CloudFront 배포를 수행합니다. 변경 후 git commit/push 하고 배포하세요."
+      },
+      "logs": {
+        "ecs_log_group": "/ecs/app-for-agentic-work"
+      }
+    }
+  ]
+}
