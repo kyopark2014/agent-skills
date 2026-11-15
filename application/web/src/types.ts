@@ -16,13 +16,18 @@ export interface Task {
 
 export interface McpAppPayload {
   resourceUri: string;
-  html: string;
+  /** Inline HTML when present; otherwise the host fetches via resourceUri. */
+  html?: string;
   tool: string;
   mcpServer?: string;
   mimeType?: string;
   csp?: Record<string, unknown>;
+  prefersBorder?: boolean;
+  /** Arguments the model passed to the tool (delivered as ui/notifications/tool-input). */
+  toolInput?: Record<string, unknown>;
   toolResult?: {
     content: Array<{ type: string; text?: string; [key: string]: unknown }>;
+    structuredContent?: unknown;
     isError?: boolean;
   };
 }
@@ -71,6 +76,8 @@ export interface AppConfig {
   default_memory_enabled?: boolean;
   default_llm_gateway_enabled?: boolean;
   llm_gateway_configured?: boolean;
+  notion_connected?: boolean;
+  notion_fresh?: boolean;
 }
 
 export interface DashboardSummary {

@@ -96,6 +96,7 @@ memory_enabled = False
 memory_id = None
 actor_id = None
 session_id = None
+notion_access_token: str | None = None
 
 
 def _llm_gateway_settings() -> tuple[str, str] | None:
@@ -2256,12 +2257,18 @@ def append_tool_guidance_to_prompt(
         )
 
     if "use-vault" in selected:
-        uid = (user_id or "").strip() or "default"
+        from application import mcp_apps_host
+
+        uid = mcp_apps_host.resolve_vault_actor_id(user_id)
         extras.append(
             "ob-note vault 작업은 use-vault MCP 도구(vault_read, vault_search, "
             "vault_write, vault_append 등)를 사용하세요. "
             f'모든 도구 호출에 actor_id="{uid}" 를 반드시 전달하세요 '
             "(계정 로그인 email). 닉네임·표시 이름을 쓰지 마세요. "
+            "최근/목록/문서 리스트 요청에는 vault_list(또는 vault_search)를 우선 사용하세요. "
+            "vault_tree는 전체 폴더 구조 탐색용이며 인라인에는 요약만 보입니다. "
+            "vault_search/vault_read/vault_list/vault_tree/vault_graph/vault_backlinks 결과는 "
+            "채팅에 MCP App UI로 표시되므로 같은 내용을 텍스트로 길게 반복하지 마세요. "
             "경로는 vault 상대경로(예: Meeting/Note.md)이며 YAML frontmatter는 넣지 마세요."
         )
 
@@ -2276,6 +2283,20 @@ def append_tool_guidance_to_prompt(
             "전국/서울/부산/제주/강원 등 권역 예보에는 반드시 위 MCP 도구를 호출하고, "
             "korea-weather skill/`execute_code`로 대체하지 마세요. "
             "읍면동 단위 상세 동네예보가 필요할 때만 korea-weather skill을 사용하세요."
+        )
+
+    if selected & {"notion-remote", "notion remote", "notion_remote"}:
+        extras.append(
+            "Notion 작업은 notion-remote MCP 도구를 사용하세요. "
+            "notion-search / notion-fetch / notion-list-*-pages 결과는 채팅에 목록·페이지 UI로 "
+            "표시되므로, 같은 내용을 텍스트로 길게 반복하지 말고 핵심만 요약하세요. "
+            "검색어 입력이나 수정 요청은 사용자의 채팅 메시지로 받습니다."
+        )
+
+    if selected & {"excalidraw", "excalidraw-mcp", "excalidraw mcp"}:
+        extras.append(
+            "다이어그램·스케치는 excalidraw MCP 도구를 사용하세요. "
+            "도구 결과는 채팅에 Excalidraw 캔버스 UI로 표시됩니다."
         )
 
     if not extras:
@@ -2354,6 +2375,33 @@ async def create_agent(
             params["env"] = env
             logger.info(f"{server_name} MCP AGENTCORE_USER_ID={user_id}")
 
+    global notion_access_token
+    notion_token = ""
+    if "notion-remote" in server_params:
+        try:
+            from application import notion_auth
+
+            notion_token = (
+                notion_auth.get_access_token(user_id) or ""
+            ).strip()
+        except Exception as notion_exc:
+            logger.warning("notion-remote token lookup failed: %s", notion_exc)
+        if not notion_token:
+            notion_token = (
+                notion_access_token
+                or os.environ.get("NOTION_REMOTE_ACCESS_TOKEN")
+                or ""
+            ).strip()
+        if notion_token:
+            notion_access_token = notion_token
+            os.environ["NOTION_REMOTE_ACCESS_TOKEN"] = notion_token
+        else:
+            logger.warning(
+                "notion-remote MCP skipped: notion_access_token missing "
+                "(connect Notion in the web UI)"
+            )
+            server_params.pop("notion-remote", None)
+
     from application import mcp_apps_host
 
     mcp_apps_host.clear()
@@ -2378,6 +2426,16 @@ async def create_agent(
                     logger.warning(
                         f"MCP Apps cache skipped for {server_name}: {app_exc}"
                     )
+            hidden = [
+                t.name
+                for t in mcp_tools
+                if mcp_apps_host.is_app_only_tool(getattr(t, "metadata", None))
+            ]
+            if hidden:
+                logger.info(
+                    f"app-only tools hidden from the model ({server_name}): {hidden}"
+                )
+                mcp_tools = [t for t in mcp_tools if t.name not in hidden]
             for tool in mcp_tools:
                 logger.info(f"mcp_tool: {tool.name} (from {server_name})")
                 if tool.name not in [t.name for t in tools]:
@@ -2389,7 +2447,16 @@ async def create_agent(
             if getattr(e, "__cause__", None):
                 logger.error(f"  cause: {e.__cause__}")
             logger.info(f"Continuing with remaining MCP servers (tools loaded: {len(tools)})")
-        
+
+    if "notion-remote" in server_params:
+        try:
+            from application import notion_app
+
+            n_notion_apps = notion_app.register_notion_apps()
+            logger.info(f"Registered {n_notion_apps} Notion viewer app(s)")
+        except Exception as notion_app_exc:
+            logger.warning(f"Notion viewer apps skipped: {notion_app_exc}")
+
     tools.extend(skill.get_skill_tools())
 
     skill_info = skill.get_skill_info(skill_list)
@@ -2728,7 +2795,24 @@ async def _run_langgraph_agent_impl(
             from application import mcp_apps_host
 
             tool_result_text = mcp_apps_host.normalize_tool_result_text(toolResult)
-            mcp_app = mcp_apps_host.build_app_payload(tool_name, tool_result_text)
+            artifact = getattr(message, "artifact", None)
+            structured = (
+                artifact.get("structured_content")
+                if isinstance(artifact, dict)
+                else None
+            )
+            app_tool_input = None
+            raw_input = tool_input_list.get(toolUseId) if toolUseId else None
+            if isinstance(raw_input, str) and raw_input.strip():
+                try:
+                    parsed = json.loads(raw_input)
+                    if isinstance(parsed, dict):
+                        app_tool_input = parsed
+                except Exception:
+                    app_tool_input = None
+            mcp_app = mcp_apps_host.build_app_payload(
+                tool_name, tool_result_text, structured, app_tool_input
+            )
             _notify_tool(
                 notification_queue,
                 toolUseId or tool_name,
