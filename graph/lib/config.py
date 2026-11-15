@@ -17,7 +17,7 @@ DEFAULT_CORPUS = HERE / "corpus"
 DEFAULT_GRAPHIFY_OUT = HERE / "graphify-out"
 DEFAULT_OUT = HERE / "out"
 DEFAULT_APP_CONFIG = AGENT_SKILLS / "application" / "config.json"
-DEFAULT_LLM_MODEL = "claude-haiku-4-5"
+DEFAULT_LLM_MODEL = "claude-sonnet-5-5"
 
 
 def load_env() -> None:
