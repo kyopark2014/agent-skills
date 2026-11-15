@@ -20,8 +20,7 @@ MCP Apps 확장 스펙(SEP-1865)을 바탕으로 Anthropic이 확장된 Interact
 - [14. Claude 구현 상세 — 개발자 관점](#14-claude-구현-상세--개발자-관점)
 - [15. 유사 기술 비교](#15-유사-기술-비교)
 - [16. AWS AgentCore 관점 적용 포인트](#16-aws-agentcore-관점-적용-포인트)
-- [17. 확인하지 못한 부분](#17-확인하지-못한-부분)
-- [18. 참고 문서](#18-참고-문서)
+- [17. 참고 문서](#17-참고-문서)
 
 ---
 
@@ -715,15 +714,7 @@ Microsoft 365 Copilot 선언적 에이전트도 MCP 플러그인을 통해 MCP A
 - **원격 서버 필수**: app tools, entry points, embedded sites는 원격 커넥터에서만 동작합니다. AgentCore Runtime이나 Gateway의 HTTPS MCP 엔드포인트를 커스텀 커넥터로 등록하는 방식이 이 요구사항과 잘 맞습니다.
 - **PoC 제안**: AgentCore Runtime에 `registerAppTool`/`registerAppResource`로 만든 MCP App 서버를 배포하고, Gateway target으로 등록한 뒤, Claude 커스텀 커넥터에서 렌더링, app tools, sidebar가 동작하는지 검증합니다.
 
-## 17. 확인하지 못한 부분
-
-- AgentCore Gateway가 도구의 `_meta.ui`(resourceUri, visibility)와 `initialize`의 `extensions["io.modelcontextprotocol/ui"]` capability를 **변형 없이 전달하는지**는 AWS 문서에서 확인하지 못했습니다. 실제 테스트가 필요합니다.
-- Claude의 사이드 패널, app tools, embedded sites(커스텀 커넥터)가 "일부 조직부터 제공"이라고만 되어 있어, 전체 공개 일정은 알 수 없습니다.
-- `preferredDisplayMode`(Claude)와 `openai/ui.entrypoints`(OpenAI)가 다른 호스트에서도 동작하는지는 보장되지 않습니다.
-- Claude Messages(`ui/message`), Downloads, Theming 문서 페이지의 세부 제약(크기 제한 등)은 이번에 자세히 확인하지 못했습니다.
-- 모바일 앱에서의 동작은 Claude 문서의 Mobile guidelines를 따로 확인해야 합니다.
-
-## 18. 참고 문서
+## 17. 참고 문서
 
 **MCP Apps 스펙·SDK**
 
