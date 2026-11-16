@@ -1,8 +1,11 @@
-"""LLM chat client: LiteLLM gateway first, Bedrock Converse fallback.
+"""LLM chat client: gateway first, Bedrock Converse fallback.
 
-Gateway path uses OpenAI-compatible /v1 (any LiteLLM model id). When
-``application/config.json`` has no llm_gateway_*, falls back to AWS Bedrock
-``converse`` like ``runtime_agent/langgraph`` (boto3 credential chain).
+Claude aliases on awsome-ai-gateway must use Anthropic ``/v1/messages``;
+OpenAI ``/v1/chat/completions`` returns 404 "Model alias not found" for them.
+GPT / OpenAI-compatible aliases still use ``/v1/chat/completions``.
+
+When ``application/config.json`` has no llm_gateway_*, falls back to AWS
+Bedrock ``converse`` (boto3 credential chain).
 """
 
 from __future__ import annotations
@@ -11,6 +14,7 @@ import json
 import re
 from typing import Any
 
+from anthropic import Anthropic
 from openai import OpenAI
 
 from lib.config import (
@@ -18,6 +22,9 @@ from lib.config import (
     graphify_llm_model,
     llm_gateway_settings,
 )
+
+# Graph extract can return large JSON; keep headroom for multi-file chunks.
+_GATEWAY_MAX_TOKENS = 8192
 
 # Friendly / UI names → LiteLLM gateway model ids (same as application map).
 # Unknown ids are passed through unchanged so any LiteLLM model works.
@@ -91,7 +98,7 @@ def resolve_bedrock_model_id(model: str) -> str:
     """Map gateway alias / UI name to a Bedrock model id."""
     raw = (model or "").strip()
     if not raw:
-        return _BEDROCK_MODEL_IDS["claude-haiku-4-5"]
+        return _BEDROCK_MODEL_IDS["claude-sonnet-5-5"]
     # Already a Bedrock / inference-profile id.
     if (
         raw.startswith("us.")
@@ -276,15 +283,81 @@ def _chat_json_bedrock(
     return data
 
 
-def _chat_json_gateway(
+def _split_system_for_anthropic(
+    messages: list[dict[str, str]],
+) -> tuple[str | None, list[dict[str, str]]]:
+    """Split OpenAI-style messages into Anthropic system + messages."""
+    system_parts: list[str] = []
+    anth_messages: list[dict[str, str]] = []
+    for msg in messages:
+        role = (msg.get("role") or "user").strip()
+        content = msg.get("content") or ""
+        if role == "system":
+            if content:
+                system_parts.append(content)
+            continue
+        if role not in ("user", "assistant"):
+            role = "user"
+        anth_messages.append({"role": role, "content": content})
+    if not anth_messages:
+        anth_messages = [{"role": "user", "content": ""}]
+    system = "\n\n".join(system_parts) if system_parts else None
+    return system, anth_messages
+
+
+def _chat_json_gateway_messages(
     messages: list[dict[str, str]],
     *,
-    model: str | None,
+    model: str,
+    gw: dict[str, str],
+) -> dict[str, Any]:
+    """Claude via Anthropic Messages API (``POST {gateway}/v1/messages``)."""
+    # Anthropic SDK appends /v1/messages; base_url must be the gateway root
+    # (not .../v1). Match application/chat.py ChatAnthropic wiring.
+    client = Anthropic(
+        api_key=gw["key"],
+        base_url=gw["url"],
+        default_headers={"Authorization": f"Bearer {gw['key']}"},
+    )
+    system, anth_messages = _split_system_for_anthropic(messages)
+    kwargs: dict[str, Any] = {
+        "model": model,
+        "max_tokens": _GATEWAY_MAX_TOKENS,
+        "messages": anth_messages,
+    }
+    if system:
+        kwargs["system"] = system
+
+    resp = client.messages.create(**kwargs)
+    parts = [
+        block.text
+        for block in (resp.content or [])
+        if getattr(block, "type", None) == "text" and getattr(block, "text", None)
+    ]
+    content = "\n".join(parts).strip()
+    data = json.loads(_strip_fences(content))
+    if not isinstance(data, dict):
+        raise ValueError("LLM returned non-object JSON")
+
+    usage = getattr(resp, "usage", None)
+    if usage is not None:
+        data.setdefault("input_tokens", int(getattr(usage, "input_tokens", 0) or 0))
+        data.setdefault("output_tokens", int(getattr(usage, "output_tokens", 0) or 0))
+    data.setdefault("_llm_backend", "gateway-messages")
+    data.setdefault("_llm_model", model)
+    data.setdefault("_llm_source", gw.get("source", "gateway"))
+    return data
+
+
+def _chat_json_gateway_openai(
+    messages: list[dict[str, str]],
+    *,
+    model: str,
     temperature: float | None,
     gw: dict[str, str],
 ) -> dict[str, Any]:
+    """OpenAI-compatible models via ``POST {gateway}/v1/chat/completions``."""
     client = OpenAI(api_key=gw["key"], base_url=gw["base_url"])
-    model = resolve_model_id(model or gw["model"])
 
     # Try progressively more compatible request shapes.
     attempts: list[dict[str, Any]] = [
@@ -331,15 +404,30 @@ def _chat_json_gateway(
     return data
 
 
+def _chat_json_gateway(
+    messages: list[dict[str, str]],
+    *,
+    model: str | None,
+    temperature: float | None,
+    gw: dict[str, str],
+) -> dict[str, Any]:
+    model = resolve_model_id(model or gw["model"])
+    if _model_family(model) == "claude":
+        return _chat_json_gateway_messages(messages, model=model, gw=gw)
+    return _chat_json_gateway_openai(
+        messages, model=model, temperature=temperature, gw=gw
+    )
+
+
 def chat_json(
     messages: list[dict[str, str]],
     *,
     model: str | None = None,
     temperature: float | None = None,
 ) -> dict[str, Any]:
-    """Call LiteLLM gateway, or Bedrock Converse if gateway is unset.
+    """Call gateway (Claude→messages, else chat/completions), or Bedrock.
 
-    ``model`` may be a LiteLLM gateway id (claude-*, gpt-*, …), a UI alias,
+    ``model`` may be a gateway id (claude-*, gpt-*, …), a UI alias,
     or a Bedrock model id when using the Bedrock fallback.
     """
     gw = llm_gateway_settings()
