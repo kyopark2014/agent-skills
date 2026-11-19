@@ -562,6 +562,30 @@ def load_config(mcp_type):
             }
         }
 
+    elif mcp_type in ("notion-remote", "notion remote", "notion_remote"):
+        # Notion hosted MCP (OAuth bearer injected per request; see notion_bearer_auth.py).
+        return {
+            "mcpServers": {
+                "notion-remote": {
+                    "type": "streamable_http",
+                    "url": "https://mcp.notion.com/mcp",
+                    "auth_type": "notion_bearer",
+                }
+            }
+        }
+
+    elif mcp_type in ("excalidraw", "excalidraw-mcp", "excalidraw mcp"):
+        # Open-source Excalidraw MCP Apps (no auth). Diagram UI via ui://excalidraw/...
+        # https://mcp.excalidraw.com/mcp — Plus workspace MCP is a different endpoint.
+        return {
+            "mcpServers": {
+                "excalidraw": {
+                    "type": "streamable_http",
+                    "url": "https://mcp.excalidraw.com/mcp",
+                }
+            }
+        }
+
     elif mcp_type == "사용자 설정":
         return mcp_user_config
 

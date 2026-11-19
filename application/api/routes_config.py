@@ -194,6 +194,15 @@ def get_config(request: Request):
     default_model = preferred_model or DEFAULT_MODEL
     if default_model not in MODELS and default_model not in gateway_models:
         default_model = DEFAULT_MODEL
+    notion_status = {"connected": False, "fresh": False}
+    if session_user:
+        try:
+            from application import notion_auth
+
+            notion_status = notion_auth.status_for_user(session_user)
+        except Exception:
+            logger.exception("Failed to load Notion OAuth status for %s", session_user)
+
     return {
         "projectName": config.get("projectName", "agent"),
         "google_client_id": (config.get("google_client_id") or "").strip(),
@@ -213,6 +222,8 @@ def get_config(request: Request):
             flags["llm_gateway_enabled"] and gateway_configured
         ),
         "llm_gateway_configured": gateway_configured,
+        "notion_connected": bool(notion_status.get("connected")),
+        "notion_fresh": bool(notion_status.get("fresh")),
     }
 
 

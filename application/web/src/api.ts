@@ -359,6 +359,27 @@ export const api = {
       method: "POST",
     }),
   getConfig: () => request<AppConfig>("/api/config"),
+  getNotionStatus: () =>
+    request<{
+      connected: boolean;
+      fresh: boolean;
+      expires_at?: number | null;
+      updated_at?: string | null;
+    }>("/api/session/notion"),
+  getOAuthMcpAuthorizeUrl: (provider: "notion", write = false) =>
+    request<{ url: string; manual?: boolean }>(
+      `/api/session/${provider}/authorize${write ? "?write=true" : ""}`,
+    ),
+  exchangeOAuthMcp: (provider: "notion", url: string) =>
+    request<{ connected: boolean; fresh: boolean }>(
+      `/api/session/${provider}/exchange`,
+      {
+        method: "POST",
+        body: JSON.stringify({ url }),
+      },
+    ),
+  disconnectOAuthMcp: (provider: "notion") =>
+    request<void>(`/api/session/${provider}`, { method: "DELETE" }),
   getDocumentsStatus: () => request<DocumentsStatus>("/api/documents/status"),
   getDocumentsConfig: () => request<DocumentsConfig>("/api/documents/config"),
   putDocumentsConfig: (body: {

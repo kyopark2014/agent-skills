@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } f
 import { api } from "../api";
 import { formatBrandTitle } from "../formatBrandTitle";
 import { useTheme } from "../hooks/useTheme";
+import { connectMcpOAuth } from "../mcpOAuth";
 import type { Theme } from "../theme";
 import type { AppConfig, Task } from "../types";
 import { ConfigDrawer } from "./ConfigDrawer";
@@ -9,6 +10,7 @@ import { DocumentsConfigureModal } from "./DocumentsConfigureModal";
 import { DocumentsListModal } from "./DocumentsListModal";
 import { KnowledgeGraphModal } from "./KnowledgeGraphModal";
 import { LlmGatewayModal } from "./LlmGatewayModal";
+import { OAuthMcpFooter } from "./OAuthMcpFooter";
 import { SyncProgressModal } from "./SyncProgressModal";
 import { TaskListItem } from "./TaskListItem";
 import {
@@ -111,6 +113,8 @@ export function Sidebar({
   const [documentsListKind, setDocumentsListKind] = useState<"project" | "drawing">("project");
   const [documentsSyncBusy, setDocumentsSyncBusy] = useState(false);
   const [documentsSyncMessage, setDocumentsSyncMessage] = useState<string | null>(null);
+  const [notionBusy, setNotionBusy] = useState(false);
+  const [notionError, setNotionError] = useState<string | null>(null);
   const [documentsSyncProgress, setDocumentsSyncProgress] = useState<{
     file?: string | null;
     file_i?: number | null;
@@ -589,8 +593,69 @@ export function Sidebar({
           options={config.mcp_servers}
           selected={mcpServers}
           anchorEl={mcpBtnRef.current}
-          onChange={(next) => activeTask && onPatchTask(activeTask.id, { mcp_servers: next })}
+          onChange={async (next) => {
+            if (!activeTask) return;
+            const enablingNotion =
+              next.includes("notion-remote") &&
+              !mcpServers.includes("notion-remote");
+            await onPatchTask(activeTask.id, { mcp_servers: next });
+            if (
+              enablingNotion &&
+              !(config.notion_connected && config.notion_fresh)
+            ) {
+              setNotionError(null);
+              setNotionBusy(true);
+              try {
+                await connectMcpOAuth("notion");
+                if (onRefreshConfig) await onRefreshConfig();
+              } catch (err) {
+                setNotionError(err instanceof Error ? err.message : String(err));
+              } finally {
+                setNotionBusy(false);
+              }
+            }
+          }}
           onClose={handleDrawerClose}
+          footer={
+            mcpServers.includes("notion-remote") ? (
+              <OAuthMcpFooter
+                label="Notion"
+                mcpName="notion-remote"
+                connected={Boolean(config.notion_connected)}
+                fresh={Boolean(config.notion_fresh)}
+                busy={notionBusy}
+                error={notionError}
+                onConnect={async () => {
+                  setNotionError(null);
+                  setNotionBusy(true);
+                  try {
+                    await connectMcpOAuth("notion");
+                    if (onRefreshConfig) await onRefreshConfig();
+                  } catch (err) {
+                    setNotionError(
+                      err instanceof Error ? err.message : String(err),
+                    );
+                  } finally {
+                    setNotionBusy(false);
+                  }
+                }}
+                onDisconnect={async () => {
+                  setNotionError(null);
+                  setNotionBusy(true);
+                  try {
+                    await api.disconnectOAuthMcp("notion");
+                    if (onRefreshConfig) await onRefreshConfig();
+                  } catch (err) {
+                    setNotionError(
+                      err instanceof Error ? err.message : String(err),
+                    );
+                  } finally {
+                    setNotionBusy(false);
+                  }
+                }}
+              />
+            ) : null
+          }
         />
       )}
       {drawer === "model" && config && activeTask && (

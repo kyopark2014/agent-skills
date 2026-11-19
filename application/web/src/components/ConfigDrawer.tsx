@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 
 interface Props {
@@ -9,6 +9,7 @@ interface Props {
   mode?: "multi" | "single";
   onChange: (next: string[]) => void;
   onClose: () => void;
+  footer?: ReactNode;
 }
 
 const MENU_GAP = 8;
@@ -22,6 +23,7 @@ export function ConfigDrawer({
   mode = "multi",
   onChange,
   onClose,
+  footer,
 }: Props) {
   const menuRef = useRef<HTMLDivElement>(null);
   const [position, setPosition] = useState<{
@@ -59,7 +61,7 @@ export function ConfigDrawer({
 
   useLayoutEffect(() => {
     updatePosition();
-  }, [anchorEl, options.length]);
+  }, [anchorEl, options.length, footer]);
 
   useEffect(() => {
     if (!anchorEl) return;
@@ -139,6 +141,7 @@ export function ConfigDrawer({
           })
         )}
       </div>
+      {footer ? <div className="config-popover-footer">{footer}</div> : null}
     </div>,
     document.body,
   );
