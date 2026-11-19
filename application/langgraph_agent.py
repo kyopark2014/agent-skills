@@ -168,6 +168,94 @@ def _public_url_for_key(key: str) -> str:
     return f"{base}/{quoted}"
 
 
+_ARTIFACT_PRESIGN_GET_EXPIRES = 12 * 3600  # 12h; capped by IAM role temp-cred lifetime
+_ARTIFACT_S3_HEAD_TIMEOUT_SEC = 10.0
+_ARTIFACT_S3_HEAD_INTERVAL_SEC = 0.25
+
+
+def _nfc_s3_key(key: str) -> str:
+    """Compose Hangul in each path segment so viewer NFC lookups match."""
+    parts = [unicode_paths.nfc(part) for part in (key or "").split("/") if part]
+    return "/".join(parts)
+
+
+def _s3_client(region: str | None = None):
+    import boto3
+
+    return boto3.client("s3", region_name=region or config.get("region", "us-west-2"))
+
+
+def _s3_client_for_presign(region: str | None = None):
+    """Regional virtual-hosted S3 client for browser-safe presigned URLs."""
+    import boto3
+    from botocore.config import Config
+
+    resolved_region = region or config.get("region", "us-west-2")
+    return boto3.client(
+        service_name="s3",
+        region_name=resolved_region,
+        endpoint_url=f"https://s3.{resolved_region}.amazonaws.com",
+        config=Config(
+            signature_version="s3v4",
+            s3={"addressing_style": "virtual"},
+        ),
+    )
+
+
+def _wait_for_s3_object(
+    s3,
+    *,
+    bucket: str,
+    key: str,
+    timeout_sec: float = _ARTIFACT_S3_HEAD_TIMEOUT_SEC,
+    interval_sec: float = _ARTIFACT_S3_HEAD_INTERVAL_SEC,
+) -> None:
+    """Poll head_object until the key is visible via the S3 API."""
+    from botocore.exceptions import ClientError
+
+    deadline = time.monotonic() + max(0.0, timeout_sec)
+    last_error: Exception | None = None
+    while True:
+        try:
+            s3.head_object(Bucket=bucket, Key=key)
+            return
+        except ClientError as exc:
+            last_error = exc
+            code = (exc.response.get("Error") or {}).get("Code", "")
+            if code not in {"404", "NoSuchKey", "NotFound"}:
+                raise
+        if time.monotonic() >= deadline:
+            break
+        time.sleep(max(0.05, interval_sec))
+    if last_error is not None:
+        raise RuntimeError(
+            f"S3 object not visible after put_object: s3://{bucket}/{key}"
+        ) from last_error
+    raise RuntimeError(f"S3 object not visible after put_object: s3://{bucket}/{key}")
+
+
+def _presigned_get_url_for_key(
+    key: str,
+    *,
+    expires_in: int = _ARTIFACT_PRESIGN_GET_EXPIRES,
+) -> str | None:
+    """Return a short-lived S3 GET URL, or None if signing fails."""
+    s3_bucket = config.get("s3_bucket")
+    if not s3_bucket or not key:
+        return None
+    try:
+        s3 = _s3_client_for_presign()
+        return s3.generate_presigned_url(
+            ClientMethod="get_object",
+            Params={"Bucket": s3_bucket, "Key": key},
+            ExpiresIn=max(60, int(expires_in)),
+            HttpMethod="GET",
+        )
+    except Exception:
+        logger.warning("presigned GET failed for key=%s", key, exc_info=True)
+        return None
+
+
 def _s3_key_for_upload(filepath: str, full_path: str) -> str:
     """Map a local file onto ``artifacts|images|docs/{user_id}/...`` S3 key."""
     normalized = _strip_to_allowed_prefix(
@@ -239,9 +327,11 @@ def _workspace_mount_object_key(full_path: str) -> str | None:
 
 
 def _upload_file_to_project_s3(filepath: str, full_path: str | None = None) -> str:
-    """Upload a local file to the project S3 bucket; return the object key."""
-    import boto3
+    """Upload a local file to the project S3 bucket; return the object key.
 
+    Always calls put_object so /api/artifacts/view can see the object immediately.
+    Mount presence alone is not enough (S3 Files sync can lag the S3 API).
+    """
     s3_bucket = config.get("s3_bucket")
     if not s3_bucket:
         raise RuntimeError("S3 bucket is not configured.")
@@ -253,8 +343,8 @@ def _upload_file_to_project_s3(filepath: str, full_path: str | None = None) -> s
     key = _s3_key_for_upload(filepath, resolved)
     mount_key = _workspace_mount_object_key(resolved)
     if mount_key and "/artifacts/" in mount_key and _is_publishable_s3_key(mount_key):
-        logger.info("artifact already on workspace mount: %s", mount_key)
-        return mount_key
+        key = mount_key
+    key = _nfc_s3_key(key)
     if not _is_publishable_s3_key(key):
         raise ValueError(
             "Upload rejected: S3 key must be images/, docs/, artifacts/, "
@@ -262,24 +352,27 @@ def _upload_file_to_project_s3(filepath: str, full_path: str | None = None) -> s
         )
 
     content_type = utils.get_contents_type(key)
-    s3 = boto3.client("s3", region_name=config.get("region", "us-west-2"))
+    if content_type == "no info":
+        content_type = "application/octet-stream"
+    s3 = _s3_client()
     with open(resolved, "rb") as f:
-        s3.put_object(
-            Bucket=s3_bucket,
-            Key=key,
-            Body=f.read(),
-            ContentType=content_type,
-        )
-    logger.info("uploaded artifact to s3://%s/%s", s3_bucket, key)
+        body = f.read()
+    s3.put_object(
+        Bucket=s3_bucket,
+        Key=key,
+        Body=body,
+        ContentType=content_type,
+    )
+    _wait_for_s3_object(s3, bucket=s3_bucket, key=key)
+    logger.info("uploaded artifact to s3://%s/%s (%s bytes)", s3_bucket, key, len(body))
     return key
 
 
 def _ensure_artifacts_uploaded(relative_paths: list) -> None:
     """Push newly created artifact files to project S3 when sharing_url is set.
 
-    Local files live under ``.session_storage/{user}/artifacts/``. CloudFront
-    serves the project S3 bucket (``artifacts/{user}/...``), so UI URLs 403
-    unless we also put_object there before returning sharing_url links.
+    Always put_object so CloudFront and /api/artifacts/view see
+    ``{user}/artifacts/…`` without waiting for mount→S3 API sync.
     """
     if not sharing_url or not config.get("s3_bucket"):
         return
@@ -980,27 +1073,40 @@ def read_file(filepath: str) -> str:
 
 @tool
 def upload_file_to_s3(filepath: str) -> str:
-    """Upload a local file to S3 and return the download URL.
+    """Upload a local file to S3 and return view/download URLs.
 
     Args:
         filepath: Absolute path, or a path under artifacts/ (mapped to the
             active user's ARTIFACTS_DIR). Examples:
             'artifacts/report.pdf', ARTIFACTS_DIR + '/report.pdf'.
-            Uploaded object key is artifacts/{user_id}/...
+            Uploaded object key is {user_id}/artifacts/...
 
     Returns:
-        The download URL, or an error message.
+        Stable View URL (CloudFront; UI rewrites .md/.json/.csv to the in-app
+        viewer) plus a short-lived Download presigned GET URL, or an error.
     """
     logger.info(f"###### upload_file_to_s3: {filepath} ######")
     try:
         key = _upload_file_to_project_s3(filepath)
+        lines = ["Upload complete."]
         if sharing_url:
-            return f"Upload complete: {_public_url_for_key(key)}"
-        s3_bucket = config.get("s3_bucket")
-        return (
-            "Upload complete: "
-            f"{chat.s3_uri_to_console_url(f's3://{s3_bucket}/{key}', config.get('region', 'us-west-2'))}"
+            lines.append(f"View: {_public_url_for_key(key)}")
+        else:
+            s3_bucket = config.get("s3_bucket")
+            lines.append(
+                "View: "
+                f"{chat.s3_uri_to_console_url(f's3://{s3_bucket}/{key}', config.get('region', 'us-west-2'))}"
+            )
+        download_url = _presigned_get_url_for_key(key)
+        if download_url:
+            lines.append(
+                f"Download (expires in {_ARTIFACT_PRESIGN_GET_EXPIRES}s): {download_url}"
+            )
+        lines.append(
+            "For .md/.json/.csv prefer the View URL in the reply "
+            "(in-app viewer). Use Download for direct file save."
         )
+        return "\n".join(lines)
     except Exception as e:
         return f"Upload failed: {str(e)}"
 
@@ -1652,6 +1758,13 @@ def load_multiple_mcp_server_parameters(mcp_json: dict):
                         region=config.get("auth_region", "us-west-2"),
                         service=config.get("auth_service", "bedrock-agentcore"),
                     )
+                elif config.get("auth_type") == "notion_bearer":
+                    try:
+                        from application import notion_bearer_auth
+                    except ImportError:
+                        import notion_bearer_auth  # type: ignore
+
+                    connection["auth"] = notion_bearer_auth.NotionBearerAuth()
                 server_info[server_name] = connection
             else:
                 command = config.get("command", "")
