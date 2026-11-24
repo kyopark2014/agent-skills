@@ -1335,6 +1335,318 @@ BASE_SYSTEM_PROMPT = (
 
 MAX_CONTEXT_TURNS = 5
 
+
+# Cap ToolMessage payloads before they enter LLM context / checkpointer.
+# Char-based (deterministic, no tokenizer on the hot path). Prevents web_fetch
+# get_raw_text and similar MCP tools from blowing past the ~1M model window.
+# Oversized results are LLM-summarized first; hard truncate is the fallback.
+TOOL_RESULT_MAX_CHARS = 32_000
+TOOL_RESULTS_TURN_MAX_CHARS = 120_000
+# Chunk size for map-reduce summarization (must fit summarizer context).
+TOOL_RESULT_SUMMARY_CHUNK_CHARS = 60_000
+# Prefer a compact summary; still hard-capped by per_result_max / budget.
+TOOL_RESULT_SUMMARY_TARGET_CHARS = 8_000
+_TOOL_RESULT_SUMMARY_MARKER = "[summarized tool result:"
+
+
+def _tool_content_to_text(content) -> str:
+    """Normalize ToolMessage.content to a single string for size checks."""
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for item in content:
+            if isinstance(item, dict):
+                if "text" in item:
+                    parts.append(str(item["text"]))
+                elif "content" in item:
+                    parts.append(str(item["content"]))
+                else:
+                    parts.append(str({k: v for k, v in item.items() if k != "id"}))
+            else:
+                parts.append(str(item))
+        return "\n".join(parts)
+    return str(content)
+
+
+def truncate_tool_result_text(
+    content: str,
+    *,
+    max_chars: int = TOOL_RESULT_MAX_CHARS,
+    budget_remaining: int | None = None,
+) -> str:
+    """Hard-cap a single tool result; leave a short notice when truncated."""
+    if not content:
+        return content
+    limit = max_chars
+    if budget_remaining is not None:
+        limit = min(limit, max(0, budget_remaining))
+    if len(content) <= limit:
+        return content
+    if limit <= 0:
+        # Stay within budget strictly (no notice that would push past 0).
+        return ""
+    # Reserve room for the notice so total stays within limit when possible.
+    notice_template = (
+        "\n\n…[truncated tool result: kept {kept}/{total} chars "
+        "(~{pct}%). Ask for a narrower URL/section if you need more.]"
+    )
+    # Estimate notice length with actual digits.
+    sample = notice_template.format(
+        kept=limit, total=len(content), pct=100
+    )
+    kept = max(0, limit - len(sample))
+    notice = notice_template.format(
+        kept=kept,
+        total=len(content),
+        pct=max(1, 100 * kept // max(len(content), 1)),
+    )
+    # If notice alone exceeds limit, return a short hard notice.
+    if len(notice) >= limit:
+        short = f"…[truncated: 0/{len(content)} chars]"
+        return short[:limit] if len(short) > limit else short
+    kept = max(0, limit - len(notice))
+    return content[:kept] + notice
+
+
+def _chunk_text_for_summary(text: str, chunk_chars: int) -> list[str]:
+    """Split text into chunks; prefer paragraph/line boundaries when possible."""
+    if chunk_chars <= 0 or len(text) <= chunk_chars:
+        return [text] if text else []
+    chunks: list[str] = []
+    start = 0
+    n = len(text)
+    while start < n:
+        end = min(start + chunk_chars, n)
+        if end < n:
+            window = text[start:end]
+            # Prefer breaking at a blank line, else newline, else space.
+            break_at = window.rfind("\n\n")
+            if break_at < chunk_chars // 2:
+                break_at = window.rfind("\n")
+            if break_at < chunk_chars // 2:
+                break_at = window.rfind(" ")
+            if break_at >= chunk_chars // 2:
+                end = start + break_at + 1
+        chunks.append(text[start:end])
+        start = end
+    return chunks
+
+
+def _llm_summarize_tool_chunk(
+    text: str,
+    *,
+    target_chars: int,
+    tool_name: str | None = None,
+    part_label: str | None = None,
+) -> str:
+    """Single LLM call to summarize one tool-result chunk."""
+    from langchain_core.prompts import ChatPromptTemplate
+
+    tool_label = tool_name or "unknown_tool"
+    part = f" ({part_label})" if part_label else ""
+    system = (
+        "You compress tool output for an AI agent's context window.\n"
+        "Preserve: errors, file paths, URLs, key numbers, code identifiers, "
+        "conclusions, and actionable details the agent needs next.\n"
+        "Drop: boilerplate, repeated tables, navigation chrome, raw HTML/CSS/JS "
+        "noise, and redundant whitespace.\n"
+        f"Write the summary in the same language as the content when clear; "
+        f"otherwise Korean is fine.\n"
+        f"Hard limit: under {target_chars} characters. Reply with the summary only."
+    )
+    human = (
+        f"Tool: {tool_label}{part}\n"
+        f"Original length: {len(text)} chars\n\n"
+        f"<tool_result>\n{text}\n</tool_result>"
+    )
+    prompt = ChatPromptTemplate.from_messages(
+        [("system", system), ("human", "{payload}")]
+    )
+    llm = chat.get_chat()
+    result = (prompt | llm).invoke({"payload": human})
+    summary = chat._content_to_text(getattr(result, "content", result)).strip()
+    if not summary:
+        raise RuntimeError("empty tool-result summary from LLM")
+    return summary
+
+
+def summarize_oversized_tool_result(
+    content: str,
+    *,
+    target_chars: int = TOOL_RESULT_SUMMARY_TARGET_CHARS,
+    tool_name: str | None = None,
+    chunk_chars: int = TOOL_RESULT_SUMMARY_CHUNK_CHARS,
+) -> str | None:
+    """Summarize an oversized tool result (chunked map-reduce). None on failure.
+
+    Already-summarized payloads (marker present) are not re-summarized.
+    """
+    if not content or len(content) <= target_chars:
+        return content if content else None
+    if content.lstrip().startswith(_TOOL_RESULT_SUMMARY_MARKER):
+        return None
+
+    try:
+        chunks = _chunk_text_for_summary(content, chunk_chars)
+        if not chunks:
+            return None
+
+        if len(chunks) == 1:
+            summary = _llm_summarize_tool_chunk(
+                chunks[0], target_chars=target_chars, tool_name=tool_name
+            )
+        else:
+            partials: list[str] = []
+            for i, chunk in enumerate(chunks, 1):
+                partials.append(
+                    _llm_summarize_tool_chunk(
+                        chunk,
+                        target_chars=target_chars,
+                        tool_name=tool_name,
+                        part_label=f"part {i}/{len(chunks)}",
+                    )
+                )
+            merged = "\n\n".join(partials)
+            if len(merged) > target_chars:
+                summary = _llm_summarize_tool_chunk(
+                    merged,
+                    target_chars=target_chars,
+                    tool_name=tool_name,
+                    part_label="merged parts",
+                )
+            else:
+                summary = merged
+
+        header = (
+            f"{_TOOL_RESULT_SUMMARY_MARKER} {len(content)}→{len(summary)} chars"
+            f"{f', tool={tool_name}' if tool_name else ''}]\n\n"
+        )
+        wrapped = header + summary
+        if len(wrapped) > target_chars:
+            # Keep header; trim body so callers stay within budget.
+            body_budget = max(0, target_chars - len(header))
+            wrapped = header + summary[:body_budget]
+        return wrapped
+    except Exception:
+        logger.warning(
+            "tool result summarization failed (tool=%s, chars=%s); "
+            "will hard-truncate",
+            tool_name,
+            len(content),
+            exc_info=True,
+        )
+        return None
+
+
+def _reduce_tool_result_text(
+    text: str,
+    *,
+    max_chars: int,
+    budget_remaining: int,
+    tool_name: str | None = None,
+    summarize: bool = True,
+) -> tuple[str, str]:
+    """Reduce oversized tool text. Returns (text, method) method in
+    {unchanged, summarized, truncated}."""
+    limit = min(max_chars, max(0, budget_remaining))
+    if len(text) <= limit:
+        return text, "unchanged"
+
+    if summarize and limit > 0:
+        # Aim for a compact summary, but never above the remaining hard limit.
+        target = min(TOOL_RESULT_SUMMARY_TARGET_CHARS, limit)
+        # Skip LLM when the remaining budget is too small to be useful.
+        if target >= 256:
+            summary = summarize_oversized_tool_result(
+                text, target_chars=target, tool_name=tool_name
+            )
+            if summary is not None:
+                if len(summary) > limit:
+                    summary = truncate_tool_result_text(
+                        summary, max_chars=limit, budget_remaining=limit
+                    )
+                return summary, "summarized"
+
+    capped = truncate_tool_result_text(
+        text, max_chars=max_chars, budget_remaining=budget_remaining
+    )
+    if len(capped) > budget_remaining:
+        capped = capped[: max(0, budget_remaining)]
+    return capped, "truncated"
+
+
+def cap_tool_messages(
+    messages: list,
+    *,
+    per_result_max: int = TOOL_RESULT_MAX_CHARS,
+    turn_max: int = TOOL_RESULTS_TURN_MAX_CHARS,
+    summarize: bool = True,
+) -> list:
+    """Cap ToolMessage contents: summarize oversized results, else hard-truncate.
+
+    Enforces a per-turn aggregate budget. ``summarize=False`` forces truncate-only
+    (useful in unit tests).
+    """
+    if not messages:
+        return messages
+    budget = turn_max
+    out: list = []
+    for msg in messages:
+        if not isinstance(msg, ToolMessage):
+            out.append(msg)
+            continue
+        text = _tool_content_to_text(msg.content)
+        name = getattr(msg, "name", None)
+        if budget <= 0:
+            capped = (
+                f"…[truncated tool result: kept 0/{len(text)} chars "
+                "(turn tool-result budget exhausted)]"
+            )
+            method = "truncated"
+        else:
+            capped, method = _reduce_tool_result_text(
+                text,
+                max_chars=per_result_max,
+                budget_remaining=budget,
+                tool_name=name,
+                summarize=summarize,
+            )
+        if capped != text:
+            logger.info(
+                "tool result %s: tool_call_id=%s %s→%s chars "
+                "(per_result_max=%s turn_budget_left=%s)",
+                method,
+                getattr(msg, "tool_call_id", None),
+                len(text),
+                len(capped),
+                per_result_max,
+                budget,
+            )
+        if budget > 0:
+            budget = max(0, budget - len(capped))
+        kwargs = {"content": capped, "tool_call_id": msg.tool_call_id}
+        if name:
+            kwargs["name"] = name
+        out.append(ToolMessage(**kwargs))
+    return out
+
+
+def _cap_tool_node_result(result, *, summarize: bool = True):
+    """Apply tool-result caps to a ToolNode return value ({messages: [...]})."""
+    if not isinstance(result, dict):
+        return result
+    msgs = result.get("messages")
+    if not msgs:
+        return result
+    capped = cap_tool_messages(list(msgs), summarize=summarize)
+    updated = dict(result)
+    updated["messages"] = capped
+    return updated
+
+
 # Bedrock Anthropic/Nova prompt caching (ephemeral, 1h TTL).
 PROMPT_CACHE_CONTROL = {"type": "ephemeral", "ttl": "1h"}
 
@@ -1522,6 +1834,9 @@ async def call_model(state: State, config):
             else:
                 messages.append(msg)
 
+        # Cap again so older checkpointer payloads cannot blow the window.
+        messages = cap_tool_messages(messages)
+
         max_turns = (
             config.get("configurable", {}).get("max_turns")
             or config.get("max_turns")
@@ -1671,9 +1986,10 @@ async def _action_node(state: State, config, tool_node: ToolNode):
     try:
         while True:
             try:
-                return await asyncio.wait_for(
+                result = await asyncio.wait_for(
                     asyncio.shield(invoke_task), timeout=0.25
                 )
+                return _cap_tool_node_result(result)
             except asyncio.TimeoutError:
                 if run_cancel.is_cancelled(cancel_id):
                     logger.info(
